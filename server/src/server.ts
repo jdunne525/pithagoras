@@ -23,6 +23,7 @@ import {
   updateSession,
 } from "./db.js";
 import { checkWorkspace, isWithin, workspaceRoot } from "./workspaces.js";
+import { DATA_DIR } from "./data-dir.js";
 import { agentHomePath } from "./agent-home.js";
 import { agentHome, resolveChannelSession } from "./agent.js";
 import {
@@ -113,7 +114,7 @@ const PORT = Number(process.env.PORT || 4100);
  */
 const REPLAY_EVENTS = 1_200;
 /** Persistent place for CLIs, kept on PATH so pi and its tools can reach them. */
-const BIN_DIR = path.resolve(process.env.BIN_DIR || "/data/bin");
+const BIN_DIR = path.resolve(process.env.BIN_DIR || path.join(DATA_DIR, "bin"));
 
 // Everything the portal starts carries this, and keeps it when it is detached:
 // it is how a background job is known to be the agent's. See background.ts.

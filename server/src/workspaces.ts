@@ -4,8 +4,27 @@ import { agentHomePath } from "./agent-home.js";
 
 /** Where projects live. WORKSPACE_ROOT is the new name; WORKSPACES_DIR still works for existing deploys. */
 export function workspaceRoot(): string {
-  return path.resolve(process.env.WORKSPACE_ROOT || process.env.WORKSPACES_DIR || "/workspaces");
+  const root = path.resolve(process.env.WORKSPACE_ROOT || process.env.WORKSPACES_DIR || "/workspaces");
+  try {
+    return realpathSync(root);
+  } catch {
+    return root;
+  }
 }
+
+const samePath = (a: string, b: string) => {
+  if (process.platform === "win32") return a.toLowerCase() === b.toLowerCase();
+  return a === b;
+};
+
+const inside = (parent: string, child: string) => {
+  if (process.platform === "win32") {
+    const p = parent.toLowerCase();
+    const c = child.toLowerCase();
+    return c === p || c.startsWith(p.endsWith(path.sep) ? p : p + path.sep);
+  }
+  return child === parent || child.startsWith(parent.endsWith(path.sep) ? parent : parent + path.sep);
+};
 
 /**
  * Where a chat or a routine may run: Home — the agent's own directory — or
@@ -16,9 +35,9 @@ export function checkWorkspace(raw: string): { path: string } | { error: string 
   const home = agentHomePath();
   const root = workspaceRoot();
   const resolved = path.isAbsolute(raw) ? path.resolve(raw) : path.join(root, raw);
-  if (resolved === home) return { path: home };
+  if (samePath(resolved, home)) return { path: home };
   // Keep pi inside the mounted workspace area — no escaping to the rest of the FS.
-  if (resolved !== root && !resolved.startsWith(root + path.sep)) {
+  if (!inside(root, resolved)) {
     return { error: "workspace must be inside the workspace root" };
   }
   if (!existsSync(resolved)) return { error: "workspace does not exist" };
@@ -29,7 +48,7 @@ export function checkWorkspace(raw: string): { path: string } | { error: string 
     // passes it while leading anywhere. Where it really points must be inside too.
     const real = realpathSync(resolved);
     const realRoot = realpathSync(root);
-    if (real !== realRoot && !real.startsWith(realRoot + path.sep)) {
+    if (!inside(realRoot, real)) {
       return { error: "workspace must be inside the workspace root" };
     }
     // A file would be taken as far as the launch, and every run would fail there.
@@ -54,7 +73,6 @@ export function placeProblem(workspace: string | null): string | null {
  */
 export function isWithin(dir: string, where: string | null): boolean {
   if (!where) return false;
-  const inside = (d: string, w: string) => w === d || w.startsWith(d + path.sep);
   if (inside(dir, where)) return true;
   try {
     return inside(realpathSync(dir), realpathSync(where));

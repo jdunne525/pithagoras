@@ -1,3 +1,7 @@
+try {
+  process.loadEnvFile?.();
+} catch {}
+
 /**
  * Where the portal keeps its database and what belongs with it.
  *

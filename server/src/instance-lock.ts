@@ -44,6 +44,24 @@ const answered = (address: string) =>
 export async function holdDataDir(dir: string): Promise<boolean> {
   mkdirSync(dir, { recursive: true });
   const real = realpathSync(dir);
+  if (process.platform === "win32") {
+    const pipe = `\\\\.\\pipe\\pithagoras-${createHash("sha256").update(real.toLowerCase()).digest("hex").slice(0, 32)}`;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const server = net.createServer((socket) => socket.destroy());
+      try {
+        await listen(server, pipe);
+        server.unref();
+        held = server;
+        return true;
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "EADDRINUSE") throw e;
+        if (await answered(pipe)) return false;
+        if (attempt > 0) throw e;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
+    return false;
+  }
   const file = path.join(real, "portal.sock");
   const named = `\0pithagoras-${createHash("sha256").update(real).digest("hex").slice(0, 32)}`;
   // 108 bytes on Linux, the ending NUL included.

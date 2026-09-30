@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import path from "node:path";
+import { DATA_DIR } from "../data-dir.js";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
@@ -69,7 +70,7 @@ export interface BrokenChannel {
 
 /** Where third-party packages are installed. Builtins ship inside the image. */
 export const channelsDir = (): string => {
-  const dir = path.resolve(process.env.CHANNELS_DIR || "/data/channels");
+  const dir = path.resolve(process.env.CHANNELS_DIR || path.join(DATA_DIR, "channels"));
   mkdirSync(dir, { recursive: true });
   return dir;
 };

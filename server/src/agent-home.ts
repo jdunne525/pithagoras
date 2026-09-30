@@ -1,5 +1,6 @@
 import { mkdirSync } from "node:fs";
 import path from "node:path";
+import { DATA_DIR } from "./data-dir.js";
 
 /**
  * The agent's fixed working directory, separate from the per-task workspaces.
@@ -18,5 +19,5 @@ export function agentHome(): string {
 
 /** Where Home is, without making sure it is there: for comparing a path with it. */
 export function agentHomePath(): string {
-  return path.resolve(process.env.AGENT_HOME || "/data/agent-home");
+  return path.resolve(process.env.AGENT_HOME || path.join(DATA_DIR, "agent-home"));
 }
