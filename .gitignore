@@ -20,3 +20,4 @@ playwright-report/
 test-results/
 xscm.scm
 *.bak
+*.pem

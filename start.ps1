@@ -81,6 +81,22 @@ if (Test-Path ".env") {
     }
 }
 
+# 5.1 Stop any previously running server on this port
+#     (otherwise a restart crashes with EADDRINUSE)
+try {
+    $existing = Get-NetTCPConnection -LocalPort ([int]$port) -State Listen -ErrorAction Stop
+} catch {
+    $existing = @()
+}
+foreach ($conn in $existing) {
+    try {
+        Write-Host "Stopping existing Pithagoras server on :$port (PID $($conn.OwningProcess))..." -ForegroundColor Yellow
+        Stop-Process -Id $conn.OwningProcess -Force -ErrorAction Stop
+    } catch {
+        Write-Warning "Could not stop PID $($conn.OwningProcess) (still in use?): $($_.Exception.Message)"
+    }
+}
+
 $url = "http://localhost:$port"
 Write-Host "`nPithagoras will be available at: " -NoNewline
 Write-Host $url -ForegroundColor Green
