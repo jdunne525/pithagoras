@@ -18,3 +18,7 @@ web/public/voice-assets/
 
 playwright-report/
 test-results/
+xscm.scm
+*.bak
+*.pem
+*.orig
