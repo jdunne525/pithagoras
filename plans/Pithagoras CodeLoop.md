@@ -1,6 +1,6 @@
 # Pithagoras Projects + Autonomous Tasks
 
-Implement the first version of a Project/Task workflow in Pithagoras.
+Implement the first version of a Project/Task workflow in Pithagoras, incorporating the relevant autonomous-task behavior from CodeLoop while using Pithagoras's existing architecture and UI conventions.
 
 The existing Pithagoras architecture has already been investigated. Use the source code as authoritative, particularly:
 
@@ -27,28 +27,6 @@ The existing Pithagoras Project is already a filesystem folder under the workspa
 
 ---
 
-# CodeLoop as the Behavioral Reference
-
-The CodeLoop repository is available to the agent and should be treated as the authoritative reference implementation for the autonomous task/project behavior being added to Pithagoras.
-Before implementing each major subsystem, inspect the corresponding CodeLoop implementation in src/ to verify details rather than relying solely on the investigation summary. In particular, use CodeLoop to verify:
-task state transitions and retry semantics
-task/project persistence
-task queue ordering and selection
-process/attempt lifecycle
-completion-promise detection
-stop vs. failure behavior
-stale-task recovery after restart
-fresh-session behavior for retries
-project instructions and prompt construction
-task/session history
-plan/progress handling
-UI behavior where applicable
-Do not port CodeLoop's implementation architecture directly. Reimplement the behavior using Pithagoras primitives. For example, CodeLoop's Pi process management should map onto Pithagoras's SessionManager and executor abstraction, CodeLoop's JSON persistence should map onto Pithagoras's SQLite persistence, and CodeLoop's session/activity handling should map onto Pithagoras's existing durable event/session infrastructure.
-When the CodeLoop behavior and the existing Pithagoras architecture appear to conflict, first inspect both implementations and preserve the intended CodeLoop behavior while following Pithagoras's architectural conventions. Document any intentional behavioral difference in the implementation notes/tests.
-
-codeloop source can be found here if needed:
-G:\work\git\pi-ralph-one
-
 # 1. Target conceptual model
 
 The resulting application should conceptually look like:
@@ -56,20 +34,20 @@ The resulting application should conceptually look like:
 ```text
 Home
 │
-├── Projects
-│   ├── Project A
-│   │   ├── Chats
-│   │   ├── Tasks
-│   │   ├── Settings
-│   │   └── Files
++-- Projects
+│   +-- Project A
+│   │   +-- Chats
+│   │   +-- Tasks
+│   │   +-- Settings
+│   │   +-- Files
 │   │
-│   └── Project B
-│       ├── Chats
-│       ├── Tasks
-│       ├── Settings
-│       └── Files
+│   +-- Project B
+│       +-- Chats
+│       +-- Tasks
+│       +-- Settings
+│       +-- Files
 │
-└── existing filesystem/workspace experience
++-- existing filesystem/workspace experience
 ```
 
 The filesystem remains the actual workspace.
@@ -79,6 +57,27 @@ A Project references the existing folder/path rather than copying or replacing i
 Existing chats continue to work as chats.
 
 Tasks are a separate persistent concept.
+
+The important conceptual distinction is:
+
+```text
+Filesystem folder
+      │
+      +-- Project
+            │
+            +-- Chats
+            +-- Tasks
+            +-- Settings
+            +-- Files
+```
+
+The folder is the actual working directory.
+
+The Project is application-level metadata associated with that folder.
+
+A Chat remains a Pithagoras chat/session.
+
+A Task is a persistent unit of autonomous work.
 
 ---
 
@@ -102,6 +101,24 @@ The new functionality should sit on top of these systems wherever practical.
 
 Before making changes, understand the current Project UI and API sufficiently to preserve compatibility.
 
+The existing sidebar/navigation should remain the primary navigation mechanism.
+
+Tasks should be added as a new Project-level destination rather than adding individual Tasks to the sidebar.
+
+Conceptually:
+
+```text
+Project A
+  Chats
+  Tasks
+
+Project B
+  Chats
+  Tasks
+```
+
+Individual Tasks should not become navigation items.
+
 ---
 
 # 3. Project model
@@ -120,27 +137,6 @@ Do not move project files or create a duplicate workspace.
 
 Existing `AGENTS.md` behavior should remain unchanged.
 
-### Important distinction
-
-There are three related but distinct concepts:
-
-```text
-Filesystem folder
-      │
-      └── Project
-            ├── Chats
-            ├── Tasks
-            └── Settings
-```
-
-The folder is the actual working directory.
-
-The Project is application-level metadata associated with that folder.
-
-A Chat remains a Pithagoras chat/session.
-
-A Task is a persistent unit of autonomous work.
-
 ---
 
 # 4. Task model
@@ -151,8 +147,7 @@ At minimum a Task needs:
 
 * unique ID
 * project association
-* title
-* description
+* title/description
 * status
 * attempt count
 * created timestamp
@@ -203,11 +198,11 @@ The important relationship should be:
 ```text
 Task
   │
-  └── Attempt
+  +-- Attempt
         │
-        └── Pithagoras agent session
+        +-- Pithagoras agent session
                  │
-                 └── Pi execution
+                 +-- Pi execution
 ```
 
 The Task owns the lifecycle.
@@ -222,7 +217,7 @@ This allows the existing Pithagoras session infrastructure to continue doing wha
 
 A Task must be capable of being executed more than once.
 
-Each attempt should have its own agent execution/session rather than simply continuing the previous failed attempt.
+Each autonomous Task attempt should have its own agent execution/session rather than simply continuing a previous failed autonomous attempt.
 
 The exact persistence representation should follow the existing SQLite architecture rather than introducing JSON files or another persistence system.
 
@@ -230,9 +225,9 @@ Prefer a small relational model that allows:
 
 ```text
 Task
- ├── Attempt 1 → Session
- ├── Attempt 2 → Session
- └── Attempt 3 → Session
+ +-- Attempt 1 → Session
+ +-- Attempt 2 → Session
+ +-- Attempt 3 → Session
 ```
 
 The existing session/event infrastructure should remain responsible for the actual conversation history.
@@ -241,7 +236,7 @@ Do not duplicate Pi transcripts into the Task database.
 
 The Task model should reference the execution/session records it owns.
 
-The UI should eventually be able to show that a Task has multiple attempts and allow the user to inspect their execution history.
+The UI should be able to show that a Task has multiple attempts and allow the user to inspect their execution history.
 
 ---
 
@@ -260,14 +255,14 @@ running → stopped
 running → failed
 
 failed  → pending   (rerun)
-stopped → pending   (resume/rerun)
+stopped → pending   (rerun)
 ```
 
 A Task should remain persistent when execution stops or fails.
 
 Do not delete or replace the Task when it is rerun.
 
-Increment its attempt count and create a new execution/session.
+Increment its attempt count and create a new autonomous execution/session.
 
 The exact retry/completion mechanism should be implemented separately from the Task persistence model so it can evolve.
 
@@ -277,7 +272,7 @@ The exact retry/completion mechanism should be implemented separately from the T
 
 The Task runner should be server-owned rather than browser-owned.
 
-Starting a Task from the UI should cause the server to take responsibility for its execution.
+Starting the Project Task loop from the UI should cause the server to take responsibility for processing eligible Tasks.
 
 The browser should only observe the Task and its associated session.
 
@@ -302,6 +297,10 @@ Browser
 ```
 
 Do not make the browser responsible for repeatedly submitting prompts.
+
+The Project-level Start/Stop control operates on the autonomous Task queue, not on the browser itself.
+
+Individual Tasks may also be manually started where appropriate.
 
 ---
 
@@ -330,7 +329,7 @@ The completion protocol should be isolated in its own implementation so the exac
 
 # 10. Retry behavior
 
-Initially support a configurable maximum number of attempts.
+Initially support a configurable maximum number of autonomous attempts.
 
 Conceptually:
 
@@ -340,17 +339,17 @@ Task starts
 Agent attempt
    ↓
 completion marker?
-   ├── yes → completed
-   └── no
+   +-- yes → completed
+   +-- no
         ↓
    attempts remaining?
-        ├── yes → new attempt
-        └── no → failed
+        +-- yes → new attempt
+        +-- no → failed
 ```
 
-Every new attempt should use a fresh agent session/context.
+Every new autonomous attempt should use a fresh agent session/context.
 
-Do not resume the previous failed conversation automatically.
+Do not automatically resume the previous failed conversation when performing an autonomous retry.
 
 The previous attempt remains available as history.
 
@@ -379,7 +378,58 @@ Reuse existing Pithagoras process/session cleanup rather than creating another p
 
 ---
 
-# 12. Restart/recovery
+# 12. Rerun, Resume, and Continue Conversation
+
+These operations should remain conceptually distinct.
+
+### Rerun
+
+Rerun means:
+
+> Start the Task again from scratch using a fresh autonomous execution/session.
+
+The previous attempt remains available as history.
+
+Rerunning should not reuse the failed/stopped attempt's conversational context.
+
+### Resume
+
+Resume means:
+
+> Return an existing Task to autonomous execution using the appropriate existing session/context where supported.
+
+This is distinct from a fresh Rerun.
+
+Before implementation, inspect the current CodeLoop behavior and the Pithagoras session-resume capabilities carefully. Do not assume CodeLoop's existing Resume implementation is identical to the desired Pithagoras behavior.
+
+If the intended Pithagoras Resume behavior is to continue the most recent session and inject a simple continuation instruction such as `resume`, implement that behavior explicitly rather than treating Resume as another Rerun.
+
+### Continue conversation
+
+The Task execution view should also provide a way for the user to continue interacting with the Task's agent session in a chat-like manner.
+
+This is a user conversation with the existing session, not an autonomous retry.
+
+Conceptually:
+
+```text
+Task
+ └-- Attempt
+       └-- Session
+            ├-- agent activity
+            ├-- tools
+            └-- user follow-up
+```
+
+A completed, stopped, or otherwise inspectable Task may therefore provide a chat-style input allowing the user to continue the associated conversation.
+
+This should reuse Pithagoras's existing chat/session mechanisms wherever practical.
+
+Do not conflate "Continue conversation" with "Rerun Task."
+
+---
+
+# 13. Restart/recovery
 
 Tasks must not be left permanently `running` if the server restarts or crashes.
 
@@ -396,7 +446,7 @@ running Task at server shutdown
         ↓
 execution/session becomes interrupted
         ↓
-Task becomes pending or stopped according to the chosen recovery semantics
+Task becomes pending or stopped according to chosen recovery semantics
         ↓
 user/server can run it again
 ```
@@ -405,7 +455,7 @@ Do not leave a Task permanently marked `running` when no execution exists.
 
 ---
 
-# 13. Project-specific Task instructions
+# 14. Project-specific Task instructions
 
 Add a Project-level setting for additional instructions that apply specifically to Tasks.
 
@@ -427,227 +477,280 @@ Keep this mechanism separate from the existing `AGENTS.md` file.
 
 ---
 
-# 14. Project UI
+# 15. Project navigation and Task UI
 
-Extend the existing Project UI rather than replacing it.
+Extend the existing Pithagoras Project navigation rather than replacing it.
 
-A Project should provide access to:
+The existing sidebar should continue to identify Projects/folders and provide their normal navigation.
+
+Each Project should expose at least:
 
 ```text
 Project
-├── Chats
-├── Tasks
-├── Settings
-└── Files
+  +-- Chats
+  +-- Tasks
 ```
 
-The exact visual design should follow existing Pithagoras components and styling.
+Other existing Project/file navigation remains available.
+
+Individual Tasks should NOT appear as individual sidebar entries.
+
+The user selects the Project's Tasks destination to enter the Task workspace.
+
+This avoids crowding the normal navigation with potentially large numbers of Tasks while keeping Tasks directly associated with their Project.
+
+The exact visual treatment should follow existing Pithagoras components, styling, navigation patterns, and responsive behavior.
 
 Do not build an entirely new application shell.
 
-The existing filesystem/folder browsing experience must remain available.
-
-A user should still be able to browse folders normally even if some folders are also Projects.
-
 ---
 
-# 15. Task UI
+# 16. Task workspace
 
-Add a Task area to a Project.
+The Task destination should be a dedicated Pithagoras page/workspace for managing and observing Tasks.
 
-The initial Task list should show:
-
-* title
-* status
-* attempt count
-* relevant timestamps
-
-Provide actions for:
-
-* create Task
-* open Task
-* start/run Task
-* stop Task
-* rerun failed/stopped Task
-
-Keep Chats and Tasks visibly distinct.
-
-Do not turn existing chat records into Tasks.
-
-### 15.1. Reference behavior for Task UI controls (from CodeLoop)
-
-Before designing Pithagoras's Task UI, inspect the CodeLoop UI implementation
-(`G:\work\git\pi-ralph-one\src\ui\app.js`, `index.html`, `style.css`) and its spec
-(`G:\work\git\pi-ralph-one\CodeLoop.md`, §7). The following captures the button
-names and lifecycle semantics that Pithagoras should reproduce (mapped onto
-Pithagoras primitives, not ported verbatim).
-
-#### Project-level controls (one set per project)
-
-* **Running / Stopped indicator** — a dot + text showing whether the project's
-  autonomous loop is currently executing.
-* **Start / Stop control button** — a single toggle labeled `Start` when idle
-  and `Stop` while running. Pressing it starts/stops the server-owned task loop
-  for the whole project queue (not a single task). While running it is shown as
-  a styled `btn-stop`; otherwise `btn-start`.
-* **Delete project (`🗑`)** — deletes the project and all its tasks (with
-  confirmation).
-
-#### Task list layout
-
-Each task row shows, left to right:
-
-* a drag handle (to reorder the active queue),
-* a status icon,
-* the description/title preview (clicking it opens the Edit Task modal),
-* a metadata row containing: timestamp(s), status text rendered with a
-  `status-<status>` class, a workflow badge (`full` / simple), and an attempt
-  badge,
-* a set of per-action buttons (see below),
-* a delete button (`×`).
-
-Status indicator (per status):
-
-> **Functional indicator, not a prescribed visual style.** The icons below are
-> only a compact way to convey a task's lifecycle state at a glance in the list.
-> They document *what state information the UI must communicate*; Pithagoras is
-> free to represent the same information any way that fits the existing Pithagoras
-> styling (color, text label, icon, etc.). Do not treat the specific glyphs as a
-> design requirement.
+The page should have two primary areas:
 
 ```text
-running   →  conveys "currently executing"
-completed →  conveys "finished successfully"
-failed    →  conveys "gave up after exhausting retries"
-stopped   →  conveys "halted by the user"
++-------------------------------------------------------+
+| Task queue / management                                |
+|                                                       |
+| pending / running / stopped / recently completed     |
+|                                                       |
+|-------------------------------------------------------|
+| Selected Task execution / conversation                |
+|                                                       |
+| agent activity / history / follow-up                  |
++-------------------------------------------------------+
 ```
 
-The attempt badge renders as `↻ n/max` (e.g. `↻ 2/5`) and gains a `warn`
-class/approach as the retry budget is nearly exhausted.
+The exact layout should follow existing Pithagoras UI conventions, but the conceptual separation should remain clear:
 
-The project view has sub-tabs:
+* the upper area manages the Task queue;
+* the lower area shows the selected Task and its execution.
 
-* **Tasks** — the active queue (`status !== 'completed'`).
-* **Completed** — finished tasks (`status === 'completed'`).
-* **Workflow** — edit project-level Task prompts/workflow (see §13 and the
-  simple/full workflow concept).
-
-#### Per-task action buttons
-
-These are the concrete controls a user can perform on an individual Task. The
-exact labels/icons used by CodeLoop are noted; Pithagoras should provide
-functionally equivalent actions (identical glyphs are not mandatory).
-
-| Action | CodeLoop control | Endpoint / effect | When relevant |
-|---|---|---|---|
-| **Edit task / revise** | Click the task description or row | Opens *Edit Task* modal: edit description, choose workflow (`simple` / `full`) | Always |
-| **Mark complete** | `✓` ("Mark as complete") | `PUT .../tasks/:id/complete` → marks `completed` (with confirm) | Any non-completed task |
-| **Rerun** | `↻` ("Re-run task") | `POST .../tasks/:id/rerun` → resets task to `{pending, attempts:0, startedAt:null, completedAt:null}` then lets the natural queue pick it up | failed / stopped / pending |
-| **Resume** | `▶` ("Resume session") | `POST .../tasks/:id/resume` → resets to `pending`, moves the task to the **front of the queue**, and immediately starts the loop | failed / stopped / pending |
-| **Reply / follow-up** | `↩` ("Reply to this task") | Creates a new follow-up task seeded with the original prompt plus a note to consult git history | any worked task |
-| **View session history** | *(built-in)* | Not a separate dialog — the task view's bottom pane shows the concatenated history of all attempts/sessions for the task (see "Attempt history" below) | any task with sessions |
-| **Delete** | `×` | `DELETE .../tasks/:id` (with confirm) | any task |
-
-##### Rerun vs. Resume (important distinction)
-
-Two closely related but different "run this work again" actions exist and must
-remain distinct in Pithagoras:
-
-1. **Rerun (`↻`)** — starts the task over from scratch: fresh context, attempt
-   counter reset to 0, queued normally (no priority). Use when the previous
-   attempt was wrong and you want a clean re-execution.
-2. **Resume (`▶`)** — (this description is different behavior from what is 
-presently in codeloop.) Resume the last session starting feim the same context.
-Inject a message to the agent with a simple message "resume". This is generally 
-used when a session has done a lot of thinking work that would otherwise be lost 
-by hitting the rerun button.
-
-#### Creating and editing tasks (chat-style input, not a modal)
-
-Rather than a dedicated modal dialog, Pithagoras should create and edit tasks
-through an input area modeled on the existing Pithagoras **chat interface**,
-styled so the user can immediately tell it is a task field and not a normal chat.
-This is a direction/constraint rather than a full spec — the exact markup should
-follow Pithagoras conventions.
-
-Requirements for this control:
-
-* **Looks like a chat input but reads as a task editor.** Reuse the familiar
-  chat-style text entry (placeholder, send button, etc.) but apply visible
-  styling that distinguishes it from ordinary chat — e.g. a distinct label/
-  header such as *New task* / *Edit task*, a different accent color or border,
-  and/or a subtle icon — so the intent is unambiguous.
-* **Create mode:** a single prompt where typing a description and sending creates
-  the task. Optionally allow choosing a workflow (`simple` / `full`) here; keep
-  it minimal so it does not feel like a separate form.
-* **Edit mode:** the same control pre-filled with the task's current
-  description (and workflow), used to revise the task.
-* **Workflow guard:** the workflow selector is **disabled while the task is
-  running**; editing a running task's workflow is rejected (CodeLoop returns
-  HTTP 409 with a message such as "Stop the running task before changing its
-  workflow, then resume it to apply the new workflow"). Changes take effect on
-  the next run/resume.
-* Sending in create mode creates the task; sending in edit mode saves the
-  revision. Both feed the same server endpoints as a modal submit would.
-
-#### Live execution / activity view
-
-* A project **Activity console** streams the currently executing task's session
-  incrementally (agent messages + tool calls: Bash/Edit/Write/Read/etc.),
-  preserving scroll position, via the existing SSE/session system.
-* It shows a status line such as `▶ <taskTitle>` while executing, an idle-running
-  state, or `Stopped`.
-
-#### Attempt history (in the task view bottom pane)
-
-Opening a task shows its execution in the task view's **bottom pane** (this is
-the normal task view, not a separate modal/dialog).
-
-* When a task is running, the bottom pane streams that attempt's session
-  incrementally (agent messages + tool calls: Bash/Edit/Write/Read/etc.) via the
-  existing SSE/session system, preserving scroll position.
-* When a task is not running — or when inspecting past work — the bottom pane
-  **concatenates the history of every session/attempt tied to the task**, in
-  chronological order, so the user can see what each retry did without opening
-  individual session files. There is no separate "Session Viewer" dialog and no
-  dedicated Raw JSONL view; the concatenated, parsed activity is sufficient.
-* Attempt count is surfaced via the `↻ n/max` badge. There is no per-attempt
-  diff/summary UI beyond the concatenated session contents themselves.
-
-#### Auto-retry (server-owned) vs. manual actions
-
-* **Auto-retry** happens server-side without browser involvement: when an
-  attempt exits without the completion marker and without an explicit stop, and
-  retries remain, the server re-queues the task (simple workflow) or restarts
-  the stage/workflow (full workflow) and spawns a fresh session each time.
-* **Manual** retry/resume/reply are user-initiated actions on top of that.
-* Every automated/manual attempt uses a **fresh session/context**; the previous
-  attempt is preserved only as history. Never reuse a prior failed conversation.
+The lower area should feel visually related to the existing Pithagoras chat/session experience rather than looking like a completely separate application.
 
 ---
 
-# 16. Task execution view
+# 17. Task queue
 
-Opening a running Task should show its current execution.
+The upper portion of the Task workspace is the Task management area.
 
-Reuse the existing Pithagoras agent activity/session rendering wherever practical.
+It should provide:
+
+* Task list
+* Task ordering/reordering
+* Task status
+* attempt information
+* creation
+* selection
+* appropriate lifecycle actions
+
+Tasks should be reorderable where queue ordering applies.
+
+The queue should provide a Project-level autonomous execution control:
+
+```text
+● Running    [Stop]
+```
+
+or:
+
+```text
+○ Stopped    [Start]
+```
+
+The control starts/stops the server-owned autonomous Task loop for the Project.
+
+It does not itself represent the execution state of an individual Task.
+
+Individual Task actions should be available where appropriate, such as:
+
+* Run
+* Stop
+* Rerun
+* Resume
+* Edit
+* Delete
+* Mark complete where appropriate
+
+Do not overload every Task row with unnecessary controls.
+
+Less-common actions may be placed in an overflow/context menu if that fits existing Pithagoras conventions.
+
+---
+
+# 18. Recently completed Tasks and Completed history
+
+The Task workspace should preserve the useful CodeLoop behavior where a newly completed Task does not immediately disappear from the user's active Task view.
+
+The normal Task view should contain:
+
+* pending Tasks
+* running Tasks
+* stopped Tasks
+* failed Tasks
+* recently completed Tasks that have not yet been acknowledged/cleared from the active view
+
+This allows the user to clearly see that a Task has just finished.
+
+Completed Tasks should also be available through a separate **Completed** view/tab containing completed Task history.
+
+Conceptually:
+
+```text
+[Tasks] [Completed]
+```
+
+The Tasks view might temporarily show:
+
+```text
+✓ Fix authentication       Completed
+● Add unit tests            Running
+○ Update documentation      Pending
+```
+
+After the completion has been acknowledged according to the CodeLoop behavior, the completed Task can move out of the active Tasks view and remain available through Completed.
+
+Before implementation, inspect the actual CodeLoop implementation to determine precisely what event constitutes this acknowledgment/transition. Do not invent a new definition without first checking CodeLoop.
+
+The exact visual indicator for completed Tasks is not prescribed. The UI only needs to make the lifecycle state obvious.
+
+---
+
+# 19. Task creation and editing
+
+Creating and editing Tasks should use a control modeled on the existing Pithagoras chat interface rather than introducing a generic form-heavy task-management UI.
+
+The control should:
+
+* look familiar to a Pithagoras user;
+* clearly communicate that it creates/edits a Task rather than sending a normal chat message;
+* support a Task description/prompt;
+* provide an obvious submit/send action;
+* optionally expose workflow-related settings where required.
+
+The exact markup, styling, icons, and placement should follow Pithagoras conventions.
+
+The task editor should not require a large modal unless existing Pithagoras patterns make that appropriate.
+
+For editing a Task, the existing description should be loaded into the same task-oriented input control.
+
+If workflow selection is implemented in the first version, changing the workflow of a running Task must be prevented.
+
+---
+
+# 20. Task execution view
+
+The lower portion of the Task workspace should show the selected Task's execution.
+
+It should resemble the existing Pithagoras chat/session experience.
+
+Conceptually:
+
+```text
+Task: Fix authentication
+
+Status: Running
+Attempt: 2/5
+
+────────────────────────────────────────
+
+Agent:
+I've located the authentication problem...
+
+Tool:
+Read src/auth.ts
+
+Tool:
+Edit src/auth.ts
+
+Agent:
+I'll run the tests now.
+
+Tool:
+npm test
+
+────────────────────────────────────────
+
+[ Continue conversation... ]       [Send]
+```
+
+The exact visual presentation should reuse the existing Pithagoras session/activity rendering wherever practical.
 
 The user should be able to see:
 
+* Task title/description
+* Task status
+* current attempt information
 * agent messages
 * tool activity
-* current execution state
-* Task status
+* execution state
+* previous execution history
 
-The Task view should not require a second implementation of Pi event rendering.
+Do not create a second implementation of Pi event rendering.
 
 Use the existing session event/SSE system.
 
-The Task should also expose previous attempts/history, using the underlying sessions rather than duplicating transcript data.
+---
+
+# 21. Task execution history
+
+The Task execution view should expose the history of the Task's attempts without requiring a separate Session Viewer dialog.
+
+A Task with multiple autonomous attempts should conceptually appear as:
+
+```text
+Task: Fix authentication
+
+──────── Attempt 1 ────────
+
+agent activity...
+tool activity...
+execution ended without completion
+
+
+──────── Attempt 2 ────────
+
+agent activity...
+tool activity...
+completion marker
+```
+
+When a Task is running, the current attempt should stream incrementally.
+
+When inspecting a completed, stopped, or failed Task, the view should be able to show the historical sessions associated with that Task in chronological order.
+
+The history should come from the existing Pithagoras sessions/events.
+
+Do not duplicate transcripts into the Task database.
+
+Do not create a dedicated Raw JSONL viewer for this feature.
 
 ---
 
-# 17. Backend/API
+# 22. Live execution/activity
+
+A running Task should stream activity through the existing Pithagoras SSE/session infrastructure.
+
+The browser should observe the server-owned execution rather than drive it.
+
+The Task view should preserve the existing activity-view behavior where practical, including appropriate scroll behavior.
+
+The project-level Task area may also indicate which Task is currently executing.
+
+For example:
+
+```text
+● Running — Fix authentication
+```
+
+The exact wording and styling should follow Pithagoras conventions.
+
+---
+
+# 23. Backend/API
 
 Add the minimum backend operations necessary for:
 
@@ -659,26 +762,30 @@ Add the minimum backend operations necessary for:
 * starting a Task
 * stopping a Task
 * rerunning a Task
+* resuming a Task/session where supported
+* continuing an associated session/conversation
 * retrieving Task execution/history information
+* acknowledging/transitioning recently completed Tasks if required by the CodeLoop behavior
 
 Follow the existing Express/API conventions.
 
 Do not prematurely create a large REST abstraction.
 
-Keep Task lifecycle logic in a dedicated server-side module/class rather than placing the orchestration directly inside route handlers.
+Keep Task lifecycle logic in a dedicated server-side module/class rather than placing orchestration directly inside route handlers.
 
 ---
 
-# 18. Persistence
+# 24. Persistence
 
 Use the existing SQLite database.
 
 Add the minimum schema required for:
 
-* Projects/Project metadata that cannot already be derived from the folder
+* Project metadata that cannot already be derived from the folder
 * Tasks
 * Task-to-session/attempt relationships
 * Task execution state
+* any minimal acknowledgment state required for recently completed Tasks
 
 Do not duplicate existing session event/history data.
 
@@ -690,7 +797,7 @@ Preserve all existing chat/session data.
 
 ---
 
-# 19. Concurrency
+# 25. Concurrency
 
 Do not initially assume Tasks must be globally serialized.
 
@@ -700,13 +807,234 @@ The Task runner should therefore use the existing session/executor model rather 
 
 If resource limits require restricting Task concurrency, isolate that policy from the Task model so it can be changed later.
 
+Project-level queue execution may naturally process Tasks according to their queue semantics, but this should not unnecessarily block ordinary Pithagoras chat sessions.
+
 ---
 
-# 20. Implementation phases
+# 26. CodeLoop as the behavioral reference
+
+The CodeLoop repository is available to the agent and should be treated as the authoritative reference implementation for the autonomous task/project behaviors being added to Pithagoras.
+
+Before implementing each major subsystem, inspect the corresponding CodeLoop implementation in `src/` to verify details rather than relying solely on the investigation summary.
+
+CodeLoop source:
+
+```text
+G:\work\git\pi-ralph-one
+```
+
+In particular, use CodeLoop to verify:
+
+* task state transitions
+* retry semantics
+* task/project persistence
+* task queue ordering and selection
+* process/attempt lifecycle
+* completion-promise/marker detection
+* stop vs. failure behavior
+* stale-task recovery after restart
+* fresh-session behavior for retries
+* project instructions and prompt construction
+* task/session history
+* plan/progress handling
+* Project-level queue controls
+* recently-completed-task behavior
+* Task editing behavior
+* Task execution/activity presentation
+* Resume vs. Rerun behavior
+* UI behavior where applicable
+
+Relevant CodeLoop UI/reference files include:
+
+```text
+G:\work\git\pi-ralph-one\src\ui\app.js
+G:\work\git\pi-ralph-one\src\ui\index.html
+G:\work\git\pi-ralph-one\src\ui\style.css
+G:\work\git\pi-ralph-one\CodeLoop.md
+```
+
+Do not port CodeLoop's implementation architecture directly.
+
+Reimplement the behavior using Pithagoras primitives.
+
+For example:
+
+* CodeLoop's Pi process management → Pithagoras `SessionManager` and executor abstraction
+* CodeLoop's JSON persistence → Pithagoras SQLite persistence
+* CodeLoop's session/activity handling → Pithagoras durable event/session infrastructure
+* CodeLoop's UI → Pithagoras existing navigation, components, styling, and session/activity rendering
+
+When CodeLoop behavior and the existing Pithagoras architecture appear to conflict, first inspect both implementations and preserve the intended CodeLoop behavior while following Pithagoras's architectural conventions.
+
+Document any intentional behavioral difference in implementation notes/tests.
+
+Do not treat CodeLoop's visual markup, CSS, component structure, or navigation architecture as something to copy.
+
+CodeLoop is primarily the behavioral reference; Pithagoras remains the UI and architectural host.
+
+---
+
+# 27. Important architectural rules
+
+Throughout implementation:
+
+1. **Do not create a second Project concept.**
+   Extend the existing filesystem-based Project.
+
+2. **Do not replace the filesystem UI.**
+   Projects are an additional application layer over existing folders.
+
+3. **Do not put individual Tasks into the main sidebar.**
+   A Project should expose a Tasks destination, and the Task workspace contains the individual Tasks.
+
+4. **Do not turn Chats into Tasks.**
+   They are separate user-facing concepts.
+
+5. **Do not create another Pi execution engine.**
+   Reuse `SessionManager`, `PiClient`, and the existing executors.
+
+6. **Do not duplicate session transcripts.**
+   Tasks should reference existing Pithagoras sessions/attempts.
+
+7. **Do not make the browser responsible for autonomous execution.**
+   The server owns Task execution.
+
+8. **Do not make completion depend on process exit code alone.**
+   Use an explicit completion protocol.
+
+9. **Every autonomous retry should have a fresh execution/session.**
+   Preserve previous attempts as history.
+
+10. **Keep Task orchestration separate from ordinary chat execution.**
+    Shared infrastructure is desirable; conflating the concepts is not.
+
+11. **Keep "Rerun", "Resume", and "Continue conversation" conceptually distinct.**
+    Rerun starts fresh autonomous execution; Resume continues an existing execution where supported; Continue conversation is direct user interaction with the Task's session.
+
+12. **Keep the Task queue and Task execution view visually related but conceptually distinct.**
+    The upper area manages work; the lower area shows what the selected Task is/was doing.
+
+13. **Do not immediately hide newly completed Tasks.**
+    Preserve the CodeLoop recently-completed behavior so completion is visible to the user before the Task moves into historical Completed state.
+
+14. **Do not prescribe CodeLoop's visual design.**
+    Preserve required behaviors while using Pithagoras's existing UI conventions.
+
+15. **Prefer small incremental changes.**
+    Each phase should leave the existing application functional.
+
+---
+
+# 28. Implementation phases
 
 Implement incrementally.
 
-### Phase 1 — Task persistence
+## Phase 0 — UI Prototype / Design Validation
+
+Before implementing Task persistence, execution, or database changes, create a functional UI prototype of the proposed Task experience inside the existing Pithagoras frontend.
+
+The purpose of this phase is to validate the Task user experience and layout before committing to the implementation architecture. The prototype should use static/mock data only and should not require Task persistence, Task APIs, autonomous execution, or SQLite changes.
+
+### Before implementing
+
+Inspect the existing Pithagoras frontend to understand and reuse its established:
+
+* Sidebar and project/folder navigation
+* Page/layout structure
+* Chat/session presentation
+* Agent activity and tool-output rendering
+* Inputs, buttons, menus, dialogs, and other controls
+* Styling and visual conventions
+
+Also inspect the CodeLoop UI and source implementation to understand the actual Task behaviors that the UI needs to represent, particularly:
+
+* Task queue and ordering
+* Task status presentation
+* Running-task activity
+* Completed-task handling and the distinction between recently completed and acknowledged/historical tasks
+* Start, Stop, Rerun, and Resume behavior
+* Task execution/history presentation
+* Task editing/creation
+* Any other interactions that materially affect the proposed Task workspace
+
+CodeLoop is a behavioral reference, not a visual implementation reference. Do not copy its markup, CSS, navigation structure, or component architecture. Pithagoras remains the host application and its existing UI conventions should be preserved.
+
+### Prototype structure
+
+The prototype should introduce the proposed Project-level Tasks navigation:
+
+```text
+Project
+  ├─ Chats
+  └─ Tasks
+```
+
+Individual Tasks should **not** be added as separate entries in the main sidebar.
+
+Selecting `Tasks` should open a dedicated Task workspace containing two primary areas:
+
+1. **Task queue / management area**
+
+   * Displays the project's Tasks.
+   * Shows relevant status and basic task information.
+   * Allows selecting a Task.
+   * Demonstrates queue ordering/reordering.
+   * Provides the appropriate task lifecycle controls.
+   * Provides access to completed Task history.
+
+2. **Selected Task execution/conversation area**
+
+   * Displays the selected Task's execution/activity.
+   * Visually follows the existing Pithagoras chat/session experience where appropriate.
+   * Demonstrates agent messages, tool activity, execution state, and attempt information.
+   * Shows how previous attempts/history will be represented.
+   * Provides a chat-like mechanism for continuing conversation with the Task's existing session.
+
+The prototype should make the distinction between **autonomous Task execution** and **user conversation with a Task's agent session** clear.
+
+### States to demonstrate
+
+Use mock data to demonstrate at least:
+
+* Empty Tasks view
+* Pending Tasks
+* Running Task with active agent/tool activity
+* Stopped Task
+* Failed Task
+* Newly completed Task that remains visible in the normal Task view
+* Historical Completed Tasks
+* A Task with multiple execution attempts
+* Selected Task with execution history
+* Continue-conversation interaction
+* Task queue reordering
+* Relevant lifecycle actions such as Start, Stop, Rerun, and Resume
+
+The exact visual treatment and interaction details should be determined by examining the existing Pithagoras UI and the CodeLoop behavior rather than being prescribed by this plan.
+
+### Phase boundary
+
+Do **not** implement the following during Phase 0:
+
+* Task database schema or persistence
+* Task API endpoints
+* Autonomous Task execution
+* Task scheduling/queue workers
+* Completion-marker processing
+* Retry execution
+* Restart recovery
+* New Task-specific backend services
+
+Static/mock data and temporary frontend state are sufficient.
+
+The prototype is intended to be disposable or substantially refactorable. Do not over-engineer its component architecture or create backend abstractions merely to support the prototype.
+
+### Phase completion criteria
+
+Phase 0 is complete when the prototype allows the UI and interaction model to be reviewed and adjusted before backend implementation begins.
+
+The approved prototype becomes the visual and interaction target for the subsequent implementation phases. Any UI decisions discovered during this phase should be incorporated into the implementation plan before proceeding to Phase 1.
+
+## Phase 1 — Task persistence
 
 Implement:
 
@@ -717,27 +1045,38 @@ Implement:
 * attempt count
 * migration
 * backend Task service/module
+* Task/session relationship model
 
 No autonomous execution yet.
 
 Verify existing Pithagoras functionality remains unaffected.
 
-### Phase 2 — Project Task UI
+---
+
+## Phase 2 — Project Task UI
 
 Add:
 
-* Project Task area
+* Project Tasks navigation entry
+* dedicated Task workspace/page
 * Task list
+* Task ordering/reordering
 * create/edit/delete
 * status display
+* recently completed vs. Completed behavior as determined from CodeLoop
 
 Still allow Tasks to exist without autonomous execution if necessary for testing.
 
-### Phase 3 — Basic Task execution
+The page should establish the basic top Task queue / bottom selected Task workspace structure even if execution is not yet implemented.
+
+---
+
+## Phase 3 — Basic Task execution
 
 Implement:
 
 * start Task
+* Project-level Task loop
 * create fresh Pithagoras session for an attempt
 * execute through existing `SessionManager`
 * associate session with Task attempt
@@ -746,7 +1085,11 @@ Implement:
 
 Use existing SSE/session infrastructure for activity display.
 
-### Phase 4 — Completion protocol
+Implement the lower Task execution view using the existing Pithagoras activity/session renderer.
+
+---
+
+## Phase 4 — Completion protocol
 
 Implement:
 
@@ -757,19 +1100,42 @@ Implement:
 
 Keep the completion detector isolated from the rest of Task orchestration.
 
-### Phase 5 — Retry/attempt handling
+Verify the CodeLoop completion semantics before finalizing the protocol.
+
+---
+
+## Phase 5 — Retry/attempt handling
 
 Implement:
 
 * maximum attempts
-* fresh session per attempt
+* fresh session per autonomous attempt
 * failed state
 * rerun
 * attempt history
+* recently-completed behavior
+* appropriate queue handling
 
-Do not reuse failed attempt conversation context automatically.
+Do not reuse failed autonomous attempt conversation context automatically.
 
-### Phase 6 — Project Task instructions
+---
+
+## Phase 6 — Task conversation/resume
+
+Implement:
+
+* Task execution/session viewing
+* Continue conversation
+* Resume behavior
+* appropriate session continuation
+* preservation of previous attempts
+* clear distinction between Rerun, Resume, and Continue conversation
+
+Reuse existing Pithagoras session/resume mechanisms wherever possible.
+
+---
+
+## Phase 7 — Project Task instructions
 
 Implement:
 
@@ -780,7 +1146,9 @@ Implement:
 
 Keep this separate from `AGENTS.md`.
 
-### Phase 7 — Recovery and polish
+---
+
+## Phase 8 — Recovery and polish
 
 Implement/test:
 
@@ -790,59 +1158,47 @@ Implement/test:
 * reconnecting browser
 * SSE replay
 * Task history
+* recently completed acknowledgment behavior
 * error handling
 * concurrent Tasks
 * deletion behavior
+* queue ordering
+* Project deletion behavior
+* Task/session cleanup rules
 
 ---
 
-# 21. Important architectural rules
-
-Throughout implementation:
-
-1. **Do not create a second Project concept.**
-   Extend the existing filesystem-based Project.
-
-2. **Do not replace the filesystem UI.**
-   Projects are an additional layer over existing folders.
-
-3. **Do not turn Chats into Tasks.**
-   They are separate user-facing concepts.
-
-4. **Do not create another Pi execution engine.**
-   Reuse `SessionManager`, `PiClient`, and the existing executors.
-
-5. **Do not duplicate session transcripts.**
-   Tasks should reference existing Pithagoras sessions/attempts.
-
-6. **Do not make the browser responsible for autonomous execution.**
-   The server owns Task execution.
-
-7. **Do not make completion depend on process exit code alone.**
-   Use an explicit completion protocol.
-
-8. **Every retry should have a fresh execution/session.**
-   Preserve the previous attempt as history.
-
-9. **Keep Task orchestration separate from ordinary chat execution.**
-   Shared infrastructure is desirable; conflating the concepts is not.
-
-10. **Prefer small incremental changes.**
-    Each phase should leave the existing application functional.
-
----
-
-# 22. Before coding
+# 29. Before coding
 
 Before beginning implementation, inspect the current source again specifically for:
 
-* the existing Project API/UI
+* existing Project API/UI
+* existing Sidebar navigation structure
+* existing ProjectsPage behavior
 * SQLite migration conventions
 * routine execution architecture
 * SessionManager lifecycle methods
 * session creation/resumption
 * SSE event handling
 * existing settings patterns
+* existing chat input/editor components
+* existing agent activity/session rendering
+
+Also inspect the corresponding CodeLoop implementation for:
+
+* Task lifecycle
+* queue ordering
+* Project-level Start/Stop behavior
+* recently completed → Completed transition
+* Task editing
+* Rerun
+* Resume
+* task/session history
+* completion detection
+* retry behavior
+* recovery
+
+Resolve any ambiguity between the CodeLoop behavior and this plan by examining the actual implementations before coding.
 
 Then implement Phase 1 first.
 
