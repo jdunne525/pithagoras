@@ -474,6 +474,156 @@ Keep Chats and Tasks visibly distinct.
 
 Do not turn existing chat records into Tasks.
 
+### 15.1. Reference behavior for Task UI controls (from CodeLoop)
+
+Before designing Pithagoras's Task UI, inspect the CodeLoop UI implementation
+(`G:\work\git\pi-ralph-one\src\ui\app.js`, `index.html`, `style.css`) and its spec
+(`G:\work\git\pi-ralph-one\CodeLoop.md`, §7). The following captures the button
+names and lifecycle semantics that Pithagoras should reproduce (mapped onto
+Pithagoras primitives, not ported verbatim).
+
+#### Project-level controls (one set per project)
+
+* **Running / Stopped indicator** — a dot + text showing whether the project's
+  autonomous loop is currently executing.
+* **Start / Stop control button** — a single toggle labeled `Start` when idle
+  and `Stop` while running. Pressing it starts/stops the server-owned task loop
+  for the whole project queue (not a single task). While running it is shown as
+  a styled `btn-stop`; otherwise `btn-start`.
+* **Delete project (`🗑`)** — deletes the project and all its tasks (with
+  confirmation).
+
+#### Task list layout
+
+Each task row shows, left to right:
+
+* a drag handle (to reorder the active queue),
+* a status icon,
+* the description/title preview (clicking it opens the Edit Task modal),
+* a metadata row containing: timestamp(s), status text rendered with a
+  `status-<status>` class, a workflow badge (`full` / simple), and an attempt
+  badge,
+* a set of per-action buttons (see below),
+* a delete button (`×`).
+
+Status indicator (per status):
+
+> **Functional indicator, not a prescribed visual style.** The icons below are
+> only a compact way to convey a task's lifecycle state at a glance in the list.
+> They document *what state information the UI must communicate*; Pithagoras is
+> free to represent the same information any way that fits the existing Pithagoras
+> styling (color, text label, icon, etc.). Do not treat the specific glyphs as a
+> design requirement.
+
+```text
+running   →  conveys "currently executing"
+completed →  conveys "finished successfully"
+failed    →  conveys "gave up after exhausting retries"
+stopped   →  conveys "halted by the user"
+```
+
+The attempt badge renders as `↻ n/max` (e.g. `↻ 2/5`) and gains a `warn`
+class/approach as the retry budget is nearly exhausted.
+
+The project view has sub-tabs:
+
+* **Tasks** — the active queue (`status !== 'completed'`).
+* **Completed** — finished tasks (`status === 'completed'`).
+* **Workflow** — edit project-level Task prompts/workflow (see §13 and the
+  simple/full workflow concept).
+
+#### Per-task action buttons
+
+These are the concrete controls a user can perform on an individual Task. The
+exact labels/icons used by CodeLoop are noted; Pithagoras should provide
+functionally equivalent actions (identical glyphs are not mandatory).
+
+| Action | CodeLoop control | Endpoint / effect | When relevant |
+|---|---|---|---|
+| **Edit task / revise** | Click the task description or row | Opens *Edit Task* modal: edit description, choose workflow (`simple` / `full`) | Always |
+| **Mark complete** | `✓` ("Mark as complete") | `PUT .../tasks/:id/complete` → marks `completed` (with confirm) | Any non-completed task |
+| **Rerun** | `↻` ("Re-run task") | `POST .../tasks/:id/rerun` → resets task to `{pending, attempts:0, startedAt:null, completedAt:null}` then lets the natural queue pick it up | failed / stopped / pending |
+| **Resume** | `▶` ("Resume session") | `POST .../tasks/:id/resume` → resets to `pending`, moves the task to the **front of the queue**, and immediately starts the loop | failed / stopped / pending |
+| **Reply / follow-up** | `↩` ("Reply to this task") | Creates a new follow-up task seeded with the original prompt plus a note to consult git history | any worked task |
+| **View session history** | *(built-in)* | Not a separate dialog — the task view's bottom pane shows the concatenated history of all attempts/sessions for the task (see "Attempt history" below) | any task with sessions |
+| **Delete** | `×` | `DELETE .../tasks/:id` (with confirm) | any task |
+
+##### Rerun vs. Resume (important distinction)
+
+Two closely related but different "run this work again" actions exist and must
+remain distinct in Pithagoras:
+
+1. **Rerun (`↻`)** — starts the task over from scratch: fresh context, attempt
+   counter reset to 0, queued normally (no priority). Use when the previous
+   attempt was wrong and you want a clean re-execution.
+2. **Resume (`▶`)** — (this description is different behavior from what is 
+presently in codeloop.) Resume the last session starting feim the same context.
+Inject a message to the agent with a simple message "resume". This is generally 
+used when a session has done a lot of thinking work that would otherwise be lost 
+by hitting the rerun button.
+
+#### Creating and editing tasks (chat-style input, not a modal)
+
+Rather than a dedicated modal dialog, Pithagoras should create and edit tasks
+through an input area modeled on the existing Pithagoras **chat interface**,
+styled so the user can immediately tell it is a task field and not a normal chat.
+This is a direction/constraint rather than a full spec — the exact markup should
+follow Pithagoras conventions.
+
+Requirements for this control:
+
+* **Looks like a chat input but reads as a task editor.** Reuse the familiar
+  chat-style text entry (placeholder, send button, etc.) but apply visible
+  styling that distinguishes it from ordinary chat — e.g. a distinct label/
+  header such as *New task* / *Edit task*, a different accent color or border,
+  and/or a subtle icon — so the intent is unambiguous.
+* **Create mode:** a single prompt where typing a description and sending creates
+  the task. Optionally allow choosing a workflow (`simple` / `full`) here; keep
+  it minimal so it does not feel like a separate form.
+* **Edit mode:** the same control pre-filled with the task's current
+  description (and workflow), used to revise the task.
+* **Workflow guard:** the workflow selector is **disabled while the task is
+  running**; editing a running task's workflow is rejected (CodeLoop returns
+  HTTP 409 with a message such as "Stop the running task before changing its
+  workflow, then resume it to apply the new workflow"). Changes take effect on
+  the next run/resume.
+* Sending in create mode creates the task; sending in edit mode saves the
+  revision. Both feed the same server endpoints as a modal submit would.
+
+#### Live execution / activity view
+
+* A project **Activity console** streams the currently executing task's session
+  incrementally (agent messages + tool calls: Bash/Edit/Write/Read/etc.),
+  preserving scroll position, via the existing SSE/session system.
+* It shows a status line such as `▶ <taskTitle>` while executing, an idle-running
+  state, or `Stopped`.
+
+#### Attempt history (in the task view bottom pane)
+
+Opening a task shows its execution in the task view's **bottom pane** (this is
+the normal task view, not a separate modal/dialog).
+
+* When a task is running, the bottom pane streams that attempt's session
+  incrementally (agent messages + tool calls: Bash/Edit/Write/Read/etc.) via the
+  existing SSE/session system, preserving scroll position.
+* When a task is not running — or when inspecting past work — the bottom pane
+  **concatenates the history of every session/attempt tied to the task**, in
+  chronological order, so the user can see what each retry did without opening
+  individual session files. There is no separate "Session Viewer" dialog and no
+  dedicated Raw JSONL view; the concatenated, parsed activity is sufficient.
+* Attempt count is surfaced via the `↻ n/max` badge. There is no per-attempt
+  diff/summary UI beyond the concatenated session contents themselves.
+
+#### Auto-retry (server-owned) vs. manual actions
+
+* **Auto-retry** happens server-side without browser involvement: when an
+  attempt exits without the completion marker and without an explicit stop, and
+  retries remain, the server re-queues the task (simple workflow) or restarts
+  the stage/workflow (full workflow) and spawns a fresh session each time.
+* **Manual** retry/resume/reply are user-initiated actions on top of that.
+* Every automated/manual attempt uses a **fresh session/context**; the previous
+  attempt is preserved only as history. Never reuse a prior failed conversation.
+
 ---
 
 # 16. Task execution view
