@@ -959,6 +959,15 @@ Also inspect the CodeLoop UI and source implementation to understand the actual 
 
 CodeLoop is a behavioral reference, not a visual implementation reference. Do not copy its markup, CSS, navigation structure, or component architecture. Pithagoras remains the host application and its existing UI conventions should be preserved.
 
+### Navigation entry (how one enters Tasks)
+
+The Tasks workspace is reached from the existing **Projects** page. Each project card / project
+header on `ProjectsPage` exposes a **Tasks** entry (a button/tab on that project).
+
+Selecting it opens a dedicated **Tasks page** for that project.
+
+Individual Tasks should **not** be added as separate entries in the main sidebar.
+
 ### Prototype structure
 
 The prototype should introduce the proposed Project-level Tasks navigation:
@@ -966,10 +975,11 @@ The prototype should introduce the proposed Project-level Tasks navigation:
 ```text
 Project
   ├─ Chats
-  └─ Tasks
+  └─ Tasks        ← opened from the Projects page
 ```
 
-Individual Tasks should **not** be added as separate entries in the main sidebar.
+The Tasks entry is a per-project destination reached from `ProjectsPage`, not a global
+sidebar destination and not an individual sidebar item.
 
 Selecting `Tasks` should open a dedicated Task workspace containing two primary areas:
 
@@ -1001,7 +1011,8 @@ Use mock data to demonstrate at least:
 * Running Task with active agent/tool activity
 * Stopped Task
 * Failed Task
-* Newly completed Task that remains visible in the normal Task view
+* Newly completed Task handled as in CodeLoop: it leaves the normal Tasks view at once and lives
+  only in the Completed view (see Phase boundary below)
 * Historical Completed Tasks
 * A Task with multiple execution attempts
 * Selected Task with execution history
@@ -1010,6 +1021,25 @@ Use mock data to demonstrate at least:
 * Relevant lifecycle actions such as Start, Stop, Rerun, and Resume
 
 The exact visual treatment and interaction details should be determined by examining the existing Pithagoras UI and the CodeLoop behavior rather than being prescribed by this plan.
+
+### Recently-completed behavior (resolved from CodeLoop)
+
+CodeLoop's actual `renderTasks` filters `status !== 'completed'`, so a completed task leaves the
+active Tasks view **immediately** and appears only in the Completed tab. There is no
+acknowledge/recently-completed step in the reference.
+
+The prototype follows this: **no “recently completed stays visible” distinction.** A completed
+Task goes straight to the Completed view.
+
+### Page, not modal
+
+The Tasks workspace is a **proper page component** (its own route through `App.tsx`, in the same
+style as the existing Sessions/Projects pages), **not** a modal or overlay.
+
+### Workflow settings
+
+The optional workflow dropdown / workflow-related settings are **omitted** from Phase 0.
+Task creation shows only title + description.
 
 ### Phase boundary
 
@@ -1027,6 +1057,13 @@ Do **not** implement the following during Phase 0:
 Static/mock data and temporary frontend state are sufficient.
 
 The prototype is intended to be disposable or substantially refactorable. Do not over-engineer its component architecture or create backend abstractions merely to support the prototype.
+
+### How to verify (dev server)
+
+Rather than relying on a build alone, launch the Vite dev server (`npm --prefix web run dev`)
+and take screenshots of the Tasks workspace in several states to review the layout and styling
+against Pithagoras conventions. If the dev server cannot run without a live backend, fall back
+to a production build (`npm --prefix web run build`) succeeding and inspect the rendered markup.
 
 ### Phase completion criteria
 
