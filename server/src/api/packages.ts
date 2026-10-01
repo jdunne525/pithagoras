@@ -1,13 +1,10 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { piSettingsPath } from "../pi-settings.js";
 import { extensionStash, setExtensionStash } from "../db.js";
 import express, { type Router } from "express";
 import { searchCatalog } from "../catalog.js";
-
-const run = promisify(execFile);
+import { runPi, PiMissingError } from "./pi-cli.js";
 
 /**
  * pi packages (extensions, skills, prompts, themes) are managed by the pi CLI
@@ -15,11 +12,16 @@ const run = promisify(execFile);
  *
  * They install under $HOME/.pi/agent, which the image points at a persistent
  * volume — otherwise every rebuild would silently wipe installed packages.
+ *
+ * A missing CLI is surfaced as a PiMissingError: the plain listing pages turn
+ * that into an empty, non-alarming state, while a mutation still fails loudly
+ * but with an explanation rather than the raw `spawn pi ENOENT`.
  */
 export async function pi(args: string[]): Promise<{ stdout: string; stderr: string }> {
   try {
-    return await run("pi", args, { timeout: 120_000, maxBuffer: 4 * 1024 * 1024 });
+    return await runPi(args, { timeout: 120_000, maxBuffer: 4 * 1024 * 1024 });
   } catch (e) {
+    if (e instanceof PiMissingError) throw e;
     const err = e as { stdout?: string; stderr?: string; message: string };
     throw new Error((err.stderr || err.stdout || err.message).trim());
   }
@@ -38,6 +40,9 @@ export function packagesRouter(): Router {
       const { stdout } = await pi(["list"]);
       res.json({ output: stdout.trim() });
     } catch (e) {
+      // Without the CLI there is nothing to list; leave the panel in its
+      // natural empty state instead of surfacing a scary spawn error.
+      if (e instanceof PiMissingError) return res.json({ output: "" });
       res.status(500).json({ error: (e as Error).message });
     }
   });

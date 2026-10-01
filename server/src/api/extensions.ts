@@ -1,5 +1,3 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import express, { type Router } from "express";
@@ -7,8 +5,7 @@ import { piSettingsPath, updatePiSettings } from "../pi-settings.js";
 import { extensionStash, setExtensionStash } from "../db.js";
 import { isFiltered, isSwitchedOff, setPackageEnabled, sourceOf } from "../extension-switch.js";
 import { sessions } from "../session-manager.js";
-
-const run = promisify(execFile);
+import { runPi, PiMissingError } from "./pi-cli.js";
 
 export interface DetectedSetting {
   key: string;
@@ -142,7 +139,15 @@ let listed: { stamp: string; value: Promise<{ spec: string; path?: string; scope
 function installedPackages(settings: Record<string, unknown>) {
   const stamp = JSON.stringify(settings.packages ?? null);
   if (listed?.stamp !== stamp) {
-    const value = run("pi", ["list"], { timeout: 60_000 }).then(({ stdout }) => parseList(stdout));
+    const value = runPi(["list"], { timeout: 60_000 })
+      .then(({ stdout }) => parseList(stdout))
+      // No CLI to ask: fall back to an empty list rather than throwing the raw
+      // spawn error up to the settings page. Other failures still reject, so a
+      // transient one retries next time Settings opens.
+      .catch((e) => {
+        if (e instanceof PiMissingError) return [];
+        throw e;
+      });
     listed = { stamp, value };
     value.catch(() => { if (listed?.value === value) listed = undefined; });
   }
