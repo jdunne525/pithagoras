@@ -21,3 +21,4 @@ test-results/
 xscm.scm
 *.bak
 *.pem
+*.orig
