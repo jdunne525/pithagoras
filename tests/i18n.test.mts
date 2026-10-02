@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import ts from "typescript";
 import { addLocale, ENGLISH, formatDate, formatDateTime, formatsFor, formatTime, labelOf, languages, resolve, setLanguage, t, tc, tp, tx, type Locale, type Plural } from "../web/src/i18n.ts";
 
@@ -48,7 +49,10 @@ function texts(): Map<string, { plural: boolean; where: string }> {
 }
 
 const localeFiles = () => fs.readdirSync(LOCALES).filter((f) => f.endsWith(".ts") && f !== "index.ts");
-const load = async (file: string): Promise<Locale> => (await import(path.join(LOCALES, file))).default;
+// `import()` needs a file:// URL, and on Windows an absolute path is not one
+// (a bare drive letter like `g:` is taken for a URL scheme). Point it at the
+// file instead, so this test runs the same as anywhere else.
+const load = async (file: string): Promise<Locale> => (await import(pathToFileURL(path.join(LOCALES, file)).href)).default;
 const words = (s: string) => new Set([...s.matchAll(/\{(\w+)\}/g)].map((m) => m[1]));
 
 test("there is something to translate, and German is offered", async () => {

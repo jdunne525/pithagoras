@@ -24,7 +24,7 @@ import { ConfirmHost } from "./components/ConfirmDialog";
 import { pollWhileVisible, reconnectDelay } from "./poll";
 import { canvasConnection, canvasMessage } from "./canvas-feed";
 import { APP_NAME, finishedRuns, tabTitle } from "./attention";
-import { notifyIfAway, notifyState } from "./notify";
+import { notifyIfAway, notifyState, ntfyActive } from "./notify";
 import { guardStrayDrops } from "./drop-guard";
 import { usePlaces } from "./use-session-folders";
 import { t, useLanguage } from "./i18n";
@@ -441,10 +441,13 @@ function Shell({
   // stream, the rest do not. So while someone asked to be told and something
   // is running, a hidden page keeps asking, more slowly.
   const anyRunning = sessions.some((s) => s.status === "running");
+  // While something runs, a hidden tab keeps asking so a finishing chat is not
+  // missed. It keeps asking whenever a notification can reach the person: the
+  // browser's own, or ntfy, which also works where that one cannot (plain HTTP).
   useEffect(() => {
     if (!anyRunning) return;
     const timer = setInterval(() => {
-      if (document.hidden && notifyState() === "on") refreshSessions().catch(() => {});
+      if (document.hidden && (notifyState() === "on" || ntfyActive())) refreshSessions().catch(() => {});
     }, 15_000);
     return () => clearInterval(timer);
   }, [anyRunning, refreshSessions]);
@@ -462,7 +465,7 @@ function Shell({
   const askedId = active ? uiQueue[0]?.id : undefined;
   useEffect(() => {
     if (!active || !askedId) return;
-    notifyIfAway(active.title, t("Waiting for your answer"), `ask-${active.id}`, () => navigate(`/s/${active.id}`));
+    notifyIfAway(active.title, t("Waiting for your answer"), `ask-${active.id}`, () => navigate(`/s/${active.id}`), "urgent");
   }, [askedId]);
 
   return (

@@ -37,7 +37,7 @@ import { KeepRecent, useKeepRecentSave } from "./KeepRecent";
 import { formatTokens } from "../transcript";
 import { displayName } from "../tool-groups";
 import { useAsksBeforeDeleting } from "../confirm-prefs";
-import { useNotifyState } from "../notify";
+import { getNtfyTopic, isNtfyEnabled, setNtfyEnabled, setNtfyTopic, useNotifyState } from "../notify";
 import { PeoplePanel } from "./PeoplePanel";
 import { PortalExtensions } from "./PortalExtensions";
 import { Modal } from "./Modal";
@@ -45,7 +45,7 @@ import { ToolDefaults } from "./ToolDefaults";
 import { isEnter } from "../shortcuts";
 import { KeyboardShortcuts } from "./KeyboardShortcuts";
 import { ProvidersPanel } from "./ProvidersPanel";
-import { EffortPicker, Empty, Section, Switch, SwitchRow, btnCls, inputCls, primaryCls } from "./SettingsUi";
+import { EffortPicker, Empty, Field, Section, Switch, SwitchRow, btnCls, inputCls, primaryCls } from "./SettingsUi";
 import { PackageCatalog } from "./PackageCatalog";
 import { packageName } from "../package-names";
 import { load, useCached } from "../settings-cache";
@@ -556,15 +556,56 @@ function Notifications() {
     unsupported: t("This browser does not offer them here — they need a secure connection (HTTPS, or localhost)."),
     denied: t("The browser has blocked them for this site. Allow them in its site settings, then come back."),
   };
+  // Kept in component state so the settings page re-draws as they change.
+  const [ntfyEnabled, setNtfyEnabledState] = useState(isNtfyEnabled());
+  const [ntfyTopic, setNtfyTopicState] = useState(getNtfyTopic());
+
+  const ntfyNote:
+    | { when: boolean; text: string }
+    | null = !ntfyTopic ? { when: true, text: t("Enter an ntfy topic below first, then turn this on.") } : null;
+
   return (
-    <SwitchRow
-      title={t("Tell me when a chat is done or needs me")}
-      detail={t("Only while you are on another tab or window: nobody needs telling about the chat in front of them. The tab title shows what a chat is doing either way.")}
-      on={state === "on"}
-      disabled={state === "unsupported" || state === "denied"}
-      onChange={(on) => void setOn(on)}
-      note={note[state]}
-    />
+    <div className="space-y-3">
+      <SwitchRow
+        title={t("Tell me when a chat is done or needs me")}
+        detail={t("Only while you are on another tab or window: nobody needs telling about the chat in front of them. The tab title shows what a chat is doing either way.")}
+        on={state === "on"}
+        disabled={state === "unsupported" || state === "denied"}
+        onChange={(on) => void setOn(on)}
+        note={note[state]}
+      />
+
+      <Field
+        label={t("ntfy Topic")}
+        hint={t("The topic your ntfy app is subscribed to. Keep it private — anyone who has it can send and receive notifications for it. Set it in the ntfy app under Topics / Subscribed topics.")}
+      >
+        <input
+          type="text"
+          className={inputCls}
+          value={ntfyTopic}
+          placeholder={t("your ntfy topic")}
+          autoComplete="off"
+          spellCheck="false"
+          onChange={(e) => {
+            const topic = e.target.value;
+            setNtfyTopicState(topic);
+            setNtfyTopic(topic);
+          }}
+        />
+      </Field>
+
+      <SwitchRow
+        title={t("Push notifications with ntfy")}
+        detail={t("Send a notification to your phone or desktop when a chat finishes or needs an answer, using ntfy.sh. This works where the browser's own ones do not, so it keeps working over a plain connection.")}
+        on={ntfyEnabled}
+        disabled={!ntfyTopic}
+        onChange={(on) => {
+          setNtfyEnabledState(on);
+          setNtfyEnabled(on);
+        }}
+        note={ntfyNote?.when ? ntfyNote.text : undefined}
+      />
+    </div>
   );
 }
 
