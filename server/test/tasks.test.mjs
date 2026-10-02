@@ -119,3 +119,53 @@ test("lifecycle stamps timestamps and lets an attempt end without the task", () 
   assert.equal(pending.completed_at, null);
   assert.equal(pending.started_at, stopped.started_at, "first start time is kept across reruns");
 });
+
+test("tasks are queued in order by a persisted slot", () => {
+  const project = ws();
+  const a = tasks.createTask({ workspace: project, title: "One" });
+  const b = tasks.createTask({ workspace: project, title: "Two" });
+  const c = tasks.createTask({ workspace: project, title: "Three" });
+  const queue = tasks.listTasks(project);
+  assert.deepEqual(queue.map((t) => t.id), [a.id, b.id, c.id], "creation order is the queue order");
+  assert.deepEqual(queue.map((t) => t.position), [1, 2, 3], "each takes one past the highest slot");
+});
+
+test("setTaskOrder rewrites the queue order and keeps projects separate", () => {
+  const pa = ws();
+  const pb = ws();
+  const a1 = tasks.createTask({ workspace: pa, title: "A1" });
+  const a2 = tasks.createTask({ workspace: pa, title: "A2" });
+  const b1 = tasks.createTask({ workspace: pb, title: "B1" });
+
+  tasks.setTaskOrder(pa, [a2.id, a1.id]);
+  assert.deepEqual(tasks.listTasks(pa).map((t) => t.id), [a2.id, a1.id], "the new order wins");
+  assert.deepEqual(tasks.listTasks(pa).map((t) => t.position), [1, 2], "positions are reassigned 1..n");
+  assert.deepEqual(tasks.listTasks(pb).map((t) => t.id), [b1.id], "other projects are untouched");
+  assert.throws(() => tasks.setTaskOrder(pa, [a1.id, "not-a-task"]), /unknown/, "ids must belong to this project");
+});
+
+test("a task is named from its prompt when no title is given", () => {
+  assert.equal(
+    tasks.createTask({ workspace: ws(), description: "Summarise the discussion" }).title,
+    "Summarise the discussion",
+  );
+  // The first line only, collapsed to one line — exactly like a chat title.
+  const multi = tasks.createTask({ workspace: ws(), description: "Line one\nline two" }).title;
+  assert.equal(multi, "Line one");
+  // A prompt that starts with a slash is not a name, so nothing is derived.
+  assert.throws(() => tasks.createTask({ workspace: ws(), description: "/clear this up" }), /prompt/);
+  // An explicit title wins over the prompt.
+  assert.equal(
+    tasks.createTask({ workspace: ws(), title: "Chosen", description: "ignored prompt" }).title,
+    "Chosen",
+  );
+});
+
+test("a task title clips from the prompt the same way a chat title does", () => {
+  const long = "x".repeat(80);
+  assert.equal(tasks.createTask({ workspace: ws(), description: long }).title, "x".repeat(47) + "…");
+});
+
+test("creating without any title or prompt is rejected", () => {
+  assert.throws(() => tasks.createTask({ workspace: ws() }), /prompt/);
+});

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import * as db from "./db.js";
+import { titleFrom } from "./projects.js";
 
 /**
  * Autonomous Tasks: the durable unit of work from the CodeLoop plan (§4–§13).
@@ -28,7 +29,8 @@ export class TaskError extends Error {
 interface CreateTaskInput {
   /** Resolved absolute path of the owning project folder. */
   workspace: string;
-  title: string;
+  /** Chosen title, when one was given. Otherwise derived from the prompt. */
+  title?: string;
   description?: string;
   /** Highest allowed autonomous attempts, or null for unbounded. */
   maxAttempts?: number | null;
@@ -50,6 +52,15 @@ const validateTitle = (title: unknown): string => {
     throw new TaskError("invalid", "title must be text");
   }
   return title.trim();
+};
+
+/** What every Task starts with: a short title. Given directly, or taken from
+    the prompt the same way a chat is named (`titleFrom`). Neither present
+    means there was nothing to name it with. */
+const resolveTitle = (input: Pick<CreateTaskInput, "title" | "description">): string | undefined => {
+  const chosen = input.title?.trim();
+  if (chosen) return chosen;
+  return titleFrom(input.description ?? "")?.trim();
 };
 
 /** A positive integer ceiling on attempts, or null meaning "no limit". */
@@ -74,10 +85,12 @@ export const createTask = (input: CreateTaskInput): db.TaskRow => {
   if (typeof input.workspace !== "string" || !input.workspace.trim()) {
     throw new TaskError("invalid", "workspace is required");
   }
+  const title = resolveTitle(input);
+  if (!title) throw new TaskError("invalid", "a title or prompt is required");
   return db.createTask({
     id: randomUUID(),
     workspace: input.workspace,
-    title: validateTitle(input.title),
+    title,
     description: input.description ?? "",
     max_attempts: parseMaxAttempts(input.maxAttempts),
   });
@@ -103,6 +116,15 @@ export const editTask = (id: string, patch: EditTaskInput): db.TaskRow | undefin
 export const deleteTask = (id: string): void => {
   getTask(id); // exists? report missing rather than deleting nothing.
   db.deleteTask(id);
+};
+
+/** Reorder a project's Tasks into the given ids (first runs first). Every id
+    must belong to that project, so the queue keeps only real Tasks. */
+export const setTaskOrder = (workspace: string, ids: readonly string[]): void => {
+  if (!ids.every((id) => typeof id === "string" && db.getTask(id)?.workspace === workspace)) {
+    throw new TaskError("invalid", "unknown task id");
+  }
+  db.reorderTasks(workspace, [...ids]);
 };
 
 /**

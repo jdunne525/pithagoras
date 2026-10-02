@@ -143,6 +143,24 @@ export interface ProjectContents extends Project {
   routines?: string[];
 }
 
+/** An autonomous Task owned by one Project: a unit of work in the queue.
+    Mirrors the server's tasks table; position is its slot in the queue.
+    Added in Phase 2 so the Tasks page can drive the real backend. */
+export interface Task {
+  id: string;
+  workspace: string;
+  title: string;
+  description: string;
+  status: "pending" | "running" | "completed" | "failed" | "stopped";
+  attempts: number;
+  max_attempts: number | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  updated_at: string;
+  position: number;
+}
+
 export interface CompactionSettings {
   enabled: boolean;
   /** The floor a compaction cannot go below — kept verbatim, never summarised. */
@@ -338,6 +356,28 @@ export const api = {
   renameSession: (id: string, title: string) =>
     json<Session>(`/api/sessions/${id}`, { method: "PATCH", body: JSON.stringify({ title }) }),
   deleteSession: (id: string) => json<{ ok: true }>(`/api/sessions/${id}`, { method: "DELETE" }),
+  // --- Tasks (Phase 2): a project's queue, driven live from the backend. ---
+  listTasks: (project: string) =>
+    json<Task[]>(`/api/projects/${encodeURIComponent(project)}/tasks`),
+  /** Create a Task from a prompt. No title is sent: the server names it like a
+    chat, from the first line of the prompt. */
+  createTask: (project: string, prompt: string) =>
+    json<Task>(`/api/projects/${encodeURIComponent(project)}/tasks`, {
+      method: "POST",
+      body: JSON.stringify({ description: prompt }),
+    }),
+  editTask: (project: string, id: string, patch: { title?: string; description?: string }) =>
+    json<Task>(`/api/projects/${encodeURIComponent(project)}/tasks/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(patch),
+    }),
+  setTaskOrder: (project: string, ids: string[]) =>
+    json<{ ok: true }>(`/api/projects/${encodeURIComponent(project)}/tasks/order`, {
+      method: "PUT",
+      body: JSON.stringify({ order: ids }),
+    }),
+  deleteTask: (project: string, id: string) =>
+    json<{ ok: true }>(`/api/projects/${encodeURIComponent(project)}/tasks/${id}`, { method: "DELETE" }),
   prompt: (id: string, message: string, options?: PromptOptions) =>
     json<{ ok: true }>(`/api/sessions/${id}/prompt`, {
       method: "POST",

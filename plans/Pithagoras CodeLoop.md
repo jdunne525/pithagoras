@@ -563,6 +563,10 @@ It should provide:
 
 Tasks should be reorderable where queue ordering applies.
 
+Queue order is not cosmetic: it fixes the order the Project loop runs Tasks in (§5,
+§8), so the order the user sets here must be durable. It survives browser reloads and
+server restarts and is stored per Project, not held only in the browser (see Phase 2).
+
 The queue should provide a Project-level autonomous execution control:
 
 ```text
@@ -649,7 +653,14 @@ The exact markup, styling, icons, and placement should follow Pithagoras convent
 
 The task editor should not require a large modal unless existing Pithagoras patterns make that appropriate.
 
-For editing a Task, the existing description should be loaded into the same task-oriented input control.
+A Task's title is generated automatically at creation from the prompt, exactly as an
+ordinary chat title is: the first non-empty line of the prompt, whitespace-collapsed and
+clipped to 47 code points with a trailing `…` (`server/src/projects.ts::titleFrom`, the
+same helper chats use). No separate title field is required when creating a Task, and the
+UI does not expose `max_attempts` for a Task (it stays server-controlled if used at all).
+The Task can always be renamed from the Tasks view afterwards, mirroring how chats are
+renamed. For editing a Task, the existing title and description should be loaded into the
+same task-oriented input control.
 
 If workflow selection is implemented in the first version, changing the workflow of a running Task must be prevented.
 
@@ -1136,19 +1147,49 @@ later persistence phases.
 
 ## Phase 2 — Project Task UI
 
-Add:
+Wire the Task workspace (the Phase 0 mock-only prototype in
+`web/src/components/TaskWorkspace.tsx`) to the real Phase 1 backend, and add the queue-order
+behaviour the mock could not perform. Execution stays for Phase 3; this phase is the UI plus
+the persistence/order it needs.
 
-* Project Tasks navigation entry
-* dedicated Task workspace/page
-* Task list
-* Task ordering/reordering
-* create/edit/delete
-* status display
-* recently completed vs. Completed behavior as determined from CodeLoop
+### Resolved design decisions (locked)
 
-Still allow Tasks to exist without autonomous execution if necessary for testing.
+These record the choices made before implementation so later phases build on them consistently.
 
-The page should establish the basic top Task queue / bottom selected Task workspace structure even if execution is not yet implemented.
+* **Live data, not mocks.** The page fetches its Tasks from the Phase 1 API
+  (`GET /api/projects/:name/tasks`) and performs create / edit / delete through the matching
+  endpoints (`POST` / `PUT` / `DELETE`). No mock or seed data remains once wired: the browser
+  drives the backend, never a local stand-in. New client methods live in `web/src/api.ts`
+  alongside the existing session/project calls.
+* **Queue order is durable and defines execution order.** Ordering is not cosmetic — it fixes
+  the order the Project loop runs Tasks in (§5, §17) — so it must survive reloads and server
+  restarts. Extend the `tasks` table additively with a `position INTEGER NOT NULL DEFAULT 0`
+  column scoped per workspace (`ORDER BY position, id`). On create a Task takes
+  `max(position)+1` within its Project. Add one reorder endpoint
+  (`PUT /api/projects/:name/tasks/order`, an ordered array of Task ids) that rewrites positions
+  in a single transaction. Drag-to-reorder in the UI must actually move items and persist the
+  result — the mock showed the grip/drag graphics but the items would not move.
+* **Auto-generated title; rename later.** Creating a Task from the prompt reuses the chat
+  title rule (`titleFrom`): the title is the first non-empty line of the prompt, clipped as
+  described above. No separate title field is needed at creation. A Task can be renamed from
+  the Tasks view afterwards (edit → title), the way chats are renamed.
+* **No per-task max attempts.** `max_attempts` is not user-configurable in the UI. It remains
+  in the schema from Phase 1 (server-controlled) but the Task editor does not expose it.
+* **Bottom panel keeps the mock transcript.** Autonomous execution is Phase 3, so the selected
+  Task's lower panel continues to show the seeded/mock attempt history for visual validation.
+  Only the queue — list, order, create/edit/delete, status display, and tabs — is live here.
+* **Run controls stay inert placeholders.** Run / Resume / Stop / Rerun and the Project-level
+  Start/Stop queue control stay in the layout exactly as the mock shows them, but call no
+  execution API yet (that is explicit Phase 3 work). They are kept so the final layout exists;
+  wiring them is not part of Phase 2.
+* **Recently completed vs. Completed** is unchanged from Phase 0: two tabs, *Actions* (everything
+  except `completed`) and *Completed* (`completed`), and a Task leaves *Actions* the moment it
+  completes — there is no lingering “recently completed” state.
+
+### Still true
+
+Tasks may exist without autonomous execution. The page establishes the basic top Task queue /
+bottom selected Task structure, with the queue now backed by real persistence and durable order.
 
 ---
 

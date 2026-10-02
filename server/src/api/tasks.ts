@@ -44,7 +44,8 @@ export function tasksRouter(): Router {
     }
   });
 
-  // Create a task in a project. Title only, at first.
+  // Create a task in a project. Either a chosen title or the prompt it was
+  // made from; the service names it from the prompt when no title is given.
   router.post("/projects/:name/tasks", (req, res) => {
     const body = req.body ?? {};
     const maxAttempts = parseMax(body.max_attempts);
@@ -52,11 +53,26 @@ export function tasksRouter(): Router {
       res.status(201).json(
         tasks.createTask({
           workspace: projectPath(req.params.name),
-          title: body.title,
-          description: body.description,
+          title: body.title || undefined,
+          description: body.description || undefined,
           maxAttempts,
         }),
       );
+    } catch (e) {
+      fail(res, e);
+    }
+  });
+
+  // Reorder a project's Tasks. Placed before the /:id routes so "order" is not
+  // read as an id. Accepts an ordered array of task ids.
+  router.put("/projects/:name/tasks/order", (req, res) => {
+    const ids = req.body?.order;
+    if (!Array.isArray(ids) || !ids.every((x) => typeof x === "string")) {
+      return res.status(400).json({ error: "order must be an array of task ids" });
+    }
+    try {
+      tasks.setTaskOrder(projectPath(req.params.name), ids);
+      res.json({ ok: true });
     } catch (e) {
       fail(res, e);
     }

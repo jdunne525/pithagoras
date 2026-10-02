@@ -6,8 +6,9 @@ import { ThinkingBlock } from "./ChatActivity";
 import { confirmDialog } from "./ConfirmDialog";
 import { isEnter } from "../shortcuts";
 import { formatRelative, t } from "../i18n";
+import { api, type Task } from "../api";
 import { Streamdown } from "streamdown";
-import { LuArrowUp, LuChevronLeft, LuChevronRight, LuFileText, LuGripVertical, LuListChecks, LuPlay, LuPlus, LuRotateCcw, LuTrash2, LuX } from "react-icons/lu";
+import { LuArrowUp, LuChevronLeft, LuChevronRight, LuFileText, LuGripVertical, LuListChecks, LuPen, LuPlay, LuPlus, LuRotateCcw, LuTrash2, LuX } from "react-icons/lu";
 
 /**
  * A task in the workspace is not a session: it has no events, so what a task
@@ -128,23 +129,30 @@ const seedMessages = (task: MockTask): MockMsg[][] => {
   return out;
 };
 
-/** Every state at once, so the workspace shows itself on open: pending, running,
-    stopped, failed (twice, to show attempts), and two completed. */
-const SEED: MockTask[] = [
-  { id: "t1", text: "Summarise the latest discussion and list next steps", status: "pending", attempts: 0, maxAttempts: 5 },
-  { id: "t2", text: "Run the test suite and fix any failures", status: "running", attempts: 1, maxAttempts: 5, startedAt: new Date(Date.now() - 4 * 1000).toISOString() },
-  { id: "t3", text: "Update the README with the new commands", status: "stopped", attempts: 2, maxAttempts: 5, startedAt: new Date(Date.now() - 90 * 60_000).toISOString() },
-  { id: "t4", text: "Wire up the login endpoint", status: "failed", attempts: 2, maxAttempts: 5, startedAt: new Date(Date.now() - 3 * 60_000).toISOString(), failedAt: new Date(Date.now() - 1 * 60_000).toISOString() },
-  { id: "t5", text: "Add input validation to the form", status: "completed", attempts: 1, maxAttempts: 5, completedAt: new Date(Date.now() - 12 * 60_000).toISOString() },
-  { id: "t6", text: "Write tests for the folder sorting logic", status: "completed", attempts: 3, maxAttempts: 5, completedAt: new Date(Date.now() - 2 * 24 * 60_000).toISOString() },
-];
+/** A real Task row from the backend, mapped into the shape the queue needs.
+    `text` here holds the title; the bottom panel still renders mock history,
+    because execution is a later phase. Unbounded attempts map to Infinity so
+    the "no attempts left" checks simply never fire. */
+const mapTask = (row: Task): MockTask => ({
+  id: row.id,
+  text: row.title,
+  status: row.status,
+  attempts: row.attempts,
+  maxAttempts: row.max_attempts ?? Infinity,
+  startedAt: row.started_at ? normDate(row.started_at) : undefined,
+  completedAt: row.completed_at ? normDate(row.completed_at) : undefined,
+  failedAt:
+    row.status === "failed" && row.completed_at ? normDate(row.completed_at) : undefined,
+});
+/** Server stores UTC as "YYYY-MM-DD HH:MM:SS"; parse it as that, not local. */
+const normDate = (s: string): string => s.replace(" ", "T");
 
 const TABS = ["actions", "completed"] as const;
 type Tab = (typeof TABS)[number];
 
 export function TaskWorkspace({ projectName, onBack }: { projectName: string; onBack?: () => void }) {
   const navigate = useNavigate();
-  const [tasks, setTasks] = useState<MockTask[]>(SEED);
+  const [rows, setRows] = useState<MockTask[]>([]);
   const [tab, setTab] = useState<Tab>("actions");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [resumeText, setResumeText] = useState("");
@@ -153,85 +161,105 @@ export function TaskWorkspace({ projectName, onBack }: { projectName: string; on
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState("");
   const [dragId, setDragId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  const timers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
-  const clearAll = useCallback(() => { for (const t of timers.current.values()) clearTimeout(t); timers.current.clear(); }, []);
-  useEffect(() => () => clearAll(), [clearAll]);
+  // Load this project's queue from the backend. Runs on open and again if the
+  // project changes under us (e.g. navigating between projects).
+  useEffect(() => {
+    let cancelled = false;
+    setRows([]);
+    setError(null);
+    api.listTasks(projectName)
+      .then((tasks) => {
+        if (cancelled) return;
+        setRows(tasks.map(mapTask));
+      })
+      .catch(() => { if (!cancelled) setError("Could not load this project's tasks."); });
+    return () => { cancelled = true; };
+  }, [projectName]);
 
-  const running = tasks.some((x) => x.status === "running");
-  const selected = useMemo(() => tasks.find((x) => x.id === selectedId) ?? null, [tasks, selectedId]);
+  // Choose the first active task once the list has loaded and none is picked,
+  // so an empty workspace does not open on nothing.
+  useEffect(() => {
+    if (rows.length && selectedId == null) {
+      const next = rows.find((x) => x.status !== "completed");
+      setSelectedId(next?.id ?? rows[rows.length - 1].id);
+    }
+  }, [rows]);
 
-  /** A task working runs until it finishes or fails; one timer per such task. */
-  const start = useCallback((id: string, opts?: { fail?: boolean }) => {
-    setTasks((prev) => prev.map((x) => (x.id === id ? { ...x, status: "running", attempts: x.attempts + 1, startedAt: new Date().toISOString() } : x)));
-    const timer = setTimeout(() => {
-      timers.current.delete(id);
-      if (opts?.fail) fail(id);
-      else finish(id);
-    }, 3500);
-    timers.current.set(id, timer);
-  }, []);
+  const running = rows.some((x) => x.status === "running");
+  const selected = useMemo(() => rows.find((x) => x.id === selectedId) ?? null, [rows, selectedId]);
 
-  const finish = useCallback((id: string) => {
-    setTasks((prev) => prev.map((x) => (x.id === id ? { ...x, status: "completed", completedAt: new Date().toISOString() } : x)));
-  }, []);
+  // Run/Resume/Stop/Rerun drive execution — Phase 3. Keep the buttons, but do
+  // nothing rather than pretend a run is happening. They take args so the call
+  // sites below stay valid until they are wired up.
+  const start = (..._args: unknown[]) => {};
+  const stop = () => {};
+  const rerun = (..._args: unknown[]) => {};
 
-  const fail = useCallback((id: string) => {
-    setTasks((prev) => prev.map((x) => (x.id === id ? { ...x, status: "failed", failedAt: new Date().toISOString() } : x)));
-  }, []);
+  const addTask = useCallback(async (prompt: string) => {
+    const text = prompt.trim();
+    if (!text) return;
+    try {
+      const created = await api.createTask(projectName, text);
+      setRows((prev) => [...prev, mapTask(created)]);
+      setTab("actions");
+    } catch {
+      setError("Could not create the task.");
+    }
+    setAdding(false);
+    setDraft("");
+  }, [projectName]);
 
-  const stop = useCallback(() => {
-    setTasks((prev) => prev.map((x) => (x.status === "running" ? { ...x, status: "stopped" } : x)));
-    for (const id of [...timers.current.keys()]) timers.current.delete(id);
-  }, []);
-
-  const addTask = useCallback((text: string) => {
-    setTasks((prev) => [{ id: `t${nextId++}`, text, status: "pending", attempts: 0, maxAttempts: 5 }, ...(prev ?? [])]);
-    setTab("actions");
-  }, []);
-
-  // Reorder by moving one task before another in the underlying list; the
-  // Actions and Completed views filter from this, so both keep the new order.
-  const moveTask = useCallback((fromId: string, toId: string) => {
-    setTasks((prev) => {
-      const i = prev.findIndex((x) => x.id === fromId);
-      if (i < 0) return prev;
-      const next = [...prev];
-      const [moved] = next.splice(i, 1);
-      const j = next.findIndex((x) => x.id === toId);
-      next.splice(j >= 0 ? j : 0, 0, moved);
-      return next;
+  // Move one task before another, then persist the new order to the server, which
+  // owns the queue. This really reorders — unlike the mock, which would not move.
+  const moveTask = useCallback(async (fromId: string, toId: string) => {
+    if (fromId === toId) return;
+    setRows((prev) => {
+      const arr = [...prev];
+      const from = arr.findIndex((x) => x.id === fromId);
+      const to = arr.findIndex((x) => x.id === toId);
+      if (from < 0 || to < 0) return prev;
+      const [moved] = arr.splice(from, 1);
+      arr.splice(to >= 0 ? to : arr.length, 0, moved);
+      void api.setTaskOrder(projectName, arr.map((x) => x.id));
+      return arr;
     });
-  }, []);
+  }, [projectName]);
 
-  // A task open for the first time gets its history; kept so anything typed to
-  // resume is not lost when another render redraws the list.
-  const seedIfMissing = useCallback((id: string) => {
-    setTasks((prev) => prev.map((x) => (x.id === id && !x.msgs ? { ...x, msgs: seedMessages(x) } : x)));
-  }, []);
-  useEffect(() => { if (selectedId) seedIfMissing(selectedId); }, [selectedId, seedIfMissing]);
-
-  const actions = tab === "actions" ? tasks.filter((x) => x.status !== "completed") : tasks.filter((x) => x.status === "completed");
-  const ago = (iso?: string) => (iso ? formatRelative((Date.now() - new Date(iso).getTime()) / 60000, "minute") : null);
-
-  const rerun = (task: MockTask) => start(task.id, { fail: task.status === "failed" });
+  const rename = useCallback(async (id: string, title: string) => {
+    const text = title.trim();
+    if (!text) return;
+    try {
+      await api.editTask(projectName, id, { title: text });
+      setRows((prev) => prev.map((x) => (x.id === id ? { ...x, text } : x)));
+    } catch {
+      setError("Could not save the change.");
+    }
+  }, [projectName]);
 
   const remove = async (task: MockTask) => {
-    if (await confirmDialog({ title: t("Delete \"{name}\"?", { name: task.text }), message: t("It is gone from this list forever."), confirmLabel: t("Delete"), danger: true })) {
-      setTasks((prev) => prev.filter((x) => x.id !== task.id));
+    if (!(await confirmDialog({ title: t("Delete \"{name}\"?", { name: task.text }), message: t("It is gone from this list forever."), confirmLabel: t("Delete"), danger: true }))) return;
+    try {
+      await api.deleteTask(projectName, task.id);
+      setRows((prev) => prev.filter((x) => x.id !== task.id));
       if (selectedId === task.id) setSelectedId(null);
+    } catch {
+      setError("Could not delete the task.");
     }
   };
 
-  const sendResume = async () => {
-    const text = resumeText.trim();
-    if (!text || !selected) return;
-    seedIfMissing(selected.id);
-    const userMsg: MockMsg = { id: mid(), kind: "user", text, at: Date.now() };
-    const reply: MockMsg = { id: mid(), kind: "assistant", text: REPLY(text), at: Date.now() + 10 };
-    setTasks((prev) => prev.map((x) => (x.id === selected.id ? { ...x, attempts: x.attempts + 1, msgs: [...(x.msgs ?? []), [userMsg, reply]] } : x)));
+  // Continuing a session drives the agent — Phase 3. The composer stays, but
+  // sending does nothing until it is wired up.
+  const sendResume = () => {
     setResumeText("");
+    setComposerOpen(false);
   };
+
+  // One list filtered by the open tab: Actions shows everything not completed,
+  // Completed shows only finished Tasks.
+  const actions = tab === "actions" ? rows.filter((x) => x.status !== "completed") : rows.filter((x) => x.status === "completed");
+  const ago = (iso?: string) => (iso ? formatRelative((Date.now() - new Date(iso).getTime()) / 60000, "minute") : null);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-canvas">
@@ -264,7 +292,7 @@ export function TaskWorkspace({ projectName, onBack }: { projectName: string; on
         <div className="flex items-center px-3 pb-2 text-xs">
           <div className="inline-flex items-center rounded-lg bg-raised/60 p-0.5">
             {TABS.map((label) => {
-              const n = label === "actions" ? tasks.filter((x) => x.status !== "completed").length : tasks.filter((x) => x.status === "completed").length;
+              const n = label === "actions" ? rows.filter((x) => x.status !== "completed").length : rows.filter((x) => x.status === "completed").length;
               return (
                 <button
                   key={label}
@@ -281,7 +309,9 @@ export function TaskWorkspace({ projectName, onBack }: { projectName: string; on
         </div>
 
         <div className="max-h-[40%] min-h-0 overflow-y-auto px-2 pb-2">
-          {tasks.length === 0 ? (
+          {error ? (
+            <p className="py-4 text-center text-xs text-warn">{error}</p>
+          ) : rows.length === 0 ? (
             <EmptyState primary />
           ) : (
             <ul className="space-y-0.5 pt-0.5">
@@ -292,8 +322,8 @@ export function TaskWorkspace({ projectName, onBack }: { projectName: string; on
                     value={draft}
                     onChange={(e) => setDraft(e.target.value)}
                     onKeyDown={(e) => isEnter(e) && draft.trim() && addTask(draft.trim())}
-                    placeholder={t("New task title")}
-                    aria-label={t("New task title")}
+                    placeholder={t("Write what you want done")}
+                    aria-label={t("Write what you want done")}
                     className="w-full rounded px-2 py-1 text-sm outline-none placeholder:text-fg-faint"
                   />
                   <div className="mt-1 flex justify-end gap-1.5">
@@ -324,6 +354,7 @@ export function TaskWorkspace({ projectName, onBack }: { projectName: string; on
                   onOpenSession={() => setPreview(task)}
                   onStart={() => task.status === "running" ? stop() : start(task.id)}
                   onRerun={() => rerun(task)}
+                  onRename={(title) => rename(task.id, title)}
                   onRemove={() => remove(task)}
                 />
               ))}
@@ -414,6 +445,7 @@ function TaskRow({
   onOpenSession,
   onStart,
   onRerun,
+  onRename,
   onRemove,
 }: {
   task: MockTask;
@@ -427,8 +459,36 @@ function TaskRow({
   onOpenSession: () => void;
   onStart: () => void;
   onRerun: () => void;
+  onRename?: (title: string) => void;
   onRemove: () => void;
 }) {
+  // Rename is local to the row: opening an input replaces the title, Enter saves
+  // it server-side, Escape or leaving cancels. The prompt's first line already
+  // named the task, so renaming is how you make that name your own.
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(task.text);
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (editing) {
+      setValue(task.text);
+      const id = setTimeout(() => {
+        inputRef.current?.focus();
+        inputRef.current?.select();
+      }, 0);
+      return () => clearTimeout(id);
+    }
+  }, [editing, task.text]);
+
+  const commit = () => {
+    const text = value.trim();
+    setEditing(false);
+    if (text && onRename) onRename(text);
+  };
+  const cancel = () => {
+    setValue(task.text);
+    setEditing(false);
+  };
+
   return (
     <li
       draggable
@@ -447,22 +507,41 @@ function TaskRow({
         <LuGripVertical className="h-3.5 w-3.5" />
       </button>
       <StatusDot taskStatus={task.status} bare />
-      <button onClick={onSelect} draggable={false} className="min-w-0 flex-1 text-left">
-        <p className="truncate text-sm text-fg">{task.text}</p>
-        <p className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-fg-faint">
-          {ago && <span>{t("last {when}", { when: ago })}</span>}
-          {task.status === "running" && <span className="working-text">{t("Working")}</span>}
-          {task.status === "failed" && task.attempts < task.maxAttempts && <span>{t("Failed — run again")}</span>}
-          {task.status === "stopped" && <span>{t("Stopped")}</span>}
-          {task.status === "pending" && <span>{t("Waiting to start")}</span>}
-          {task.attempts >= task.maxAttempts && <span className="text-warn">{t("No attempts left")}</span>}
-        </p>
-      </button>
+      <div className="min-w-0 flex-1">
+        {editing ? (
+          <input
+            ref={inputRef}
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            onKeyDown={(e) => { if (isEnter(e)) { e.preventDefault(); commit(); } else if (e.key === "Escape") { e.preventDefault(); cancel(); } }}
+            onBlur={cancel}
+            aria-label={t("Rename task")}
+            className="w-full rounded-md border border-line bg-surface px-2 py-0.5 text-sm text-fg outline-none focus:border-accent"
+          />
+        ) : (
+          <button onClick={onSelect} draggable={false} className="min-w-0 flex-1 text-left">
+            <p className="truncate text-sm text-fg">{task.text}</p>
+            <p className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-fg-faint">
+              {ago && <span>{t("last {when}", { when: ago })}</span>}
+              {task.status === "running" && <span className="working-text">{t("Working")}</span>}
+              {task.status === "failed" && task.attempts < task.maxAttempts && <span>{t("Failed — run again")}</span>}
+              {task.status === "stopped" && <span>{t("Stopped")}</span>}
+              {task.status === "pending" && <span>{t("Waiting to start")}</span>}
+              {task.attempts >= task.maxAttempts && <span className="text-warn">{t("No attempts left")}</span>}
+            </p>
+          </button>
+        )}
+      </div>
       <div className="flex shrink-0 items-center gap-1 opacity-0 transition focus-within:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100">
         <RunControls task={task} onStart={onStart} onRerun={onRerun} />
         {task.status === "completed" && task.attempts > 0 && (
           <ActionBtn title={t("View session")} onClick={onOpenSession} aria-label={t("View session")}>
             <LuFileText className="h-3.5 w-3.5" />
+          </ActionBtn>
+        )}
+        {onRename && !editing && (
+          <ActionBtn title={t("Rename task")} onClick={() => setEditing(true)} aria-label={t("Rename task")}>
+            <LuPen className="h-3.5 w-3.5" />
           </ActionBtn>
         )}
         <ActionBtn title={t("Delete task")} onClick={onRemove} aria-label={t("Delete task")}>

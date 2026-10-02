@@ -89,6 +89,8 @@ export interface TaskRow {
   title: string;
   description: string;
   status: TaskStatus;
+  /** Queue slot within its project's Tasks; lower comes first (added Phase 2). */
+  position: number;
   /** How many attempts have been started. */
   attempts: number;
   /** Highest allowed attempts, or NULL for unbounded. */
@@ -269,6 +271,9 @@ export function getDb(): Database.Database {
       status TEXT NOT NULL DEFAULT 'pending',
       attempts INTEGER NOT NULL DEFAULT 0,
       max_attempts INTEGER,
+      -- Queue slot within this project's Tasks; lower comes first. Added in
+      -- Phase 2 so the order the user sets is the order execution runs in.
+      position INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       started_at TEXT,
       completed_at TEXT,
@@ -277,6 +282,8 @@ export function getDb(): Database.Database {
     -- Looked up by project, and filtered by state, far more often than by id.
     CREATE INDEX IF NOT EXISTS idx_tasks_workspace ON tasks(workspace);
     CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+    -- The queue: a project's Tasks in the order the user set them.
+    CREATE INDEX IF NOT EXISTS idx_tasks_queue ON tasks(workspace, position);
 
     -- Each run of a Task. One row per autonomous attempt, holding the session
     -- that attempt worked in (NULL until the attempt actually starts) plus how
@@ -590,6 +597,20 @@ function migrate(d: Database.Database): void {
   );
   if (noteCols.length && !noteCols.includes("pending_delivery")) {
     d.exec("ALTER TABLE notes ADD COLUMN pending_delivery INTEGER NOT NULL DEFAULT 0");
+  }
+  // Queue order for Tasks (Phase 2): a per-project slot that fixes the order
+  // execution runs in. Backfill existing Tasks into their creation order so the
+  // queue is unchanged for anyone upgrading.
+  const taskCols = (d.prepare("PRAGMA table_info(tasks)").all() as { name: string }[]).map((c) => c.name);
+  if (taskCols.length && !taskCols.includes("position")) {
+    d.exec("ALTER TABLE tasks ADD COLUMN position INTEGER NOT NULL DEFAULT 0");
+    const rows = d.prepare("SELECT id, workspace FROM tasks ORDER BY created_at ASC, id ASC").all() as { id: string; workspace: string }[];
+    const next = new Map<string, number>();
+    for (const r of rows) {
+      const n = (next.get(r.workspace) ?? 0) + 1;
+      next.set(r.workspace, n);
+      d.prepare("UPDATE tasks SET position = ? WHERE id = ?").run(n, r.id);
+    }
   }
   // Last, because it reads the settings the tables above have to exist for.
   adoptBrowserGrants(d);
@@ -1930,12 +1951,16 @@ export interface NewTask {
 }
 
 export function createTask(row: NewTask): TaskRow {
-  const info = getDb()
+  const db = getDb();
+  // Append to the end of this project's queue: one past its highest slot.
+  const pos = db.prepare("SELECT COALESCE(MAX(position), 0) AS p FROM tasks WHERE workspace = ?")
+    .get(row.workspace) as { p: number };
+  const info = db
     .prepare(
-      `INSERT INTO tasks (id, workspace, title, description, status, attempts, max_attempts, created_at, updated_at)
-       VALUES (@id, @workspace, @title, @description, 'pending', 0, @max_attempts, datetime('now'), datetime('now'))`
+      `INSERT INTO tasks (id, workspace, title, description, status, attempts, max_attempts, position, created_at, updated_at)
+       VALUES (@id, @workspace, @title, @description, 'pending', 0, @max_attempts, @pos, datetime('now'), datetime('now'))`
     )
-    .run({ ...row, description: row.description ?? "", max_attempts: row.max_attempts ?? null });
+    .run({ ...row, description: row.description ?? "", max_attempts: row.max_attempts ?? null, pos: pos.p + 1 });
   if (info.changes !== 1) throw new Error("failed to create task");
   return getTask(row.id)!;
 }
@@ -1947,7 +1972,7 @@ export function getTask(id: string): TaskRow | undefined {
 /** A Project's Tasks in creation order: the queue order the workspace shows. */
 export function listTasksByWorkspace(workspace: string): TaskRow[] {
   return getDb()
-    .prepare("SELECT * FROM tasks WHERE workspace = ? ORDER BY created_at ASC, id ASC")
+    .prepare("SELECT * FROM tasks WHERE workspace = ? ORDER BY position ASC, id ASC")
     .all(workspace) as TaskRow[];
 }
 
@@ -1979,6 +2004,18 @@ export function updateTaskFields(id: string, fields: UpdatableTaskFields): TaskR
 export function deleteTask(id: string): void {
   getDb().prepare("DELETE FROM task_attempts WHERE task_id = ?").run(id);
   getDb().prepare("DELETE FROM tasks WHERE id = ?").run(id);
+}
+
+/** Rewrite a project's Tasks into the given order (first runs first). Positions
+    are reassigned 1..n for the whole project, so nothing keeps a stale slot. */
+export function reorderTasks(workspace: string, ids: string[]): void {
+  getDb().transaction(() => {
+    for (let i = 0; i < ids.length; i++) {
+      getDb()
+        .prepare("UPDATE tasks SET position = ?, updated_at = datetime('now') WHERE id = ? AND workspace = ?")
+        .run(i + 1, ids[i], workspace);
+    }
+  })();
 }
 
 export interface NewAttempt {
