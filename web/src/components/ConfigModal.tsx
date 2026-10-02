@@ -3,6 +3,7 @@ import { Select } from "./Select";
 import {
   LuBlocks,
   LuBrain,
+  LuBell,
   LuCheck,
   LuCircleAlert,
   LuDownload,
@@ -37,7 +38,7 @@ import { KeepRecent, useKeepRecentSave } from "./KeepRecent";
 import { formatTokens } from "../transcript";
 import { displayName } from "../tool-groups";
 import { useAsksBeforeDeleting } from "../confirm-prefs";
-import { getNtfyTopic, isNtfyEnabled, setNtfyEnabled, setNtfyTopic, useNotifyState } from "../notify";
+import { useNotifyState } from "../notify";
 import { PeoplePanel } from "./PeoplePanel";
 import { PortalExtensions } from "./PortalExtensions";
 import { Modal } from "./Modal";
@@ -68,6 +69,7 @@ export type Tab =
   | "mcp"
   | "extensions"
   | "browser"
+  | "push"
   | "shortcuts"
   | "about"
   | "advanced";
@@ -107,6 +109,12 @@ const GROUPS: { label: string; tabs: TabDef[] }[] = [
     ],
   },
   {
+    label: msg("Notifications"),
+    tabs: [
+      { id: "push", label: msg("Push"), icon: <LuBell />, hint: msg("ntfy push alerts sent from the server") },
+    ],
+  },
+  {
     label: msg("Portal"),
     tabs: [
       { id: "browser", label: msg("This browser"), icon: <LuMonitor />, hint: msg("Theme, notifications, confirmations") },
@@ -118,6 +126,9 @@ const GROUPS: { label: string; tabs: TabDef[] }[] = [
   },
 ];
 const TABS = GROUPS.flatMap((g) => g.tabs);
+
+/** A response faster than this is not worth announcing — see the server's default too. */
+const defaultMinResponseSeconds = 60;
 
 /**
  * What Settings needs first, fetched before it is opened — a moment after the
@@ -294,6 +305,7 @@ export function ConfigModal({
 
       <div key={nav.kind === "tab" ? nav.id : nav.spec} ref={page} className="settings-page">
       {nav.kind === "tab" && nav.id === "models" && <ProvidersPanel onError={setError} onSetup={onSetup} />}
+      {nav.kind === "tab" && nav.id === "push" && <PushPanel onError={setError} />}
       {nav.kind === "tab" && nav.id === "general" && <GeneralPanel onError={setError} onProviders={() => setNav({ kind: "tab", id: "models" })} />}
       {nav.kind === "tab" && nav.id === "browser" && <BrowserPanel onError={setError} />}
       {nav.kind === "tab" && nav.id === "about" && <AboutPanel onError={setError} />}
@@ -556,16 +568,13 @@ function Notifications() {
     unsupported: t("This browser does not offer them here — they need a secure connection (HTTPS, or localhost)."),
     denied: t("The browser has blocked them for this site. Allow them in its site settings, then come back."),
   };
-  // Kept in component state so the settings page re-draws as they change.
-  const [ntfyEnabled, setNtfyEnabledState] = useState(isNtfyEnabled());
-  const [ntfyTopic, setNtfyTopicState] = useState(getNtfyTopic());
-
-  const ntfyNote:
-    | { when: boolean; text: string }
-    | null = !ntfyTopic ? { when: true, text: t("Enter an ntfy topic below first, then turn this on.") } : null;
-
   return (
     <div className="space-y-3">
+      <p className="text-xs text-fg-faint">
+        {t(
+          "These flash only in this browser. For alerts that reach a phone or desktop even when no page is open, see Push notifications.",
+        )}
+      </p>
       <SwitchRow
         title={t("Tell me when a chat is done or needs me")}
         detail={t("Only while you are on another tab or window: nobody needs telling about the chat in front of them. The tab title shows what a chat is doing either way.")}
@@ -573,6 +582,62 @@ function Notifications() {
         disabled={state === "unsupported" || state === "denied"}
         onChange={(on) => void setOn(on)}
         note={note[state]}
+      />
+    </div>
+  );
+}/**
+ * Server-side push through ntfy.sh: a finished chat or a waiting question pings
+ * a phone or desktop whether or not any page is open. Configured here, sent from
+ * the server, so it cannot be turned off from this browser alone.
+ */
+function PushPanel({ onError }: { onError: (e: string) => void }) {
+  const meta = useCached("settings/ntfy", api.settingsNtfy, { onError: (e) => onError(e.message) });
+  const [enabled, setEnabled] = useState(false);
+  const [topic, setTopic] = useState("");
+  const [minResponseSeconds, setMinResponseSeconds] = useState(defaultMinResponseSeconds);
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    if (!meta.value) return;
+    setEnabled(meta.value.enabled);
+    setTopic(meta.value.topic);
+    setMinResponseSeconds(meta.value.minResponseSeconds ?? defaultMinResponseSeconds);
+  }, [meta.value]);
+
+  const save = async () => {
+    setError(null);
+    if (enabled && !topic.trim()) {
+      return setError(t("Enter an ntfy topic first, then turn this on."));
+    }
+    try {
+      const next = await api.saveSettingsNtfy({ enabled, topic, minResponseSeconds });
+      setEnabled(next.enabled);
+      setTopic(next.topic);
+      setMinResponseSeconds(next.minResponseSeconds);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-fg-faint">
+        {t(
+          "A chat finishing or needing an answer sends a push through ntfy.sh. It fires whenever the response took at least as long as the minimum below — so a fast reply you can still see does not ping you.",
+        )}
+      </p>
+      <SwitchRow
+        title={t("Push notifications with ntfy")}
+        detail={t("Send a notification to your phone or desktop when a chat finishes or needs an answer, using ntfy.sh. This works where the browser's own ones do not, so it keeps working over a plain connection.")}
+        on={enabled}
+        disabled={!topic.trim()}
+        onChange={(on) => {
+          setEnabled(on);
+          setError(null);
+        }}
       />
 
       <Field
@@ -582,29 +647,47 @@ function Notifications() {
         <input
           type="text"
           className={inputCls}
-          value={ntfyTopic}
+          value={topic}
           placeholder={t("your ntfy topic")}
           autoComplete="off"
           spellCheck="false"
           onChange={(e) => {
-            const topic = e.target.value;
-            setNtfyTopicState(topic);
-            setNtfyTopic(topic);
+            setTopic(e.target.value);
+            setError(null);
           }}
         />
       </Field>
 
-      <SwitchRow
-        title={t("Push notifications with ntfy")}
-        detail={t("Send a notification to your phone or desktop when a chat finishes or needs an answer, using ntfy.sh. This works where the browser's own ones do not, so it keeps working over a plain connection.")}
-        on={ntfyEnabled}
-        disabled={!ntfyTopic}
-        onChange={(on) => {
-          setNtfyEnabledState(on);
-          setNtfyEnabled(on);
-        }}
-        note={ntfyNote?.when ? ntfyNote.text : undefined}
-      />
+      <Field
+        label={t("Minimum time before it notifies")}
+        hint={t("Do not notify if a chat responds faster than this. Set to 0 to always notify.")}
+      >
+        <input
+          type="number"
+          min={0}
+          max={86400}
+          className={`${inputCls} w-full sm:w-40`}
+          value={minResponseSeconds}
+          onChange={(e) => {
+            const raw = e.target.value;
+            // Accept empty so the field clears rather than snapping back mid-typing.
+            setMinResponseSeconds(raw === "" ? -1 : Number(raw));
+            setError(null);
+          }}
+        />
+      </Field>
+
+      {error ? <p className="text-xs text-danger">{error}</p> : null}
+
+      <button onClick={() => void save()} className={primaryCls} disabled={saved}>
+        {saved ? (
+          <>
+            <LuCheck className="h-4 w-4" /> {t("Saved")}
+          </>
+        ) : (
+          t("Save")
+        )}
+      </button>
     </div>
   );
 }

@@ -33,6 +33,7 @@ import {
   type WizardInput,
 } from "./agent-setup.js";
 import { sessions, CommandFailed, EXECUTOR_KIND, IMAGE_ROOT } from "./session-manager.js";
+import { readNtfyConfig, saveNtfyConfig, startNtfyNotifications, stopNtfyNotifications } from "./ntfy.js";
 import { ImageError, MAX_IMAGE_BYTES, MAX_IMAGES, imagePath, mimeOf, parseImages, saveImages } from "./prompt-images.js";
 import { toolSource } from "./tool-policy.js";
 import { mcpServerNames } from "./api/mcp.js";
@@ -245,6 +246,35 @@ app.put("/api/settings", async (req, res) => {
         ? `Compaction applied to ${refreshed} open session${refreshed === 1 ? "" : "s"}. Model and effort apply to newly started sessions.`
         : "Applies to newly started sessions",
   });
+});
+
+// ── push notifications (ntfy) ─────────────────────────────
+// Server-owned: alerts a phone or desktop when a chat finishes or needs an
+// answer, whether or not any page is open — separate from the browser's own,
+// which lives in "This browser". Kept out of the general settings payload so
+// the two never have to save together.
+app.get("/api/settings/ntfy", (_req, res) => {
+  res.json(readNtfyConfig());
+});
+
+app.put("/api/settings/ntfy", (req, res) => {
+  const body = req.body ?? {};
+  const enabled = typeof body.enabled === "boolean" ? body.enabled : undefined;
+  const topic = typeof body.topic === "string" ? body.topic.trim() : undefined;
+  const minResponseSeconds = typeof body.minResponseSeconds === "number" ? body.minResponseSeconds : undefined;
+
+  // An empty topic while on sends nowhere, so refuse rather than store half a
+  // setting that silently does nothing.
+  if (enabled === true && (!topic || topic.length > 200)) {
+    return res.status(400).json({ error: "An ntfy topic is required before you can turn this on" });
+  }
+  if (
+    minResponseSeconds !== undefined &&
+    (!Number.isFinite(minResponseSeconds) || minResponseSeconds < 0 || minResponseSeconds > 86_400)
+  ) {
+    return res.status(400).json({ error: "Minimum response time must be between 0 and 86,400 seconds" });
+  }
+  res.json(saveNtfyConfig({ enabled, topic, minResponseSeconds }));
 });
 
 // --- workspaces ---
@@ -1415,6 +1445,10 @@ const server = (tls ? createHttpsServer(tls, app) : createHttpServer(app)).liste
   // Recurring schedules wait for their next slot; overdue one-off routines catch up.
   routineSupervisor.start();
 
+  // Push alerts fire from here, so a restart does not need a page open to keep
+  // telling you when a chat finishes. Only transitions after this point are news.
+  startNtfyNotifications();
+
   // pi's catalogue, built now rather than when the first chat is opened:
   // that chat's effort pill waits for it to say which levels its model has.
   // Not for the container executor, whose pi runs inside the container: here
@@ -1457,6 +1491,7 @@ scheduleDreams();
 async function shutdown(signal: string) {
   console.log(`${signal} received — stopping running sessions`);
   routineSupervisor.stop();
+  stopNtfyNotifications();
   await channelSupervisor.shutdown();
   await sessions.shutdown();
   server.close(() => process.exit(0));
