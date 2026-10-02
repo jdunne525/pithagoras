@@ -172,6 +172,18 @@ The Task should not simply be another Chat record.
 
 A Task may use Pithagoras sessions internally to execute work, but the Task is the durable owner of the work.
 
+### Naming: Task vs. the existing `sessions.kind`
+
+Pithagoras already stores ordinary user chats in `sessions` with `kind = 'task'`. That label
+denotes an ordinary chat and is **not** the autonomous Task described here. To keep the two
+apart:
+
+* The autonomous work unit stays called a **Task** publicly (matching CodeLoop), persisted in its
+  own `tasks` / `task_attempts` tables — never in `sessions`.
+* Each autonomous **attempt** runs inside a Pithagoras agent session whose `kind` is a new value,
+  `'autonomous'`, distinct from the existing `kind = 'task'` (ordinary chat) and from `'agent'`
+  and `'routine'`. Never reuse `'task'` for an attempt session.
+
 ---
 
 # 5. Task execution architecture
@@ -229,6 +241,8 @@ Task
  +-- Attempt 2 → Session
  +-- Attempt 3 → Session
 ```
+
+The concrete shape of this model (the separate `task_attempts` table, the `workspace`-path project key, random-UUID Task ids, and the `kind = 'autonomous'` attempt-session label established in Phase 1) fixes these choices so later phases build on them consistently.
 
 The existing session/event infrastructure should remain responsible for the actual conversation history.
 
@@ -1087,6 +1101,36 @@ Implement:
 No autonomous execution yet.
 
 Verify existing Pithagoras functionality remains unaffected.
+
+### Phase 1 design decisions (locked)
+
+These resolve the ambiguities in the investigation phase and are the target schema/API for all
+later persistence phases.
+
+* **Project association key.** Follow the existing convention: store the project's resolved
+  absolute folder path in a `workspace TEXT` column, exactly like `routines.workspace` and
+  `sessions.workspace`. A Task is scoped to exactly one Project via this path. Projects themselves
+  remain filesystem-derived (still not stored as rows).
+* **Task ID.** A random UUID generated server-side at creation (`crypto.randomUUID()`), never a
+  slug and never used in a URL. Matches how ordinary sessions are identified.
+* **Attempt ↔ session model.** A dedicated `task_attempts` table (not a column on `sessions`):
+  `id` (uuid), `task_id`, `session_id` (nullable until the attempt actually runs),
+  `attempt_number` (integer, 1-based), per-attempt status and started/completed timestamps. It
+  references the existing `sessions` row by id; it does not duplicate transcripts.
+* **Autonomous-attempt session kind.** Attempt sessions use a new `kind = 'autonomous'`, distinct
+  from the existing `kind = 'task'` (ordinary chat), and from `'agent'` / `'routine'`.
+* **Status representation.** Plain `status TEXT NOT NULL DEFAULT 'pending'`, matching Pithagoras's
+  existing plain-text columns (no CHECK constraint). Allowed values: `pending`, `running`,
+  `completed`, `failed`, `stopped`.
+* **Fields carried now.** In addition to the minimum in §4, include `max_attempts INTEGER` (NULL
+  means unbounded; default NULL) even though retry logic is Phase 5, so the column exists before
+  the logic that needs it. Project-level Task instructions (§7) are deliberately **excluded**.
+* **Backend module + minimal endpoints.** Orchestration lives in a dedicated server-side service
+  module, not in route handlers. Add the minimum `/api/projects/:name/tasks*` endpoints needed to
+  exercise CRUD so the layer is testable end-to-end, without building out the full API surface
+  (routing/UI belong to later phases).
+* **Migration.** Add the two new tables additively inside `migrate()` using presence checks, in
+  the existing style, keeping every existing session/event/routine intact.
 
 ---
 

@@ -36,9 +36,11 @@ export interface SessionRow {
   reloads?: number;
   /**
    * "task" for the ones you create here, "agent" for one reached through a
-   * channel, "routine" for one a schedule owns.
+   * channel, "routine" for one a schedule owns, "autonomous" for the sessions
+   * an autonomous Task runs each attempt in — distinct from "task", which is
+   * an ordinary chat, not one of those.
    */
-  kind: "task" | "agent" | "routine";
+  kind: "task" | "agent" | "routine" | "autonomous";
   /**
    * Agent sessions only: the slug of the channel it arrived through.
    *
@@ -74,6 +76,41 @@ export interface EventRow {
   type: string;
   payload: string;
   created_at: string;
+}
+
+/** User-visible lifecycle states of an autonomous Task — see §4 of the CodeLoop plan. */
+export type TaskStatus = "pending" | "running" | "completed" | "failed" | "stopped";
+
+/** An autonomous Task: a durable unit of work owned by one Project (see §4). */
+export interface TaskRow {
+  id: string;
+  /** Resolved absolute path of the project folder this Task belongs to. */
+  workspace: string;
+  title: string;
+  description: string;
+  status: TaskStatus;
+  /** How many attempts have been started. */
+  attempts: number;
+  /** Highest allowed attempts, or NULL for unbounded. */
+  max_attempts: number | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  updated_at: string;
+}
+
+/** One attempt of a Task: a pointer to the agent session it ran in (until it runs). */
+export interface TaskAttemptRow {
+  id: string;
+  task_id: string;
+  /** The attempt's agent session, once it has started; NULL before then. */
+  session_id: string | null;
+  /** 1-based position of this attempt within its Task. */
+  attempt_number: number;
+  status: TaskStatus;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
 }
 
 let db: Database.Database | null = null;
@@ -216,6 +253,48 @@ export function getDb(): Database.Database {
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    -- Autonomous Tasks: durable units of work owned by one Project (a folder
+    -- on disk, whose owning column is workspace in this SQL string). This holds
+    -- only the Task itself; each of its runs is a row in task_attempts, pointing
+    -- at a normal session. Names here are plain text: they live inside a JS
+    -- template literal, so real backticks would end the string by mistake.
+    -- See §4 of the CodeLoop plan.
+    CREATE TABLE IF NOT EXISTS tasks (
+      id TEXT PRIMARY KEY,
+      workspace TEXT NOT NULL,
+      title TEXT NOT NULL DEFAULT '',
+      description TEXT NOT NULL DEFAULT '',
+      -- pending | running | completed | failed | stopped
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      max_attempts INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      started_at TEXT,
+      completed_at TEXT,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    -- Looked up by project, and filtered by state, far more often than by id.
+    CREATE INDEX IF NOT EXISTS idx_tasks_workspace ON tasks(workspace);
+    CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+
+    -- Each run of a Task. One row per autonomous attempt, holding the session
+    -- that attempt worked in (NULL until the attempt actually starts) plus how
+    -- far through the Task this attempt is. Previous attempts stay as history;
+    -- deleting a Task drops its attempts with it.
+    CREATE TABLE IF NOT EXISTS task_attempts (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+      session_id TEXT,
+      attempt_number INTEGER NOT NULL,
+      -- pending | running | completed | failed | stopped
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      started_at TEXT,
+      completed_at TEXT
+    );
+    -- Every look-up of an attempt goes through its Task.
+    CREATE INDEX IF NOT EXISTS idx_task_attempts_task ON task_attempts(task_id);
 
     -- Portal-wide defaults applied to every new session. Env vars are the
     -- fallback, so an untouched install still works out of the box.
@@ -1829,4 +1908,131 @@ export function openDetachedSubagents(): { sessionId: string; id: string }[] {
     sessionId: r.session_id,
     id: r.id,
   }));
+}
+
+// --- Autonomous Tasks (§4 of the CodeLoop plan) ---------------------------------
+//
+// These are the raw data-access layer for Tasks and their attempts. All the
+// lifecycle rules live in the tasks service module; here there is only SQL.
+
+// UTC, seconds precision, matching the datetime('now') defaults above. JS parses
+// the bare form as local time, so values written from JS use this instead.
+function utcNowText(): string {
+  return new Date().toISOString().replace("T", " ").replace(/\.\d+$/, "");
+}
+
+export interface NewTask {
+  id: string;
+  workspace: string;
+  title: string;
+  description?: string;
+  max_attempts?: number | null;
+}
+
+export function createTask(row: NewTask): TaskRow {
+  const info = getDb()
+    .prepare(
+      `INSERT INTO tasks (id, workspace, title, description, status, attempts, max_attempts, created_at, updated_at)
+       VALUES (@id, @workspace, @title, @description, 'pending', 0, @max_attempts, datetime('now'), datetime('now'))`
+    )
+    .run({ ...row, description: row.description ?? "", max_attempts: row.max_attempts ?? null });
+  if (info.changes !== 1) throw new Error("failed to create task");
+  return getTask(row.id)!;
+}
+
+export function getTask(id: string): TaskRow | undefined {
+  return getDb().prepare("SELECT * FROM tasks WHERE id = ?").get(id) as TaskRow | undefined;
+}
+
+/** A Project's Tasks in creation order: the queue order the workspace shows. */
+export function listTasksByWorkspace(workspace: string): TaskRow[] {
+  return getDb()
+    .prepare("SELECT * FROM tasks WHERE workspace = ? ORDER BY created_at ASC, id ASC")
+    .all(workspace) as TaskRow[];
+}
+
+export interface UpdatableTaskFields {
+  title?: string;
+  description?: string;
+  status?: TaskStatus;
+  attempts?: number;
+  max_attempts?: number | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+}
+
+/** Update the given Task columns, always refreshing updated_at. Row after, or undefined if gone. */
+export function updateTaskFields(id: string, fields: UpdatableTaskFields): TaskRow | undefined {
+  const sets: string[] = [];
+  const values: unknown[] = [];
+  for (const [k, v] of Object.entries(fields)) {
+    if (v === undefined) continue;
+    sets.push(`${k} = ?`);
+    values.push(v);
+  }
+  if (!sets.length) return getTask(id);
+  sets.push("updated_at = datetime('now')");
+  getDb().prepare(`UPDATE tasks SET ${sets.join(", ")} WHERE id = ?`).run(...values, id);
+  return getTask(id);
+}
+
+export function deleteTask(id: string): void {
+  getDb().prepare("DELETE FROM task_attempts WHERE task_id = ?").run(id);
+  getDb().prepare("DELETE FROM tasks WHERE id = ?").run(id);
+}
+
+export interface NewAttempt {
+  id: string;
+  task_id: string;
+  attempt_number: number;
+}
+
+export function createAttempt(row: NewAttempt): TaskAttemptRow {
+  const info = getDb()
+    .prepare(
+      `INSERT INTO task_attempts (id, task_id, attempt_number, status, created_at)
+       VALUES (@id, @task_id, @attempt_number, 'pending', datetime('now'))`
+    )
+    .run({ id: row.id, task_id: row.task_id, attempt_number: row.attempt_number });
+  if (info.changes !== 1) throw new Error("failed to create task attempt");
+  return getAttempt(row.id)!;
+}
+
+export function listAttemptsByTask(taskId: string): TaskAttemptRow[] {
+  return getDb()
+    .prepare("SELECT * FROM task_attempts WHERE task_id = ? ORDER BY attempt_number ASC")
+    .all(taskId) as TaskAttemptRow[];
+}
+
+export function getAttempt(id: string): TaskAttemptRow | undefined {
+  return getDb().prepare("SELECT * FROM task_attempts WHERE id = ?").get(id) as TaskAttemptRow | undefined;
+}
+
+/** Update the given attempt columns. Timestamps use UTC strings; pass null to clear. */
+export function updateAttemptFields(id: string, fields: {
+  session_id?: string | null;
+  status?: TaskStatus;
+  started_at?: string | null;
+  completed_at?: string | null;
+}): TaskAttemptRow | undefined {
+  const sets: string[] = [];
+  const values: unknown[] = [];
+  for (const [k, v] of Object.entries(fields)) {
+    if (v === undefined) continue;
+    sets.push(`${k} = ?`);
+    values.push(v);
+  }
+  if (!sets.length) return getAttempt(id);
+  getDb().prepare(`UPDATE task_attempts SET ${sets.join(", ")} WHERE id = ?`).run(...values, id);
+  return getAttempt(id);
+}
+
+export function deleteAttemptsByTask(taskId: string): void {
+  getDb().prepare("DELETE FROM task_attempts WHERE task_id = ?").run(taskId);
+}
+
+/** The highest attempt number so far for a Task, so the next one is sequential. */
+export function lastAttemptNumber(taskId: string): number {
+  const row = getDb().prepare("SELECT COALESCE(MAX(attempt_number), 0) AS n FROM task_attempts WHERE task_id = ?").get(taskId) as { n: number };
+  return row.n;
 }

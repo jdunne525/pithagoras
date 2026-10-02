@@ -40,6 +40,7 @@ import { authEnabled, checkPassword, isAuthed, issueCookie, requireAuth, signOut
 import { packagesRouter } from "./api/packages.js";
 import { extensionsRouter } from "./api/extensions.js";
 import { channelsRouter } from "./api/channels.js";
+import { tasksRouter } from "./api/tasks.js";
 import { routinesIn, routinesRouter, switchOffRoutines } from "./api/routines.js";
 import { filesRouter } from "./api/files.js";
 import { gitRouter } from "./api/git.js";
@@ -1180,6 +1181,7 @@ app.use("/api", extensionsRouter());
 app.use("/api", featuresRouter());
 app.use("/api", memoryRouter());
 app.use("/api", channelsRouter());
+app.use("/api", tasksRouter());
 app.use("/api", routinesRouter());
 app.use("/api", skillsRouter());
 app.use("/api", filesRouter());
