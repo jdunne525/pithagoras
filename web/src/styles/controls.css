@@ -34,6 +34,13 @@
 .status-dot { display: inline-block; width: 8px; height: 8px; flex-shrink: 0; border-radius: 50%; background: rgb(var(--fg-faint)); transition: background .3s; }
 .status-dot.is-error { background: rgb(var(--danger)); }
 .status-dot.is-interrupted { background: rgb(var(--warn)); }
+/* Task statuses (see StatusDot.tsx, taskStatus): pending at rest, stopped a
+   paused run, failed an errored one, completed an done — each its own colour,
+   matching the badges beside them in the Tasks workspace. */
+.status-dot.is-pending { background: rgb(var(--fg-faint)); }
+.status-dot.is-stopped { background: rgb(var(--warn)); }
+.status-dot.is-failed { background: rgb(var(--danger)); }
+.status-dot.is-completed { background: rgb(var(--ok)); }
 /* Working: the app's π on a small badge, breathing, with a glow behind it
    that swells and fades. Lists give every mark a 16px slot (status-slot), so
    nothing beside it moves when a chat starts or stops. */

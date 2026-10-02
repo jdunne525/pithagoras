@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { LuFileText, LuFolderGit2, LuFolderKanban, LuPlus, LuTrash2 } from "react-icons/lu";
+import { LuFileText, LuFolderGit2, LuFolderKanban, LuListChecks, LuPlus, LuTrash2 } from "react-icons/lu";
 import { PageHeader } from "./PageHeader";
 import { RowsSkeleton } from "./Skeleton";
 import { api, type Project, type Session } from "../api";
@@ -21,11 +21,14 @@ import { t, tp, tx } from "../i18n";
 export function ProjectsPage({
   sessions,
   onOpenChat,
+  onOpenTasks,
   onNewChat,
   onChanged,
 }: {
   sessions: Session[];
   onOpenChat: (id: string) => void;
+  /** Opens this project's Tasks workspace. Prototype only — gone with it. */
+  onOpenTasks?: (id: string, name: string) => void;
   /** Starts a chat in the folder and opens it. */
   onNewChat: (workspace: string) => Promise<void>;
   /** After something the chat list depends on changed, such as a project's chats going. */
@@ -186,6 +189,19 @@ export function ProjectsPage({
                     >
                       <LuPlus className="h-3.5 w-3.5" />
                     </button>
+                    {onOpenTasks && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onOpenTasks(p.name, p.name);
+                        }}
+                        className="rounded p-1.5 text-fg-subtle hover:text-accent"
+                        title={t("Tasks")}
+                        aria-label={t("Tasks for {name}", { name: p.name })}
+                      >
+                        <LuListChecks className="h-3.5 w-3.5" />
+                      </button>
+                    )}
                     <button
                       onClick={(e) => {
                         e.stopPropagation();

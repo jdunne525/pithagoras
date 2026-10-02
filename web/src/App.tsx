@@ -14,6 +14,7 @@ import { load as loadCached } from "./settings-cache";
 import { ExtensionDialog, type UiRequest } from "./components/ExtensionDialog";
 import { SessionsPage } from "./components/SessionsPage";
 import { ProjectsPage } from "./components/ProjectsPage";
+import { TaskWorkspace } from "./components/TaskWorkspace";
 import { AgentPage } from "./components/AgentPage";
 import { RoutinesPage } from "./components/RoutinesPage";
 import { AuditPage } from "./components/AuditPanel";
@@ -76,6 +77,9 @@ export default function App() {
       <Route path="/" element={<Shell />} />
       <Route path="/sessions" element={<Shell view="sessions" />} />
       <Route path="/projects" element={<Shell view="projects" />} />
+      {/* A project's Tasks workspace: routed like the other pages, reached
+          from that project's Tasks button. */}
+      <Route path="/projects/:projectId/tasks" element={<Shell view="tasks" />} />
       <Route path="/agent" element={<Shell view="agent" />} />
       <Route path="/routines" element={<Shell view="routines" />} />
       <Route path="/browser" element={<Shell view="browser" />} />
@@ -100,12 +104,15 @@ function Shell({
   view = "chat",
 }: {
   settings?: boolean;
-  view?: "chat" | "sessions" | "projects" | "agent" | "routines" | "browser" | "memory" | "audit";
+  view?: "chat" | "sessions" | "projects" | "tasks" | "agent" | "routines" | "browser" | "memory" | "audit";
 }) {
-  const { sessionId, tab } = useParams<{ sessionId?: string; tab?: string }>();
+  const { sessionId, tab, projectId } = useParams<{ sessionId?: string; tab?: string; projectId?: string }>();
   const navigate = useNavigate();
   const [mobileNav, setMobileNav] = useState(false);
   useEffect(() => { setMobileNav(false); }, [sessionId, view, settings]);
+  // The project whose Tasks page is open, so it can be named without a fetch
+  // (the prototype mocks everything). Set when navigating there from Projects.
+  const [taskProject, setTaskProject] = useState<{ id: string; name: string } | null>(null);
 
   // A moment after the portal has drawn: fetch what Settings opens on, and
   // offer the setup assistant while there is no model to talk to.
@@ -475,12 +482,17 @@ function Shell({
         sessions={sessions}
         executor={executor}
         activeId={sessionId ?? null}
-        view={view}
+        view={view === "tasks" ? "projects" : view}
         hasBrowser={hasBrowser}
         hasMemory={hasMemory}
         places={places}
         onNavigate={(to) => { setMobileNav(false); navigate(`/${to}`); }}
         onOpenFolder={(key) => { setMobileNav(false); navigate(`/sessions?folder=${encodeURIComponent(key)}`); }}
+        onOpenTasks={(name) => {
+          setMobileNav(false);
+          setTaskProject({ id: name, name });
+          navigate(`/projects/${encodeURIComponent(name)}/tasks`);
+        }}
         onSelect={(id) => { setMobileNav(false); navigate(`/s/${id}`); }}
         onNewChat={startChat}
         onDelete={async (id) => {
@@ -541,10 +553,16 @@ function Shell({
               await refreshSessions().catch(() => {});
             }}
           />
+        ) : view === "tasks" ? (
+          <TaskWorkspace
+            projectName={taskProject?.name ?? projectId ?? t("your project")}
+            onBack={() => navigate("/projects")}
+          />
         ) : view === "projects" ? (
           <ProjectsPage
             sessions={sessions}
             onOpenChat={(id) => navigate(`/s/${id}`)}
+            onOpenTasks={(id, name) => { setTaskProject({ id, name }); navigate(`/projects/${id}/tasks`); }}
             onNewChat={async (workspace) => {
               const s = await api.createSession(workspace);
               await refreshSessions();

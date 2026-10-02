@@ -21,6 +21,7 @@ import {
   LuSettings,
   LuShield,
   LuTrash2,
+  LuListChecks,
 } from "react-icons/lu";
 import type { Session } from "../api";
 import { local } from "../safe-storage";
@@ -52,6 +53,7 @@ export function Sidebar({
   onOpenSettings,
   onNavigate,
   onOpenFolder,
+  onOpenTasks,
 }: {
   forceExpanded?: boolean;
   sessions: Session[];
@@ -75,6 +77,8 @@ export function Sidebar({
   onNavigate: (to: Destination) => void;
   /** The Sessions page, showing only the chats in the folder `key` (see session-folders). */
   onOpenFolder: (key: string) => void;
+  /** Open the tasks workspace for a project, named by its folder name. */
+  onOpenTasks?: (name: string) => void;
 }) {
   const [storedCollapsed, setCollapsed] = useState(() => local.get("sidebarCollapsed") === "true");
   const collapsed = forceExpanded ? false : storedCollapsed;
@@ -273,6 +277,19 @@ export function Sidebar({
                 const shown = open ? [...first, open] : first;
                 return (
                   <>
+                    {/* First entry of each project's chats: open its tasks workspace. */}
+                    {f.kind === "project" && onOpenTasks && (
+                      <button
+                        type="button"
+                        onClick={() => onOpenTasks(f.name)}
+                        aria-label={t("Open tasks for {name}", { name: f.name })}
+                        title={t("Open tasks for {name}", { name: f.name })}
+                        className="flex w-full items-center gap-2 rounded-lg px-2 py-1 text-left text-sm text-fg-muted hover:bg-fg/5 hover:text-fg"
+                      >
+                        <LuListChecks className="h-3.5 w-3.5 shrink-0 text-fg-faint" />
+                        {t("Tasks")}
+                      </button>
+                    )}
                     {chats.length === 0 && (
                       <p className="px-2.5 py-1 text-xs text-fg-faint">{f.sessions.length ? t("Only pinned chats, above.") : t("No chats yet.")}</p>
                     )}
