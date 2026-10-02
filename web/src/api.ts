@@ -755,6 +755,14 @@ export const api = {
       body: JSON.stringify(patch),
     }),
 
+  settingsNtfy: () =>
+    json<{ enabled: boolean; topic: string; minResponseSeconds: number }>("/api/settings/ntfy"),
+  saveSettingsNtfy: (patch: { enabled: boolean; topic: string; minResponseSeconds: number }) =>
+    json<{ enabled: boolean; topic: string; minResponseSeconds: number }>("/api/settings/ntfy", {
+      method: "PUT",
+      body: JSON.stringify(patch),
+    }),
+
   channels: () =>
     json<{
       channels: Channel[];

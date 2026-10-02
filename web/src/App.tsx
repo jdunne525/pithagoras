@@ -25,7 +25,7 @@ import { ConfirmHost } from "./components/ConfirmDialog";
 import { pollWhileVisible, reconnectDelay } from "./poll";
 import { canvasConnection, canvasMessage } from "./canvas-feed";
 import { APP_NAME, finishedRuns, tabTitle } from "./attention";
-import { notifyIfAway, notifyState, ntfyActive } from "./notify";
+import { notifyIfAway, notifyState } from "./notify";
 import { guardStrayDrops } from "./drop-guard";
 import { usePlaces } from "./use-session-folders";
 import { t, useLanguage } from "./i18n";
@@ -454,7 +454,7 @@ function Shell({
   useEffect(() => {
     if (!anyRunning) return;
     const timer = setInterval(() => {
-      if (document.hidden && (notifyState() === "on" || ntfyActive())) refreshSessions().catch(() => {});
+      if (document.hidden && notifyState() === "on") refreshSessions().catch(() => {});
     }, 15_000);
     return () => clearInterval(timer);
   }, [anyRunning, refreshSessions]);
@@ -472,7 +472,7 @@ function Shell({
   const askedId = active ? uiQueue[0]?.id : undefined;
   useEffect(() => {
     if (!active || !askedId) return;
-    notifyIfAway(active.title, t("Waiting for your answer"), `ask-${active.id}`, () => navigate(`/s/${active.id}`), "urgent");
+    notifyIfAway(active.title, t("Waiting for your answer"), `ask-${active.id}`, () => navigate(`/s/${active.id}`));
   }, [askedId]);
 
   return (
