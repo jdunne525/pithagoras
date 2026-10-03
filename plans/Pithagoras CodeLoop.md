@@ -1198,7 +1198,6 @@ bottom selected Task structure, with the queue now backed by real persistence an
 Implement:
 
 * start Task
-* Project-level Task loop
 * create fresh Pithagoras session for an attempt
 * execute through existing `SessionManager`
 * associate session with Task attempt
@@ -1239,16 +1238,148 @@ Implement the lower Task execution view using the existing Pithagoras activity/s
 
 ## Phase 4 — Completion protocol
 
-Implement:
+Goal: give autonomous attempts a reliable way to reach a **terminal** state so a Task never sits
+forever in `running`, and so genuinely finished work is marked `completed` rather than merely
+`failed`. This phase also owns the **prompt messaging** the agent needs to complete correctly — the
+server currently sends only `task.description || task.title` (see `task-execution.ts`), which is
+missing everything that makes the code loop work.
 
-* Task completion marker
-* completion detection
-* completed state
-* incomplete execution handling
+Keep the completion detector isolated in its own module/prompt block so the exact marker and prompt
+can change later without restructuring Task orchestration (§9). Reuse the existing session/event
+infrastructure to read the transcript; do not invent a new one.
 
-Keep the completion detector isolated from the rest of Task orchestration.
+### Project-level queue loop / start-stop (resolved — moved here from the completed Phase 3)
 
-Verify the CodeLoop completion semantics before finalizing the protocol.
+The Project-level autonomous queue loop and its Start/Stop control were originally sketched under
+Phase 3, but Phase 3 is complete. This loop resolves all three reported symptoms (no queue
+processor, Tasks stuck in `running`, per-task play being required), so it lives here in Phase 4 and
+builds on the finished Phase 3 execution + natural-end wiring. Build it around the same
+`SessionManager`/attempt model already in place — do **not** spawn Pi directly as CodeLoop does.
+The authoritative reference is `G:\work\git\pi-ralph-one\src\ralph.js` and `...\routes.js`.
+
+* **Entry points.** Mirror CodeLoop's `startLoop()/stopLoop()`: expose a project queue-control
+  endpoint pair (e.g. `POST /api/projects/:name/queue/start` and `.../stop`) backed by
+  `SessionManager`, not a fresh Pi launcher. `startLoop` sets a running flag and begins a recursive
+  poll timer (`setTimeout(poll, interval)`); `stopLoop` aborts any active attempt via the existing
+  `SessionManager.abort()` and clears the flag.
+* **Per-task Run stays.** The existing per-task Run/Stop buttons remain as a manual single-run
+  shortcut. They are distinct from the project-level Start/Stop, which enables/disables the
+  automatic queue processor.
+* **One agent at a time.** Only a single Task may run at a time under the task processor: the loop
+  must not launch a new attempt while any attempt of any Task is live. Ordinary chat sessions are
+  unaffected (this is the concurrency policy for §25).
+* **Ordered, non-bypassing execution.** `poll()` selects the next work item in durable queue order
+  (the Phase 2 `position` column, `ORDER BY position, id`) — the first `pending` Task. Default
+  behaviour is to process Tasks strictly in the order they appear. A failed Task **cannot be
+  bypassed**: the loop is prevented from advancing past it even though the loop itself is not
+  necessarily stopped — it simply stalls on the failed Task until the user intervenes (rerun/resume/
+  mark-complete) or the configured retry budget recovers it. Order stays predictable and failed work
+  is never silently skipped.
+* **Configurable retry budget.** Attempts-per-Task is a configuration setting, not a fixed constant.
+  When a Task exhausts its configured attempts it becomes `failed`; because a failed Task cannot be
+  bypassed, this also stalls the loop as above.
+* **Per-project.** Each Project has its own running flag and loop; starting one Project's loop does
+  not start another's (mirroring CodeLoop's per-project `state.json`).
+* **Restart recovery.** If the server restarts while a loop is running, persist whatever minimal
+  state recovery needs (loop-running flag + current task) so recovery can restore it instead of
+  leaving Tasks permanently `running`. Recovery *implementation* is Phase 8 (server restart during
+  Task execution); Phase 4 only persists the state recovery requires.
+
+**Verification.** Start a Project's loop with three+ ordered pending Tasks and confirm they execute
+strictly in `position` order, one at a time, auto-advancing from one to the next; a failed Task
+stalls the loop without being skipped; and the project-level Stop halts the active attempt,
+leaving no Task stuck in `running`.
+
+### The completion marker / promise (resolved from CodeLoop)
+
+Use a dedicated, unambiguous marker the agent must emit when it believes the Task is fully done;
+only that marker transitions a Task to `completed` (§9). Do **not** infer completion from process
+exit code, final response text, tool-stop, or a bare "done".
+
+CodeLoop's authoritative reference (`G:\work\git\pi-ralph-one\src\ralph.js`):
+
+* **Marker string:** `<PROMISE>THIS TASK IS DONE</PROMISE>`, required to appear **on its own line**.
+* **Detection is strict.** `emitsCompletionPromise()` only accepts the marker standing alone on a
+  line (optionally wrapped in one pair of backticks or a code fence); an inline mention inside prose
+  — e.g. a model *refusing* to output the string — must **not** count, otherwise a task instructed
+  to fail gets falsely marked complete. `hasCompletedPromise(sessionPath, startOffset)` reads only
+  assistant `text` content from the JSONL session and only from `startOffset` onward so pre-existing
+  conversation is ignored.
+* **Flush race.** `waitForPromise()` waits for the session file size to stabilise before the
+  definitive check, because Pi can exit before its buffers flush the final entries to disk; a
+  genuine end emitted at the very last moment would otherwise be missed and a correct task
+  mislabelled. Reproduce this settle-then-check discipline in Pithagoras by reading the attempt's
+  session events after the run ends, with a short stabilization wait.
+* **Outcome table.** Promise found → `completed` (wins even if a stop raced in). Not found, not
+  intentionally stopped, retries remaining → the run is incomplete. Not found, not stopped, no
+  retries left → `failed`. Intentionally stopped (distinct from natural end) → `stopped`.
+
+### Prompt construction (the missing messaging — resolved)
+
+The agent must receive the full code-loop framing, not just the raw description. Model the prompt
+after CodeLoop's `buildPrompt(projectName, task)`:
+
+```
+You are Pithagoras, an AI assistant helping execute task development.
+
+## Specific Task
+Task: <title>
+
+Description:
+<description>
+
+## Project Workflow            <- project task instructions (§7 when implemented)
+<instructions>
+
+## Additional Instructions     <- any extra per-task addenda
+
+## Review & Commit
+When you believe this task is completely implemented, before finishing, review all code changes
+in detail ... Revise the code if needed.
+
+## Completion Requirement
+When you believe all criteria for this task have been fully met, you MUST output the following
+string exactly as written on its own line:
+
+<PROMISE>THIS TASK IS DONE</PROMISE>
+
+<portal> will only mark this task complete when it sees that exact string ... If the string is
+not found after up to <maxIter> attempts, the task will be marked as failed.
+```
+
+Concretely, the Phase 4 prompt sent to an attempt must contain, at minimum:
+
+1. The role/task header identifying the task by title + description.
+2. The **Completion Requirement** block instructing the standalone `<PROMISE>THIS TASK IS DONE</PROMISE>`
+   marker (this is the messaging currently absent).
+3. A Review & Commit instruction before finishing.
+
+The §7 Project Task instructions block is layered into this same prompt but remains a separate
+concern (implemented in Phase 7). Do not ship the instructions block in Phase 4; ship the marker
+and framing so completion works, then let Phase 7 add user-editable project instructions on top.
+
+### Natural-end transition rules (resolves the "stuck in running" symptom)
+
+A naturally-finished attempt (Pi/session ends without the user stopping it) must always move to a
+terminal state — never hang in `running`:
+
+* If the completion marker is present in the attempt's session → `completed`.
+* Otherwise → `failed` (incomplete), exactly as the Phase 3 placeholder already does, until retry
+  logic lands. The Phase 3 `trackEnd`/`finishSettled` path (natural end ⇒ `failed`) stays in place
+  and is now correct because Phase 4 has filled in the `completed` branch.
+* Intentional stop (via `stopTask`) ⇒ `stopped`, kept distinct from the natural-end `failed`, and
+  both retain the attempt/session as history (§11).
+
+Once these rules hold, the Phase 4 queue loop's auto-advance is safe: `poll()` always finds a clear
+next action for every Task and no Task is left permanently `running`.
+
+### Verify the CodeLoop semantics first
+
+Before finalizing, confirm in `G:\work\git\pi-ralph-one\src\ralph.js` how the exit handler decides
+promise-vs-stop-vs-retry and how the loop re-enqueues on retry, so Pithagoras reproduces the intended
+outcome rather than an approximation. The exact marker text and prompt wording may be tuned here,
+but the "marker-or-fail, standalone-line detection, flush-safe read, stop-vs-failure distinction"
+must be preserved.
 
 ---
 

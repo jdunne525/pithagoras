@@ -282,8 +282,10 @@ export function getDb(): Database.Database {
     -- Looked up by project, and filtered by state, far more often than by id.
     CREATE INDEX IF NOT EXISTS idx_tasks_workspace ON tasks(workspace);
     CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
-    -- The queue: a project's Tasks in the order the user set them.
-    CREATE INDEX IF NOT EXISTS idx_tasks_queue ON tasks(workspace, position);
+    -- idx_tasks_queue is created in migrate(), not here. Position is added to
+    -- an existing tasks table by the migration, so on an upgrade this table
+    -- has no position column yet at this point and indexing it would fail --
+    -- which took the server down until the migration had run.
 
     -- Each run of a Task. One row per autonomous attempt, holding the session
     -- that attempt worked in (NULL until the attempt actually starts) plus how
@@ -612,6 +614,10 @@ function migrate(d: Database.Database): void {
       d.prepare("UPDATE tasks SET position = ? WHERE id = ?").run(n, r.id);
     }
   }
+  // The queue: a project's Tasks in the order the user set them. Made here,
+  // after the column exists, so it works whether migrate just added it or a
+  // fresh install already has it from the CREATE TABLE above.
+  d.exec("CREATE INDEX IF NOT EXISTS idx_tasks_queue ON tasks(workspace, position)");
   // Last, because it reads the settings the tables above have to exist for.
   adoptBrowserGrants(d);
 }

@@ -396,7 +396,7 @@ export function TaskWorkspace({ projectName, onBack }: { projectName: string; on
         <div className="max-h-[40%] min-h-0 overflow-y-auto px-2 pb-2">
           {error ? (
             <p className="py-4 text-center text-xs text-warn">{error}</p>
-          ) : rows.length === 0 ? (
+          ) : rows.length === 0 && !adding ? (
             <EmptyState primary />
           ) : (
             <ul className="space-y-0.5 pt-0.5">
