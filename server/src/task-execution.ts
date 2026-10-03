@@ -2,6 +2,8 @@ import { nanoid } from "nanoid";
 import { sessions, EXECUTOR_KIND } from "./session-manager.js";
 import * as db from "./db.js";
 import * as tasks from "./tasks.js";
+import { buildTaskPrompt } from "./task-prompt.js";
+import { waitForCompletionPromise } from "./task-completion.js";
 
 /**
  * Autonomous Task execution (Phase 3).
@@ -21,6 +23,8 @@ import * as tasks from "./tasks.js";
 interface TaskRun {
   /** The Task whose lifecycle owns this run. */
   taskId: string;
+  /** First event seq to search for the completion promise (reads forward only). */
+  startSeq: number;
   /** The attempt row created for it. */
   attemptId: string;
   /** The fresh session the attempt worked in. */
@@ -41,6 +45,10 @@ export const liveRunOf = (taskId: string): TaskRun | undefined =>
 /** Whether a Task is executing right now. */
 export const isRunning = (taskId: string): boolean => !!liveRunOf(taskId);
 
+/** Any Task attempt running at all, anywhere. The queue loop runs one agent
+ *  at a time across every project, so it waits while this is true. */
+export const hasLiveTaskRun = (): boolean => [...runs.values()].some((r) => !r.ended);
+
 /** Remove a run from the registry without touching its settled status. */
 const forget = (run: TaskRun): void => {
   runs.delete(run.sessionId);
@@ -53,8 +61,8 @@ const forget = (run: TaskRun): void => {
  * session's SSE stream carries its events to the Tasks view.
  *
  * A Task already running is reported back unchanged rather than started twice.
- * When the agent finishes on its own the attempt cannot tell it succeeded
- * (that is Phase 4), so a natural end records `failed` — see trackEnd.
+ * When the agent finishes on its own the attempt cannot tell it succeeded,
+ * so a natural end asks completion detection to judge it — see finishSettled.
  */
 export const startTask = (taskId: string): { task: db.TaskRow; attempt: db.TaskAttemptRow; sessionId: string } => {
   const task = tasks.getTask(taskId);
@@ -81,17 +89,20 @@ export const startTask = (taskId: string): { task: db.TaskRow; attempt: db.TaskA
   // Open the attempt and mark it (and the Task) running before the session is
   // touched, so the UI shows work happening the moment we begin.
   const { attempt } = tasks.startAttempt(taskId, sessionId);
-  const run: TaskRun = { taskId, attemptId: attempt.id, sessionId, ended: false };
+  // Each attempt works in a fresh session, so there is nothing before the
+  // prompt to confuse the completion check.
+  const run: TaskRun = { taskId, attemptId: attempt.id, sessionId, startSeq: 0, ended: false };
   runs.set(sessionId, run);
 
   // Watch the session for its own end: a non-running status means the run
-  // reached it without being stopped, which — before completion detection —
-  // counts as an incomplete attempt.
+  // reached its own end without being stopped, which completion detection then
+  // judges complete-or-failed.
   trackEnd(run);
 
-  // Kick off the autonomous work. The prompt marks the session running itself;
-  // listen first so the guard only settles the attempt after that.
-  void sessions.prompt(sessionId, task.description || task.title)
+  // Kick off the autonomous work. The CodeLoop prompt marks the session
+  // running itself; listen first so the guard only settles the attempt after
+  // that. It wraps the task in the shared framing plus the completion marker.
+  void sessions.prompt(sessionId, buildTaskPrompt(task, { maxAttempts: task.max_attempts ?? undefined }))
     .catch((e: unknown) => {
       // The run could not even begin: settle it honestly rather than leave it
       // hanging running forever.
@@ -126,9 +137,9 @@ export const stopTask = (taskId: string): db.TaskRow => {
 
 /**
  * Once a run has marked its session running, a later non-running status is the
- * run reaching its own end. It settles the attempt as failed exactly once and
- * removes its own listener, so a stop (which clears the run first) never races
- * it into a second settling.
+ * run reaching its own end. Completion detection then judges the outcome
+ * (complete-or-failed) exactly once, and this removes its own listener, so a
+ * stop (which clears the run first) never races it into a second settling.
  */
 function trackEnd(run: TaskRun): void {
   let seenRunning = false;
@@ -154,16 +165,21 @@ function trackEnd(run: TaskRun): void {
   sessions.on(`session:${run.sessionId}`, handler);
 }
 
-/** Record the settled outcome and drop the run from the registry. */
-const finishSettled = (run: TaskRun): void => {
-  if (run.ended) return;
+/**
+ * Record the natural end of a run (Phase 4): an attempt that ended on its own,
+ * without being stopped. Completion detection decides whether it finished or
+ * failed — the promise emitted on its own line means done, anything else
+ * (including ending with no promise) means incomplete — so the attempt and Task
+ * are recorded as completed or failed accordingly.
+ */
+const finishSettled = (run: TaskRun): Promise<void> => {
+  if (run.ended) return Promise.resolve();
   run.ended = true;
   forget(run);
-  tasks.finishAttempt(run.attemptId, "failed");
-  // An attempt was opened before this one ran, so the count already reflects
-  // it. Left over attempts mean the Task waits again; otherwise it has used
-  // them all and stands at its outcome.
-  settleTaskAfterEnd(run.taskId);
+  return waitForCompletionPromise(run.sessionId, run.startSeq).then((completed) => {
+    tasks.finishAttempt(run.attemptId, completed ? "completed" : "failed");
+    tasks.setTaskStatus(run.taskId, completed ? "completed" : "failed");
+  });
 };
 
 /** Move a Task back into the queue now that one of its attempts has settled,

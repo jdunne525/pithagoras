@@ -3,6 +3,7 @@ import { getProject, ProjectError } from "../projects.js";
 import { workspaceRoot } from "../workspaces.js";
 import * as tasks from "../tasks.js";
 import { startTask, stopTask } from "../task-execution.js";
+import { startLoop, stopLoop, isLoopRunning } from "../task-queue.js";
 import type { TaskStatus } from "../db.js";
 
 /**
@@ -132,6 +133,28 @@ export function tasksRouter(): Router {
   router.post("/projects/:name/tasks/:id/start", (req, res) => {
     try {
       res.status(201).json(startTask(req.params.id));
+    } catch (e) {
+      fail(res, e);
+    }
+  });
+
+  // Queue loop: drive this project's Tasks through the durable queue. Starting
+  // launches the loop (one agent at a time across all projects); stopping unwinds
+  // the current attempt and clears the loop. A failed Task cannot be bypassed, so
+  // the loop stalls on it until the user intervenes.
+  router.post("/projects/:name/queue/start", (req, res) => {
+    try {
+      startLoop(projectPath(req.params.name));
+      res.json({ ok: true, running: isLoopRunning(projectPath(req.params.name)) });
+    } catch (e) {
+      fail(res, e);
+    }
+  });
+
+  router.post("/projects/:name/queue/stop", (req, res) => {
+    try {
+      stopLoop(projectPath(req.params.name));
+      res.json({ ok: true, running: isLoopRunning(projectPath(req.params.name)) });
     } catch (e) {
       fail(res, e);
     }
