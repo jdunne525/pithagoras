@@ -12,7 +12,7 @@
  */
 import http from "node:http";
 import https from "node:https";
-import { getDb } from "./db.js";
+import { getDb, eventTime } from "./db.js";
 import { pendingQuestions, type QuestionRow } from "./questions.js";
 
 export interface NtfyConfig {
@@ -151,9 +151,16 @@ function sessionsByStatus(): SessionRow[] {
   return getDb().prepare("SELECT id, title, status, created_at FROM sessions ORDER BY updated_at ASC").all() as SessionRow[];
 }
 
-function durationSeconds(createdAt: string): number | null {
-  const start = Date.parse(createdAt);
-  return Number.isNaN(start) ? null : Math.floor((Date.now() - start) / 1000);
+/**
+ * How long ago, in seconds, a session started — used to skip announcing a reply
+ * arrived too quickly to have been missed. The stored time is UTC (SQLite's
+ * `datetime('now')`) but a bare string `Date.parse` reads as local, which lands
+ * hours off and can even read as the future, giving a negative age that would
+ * suppress every alert; `eventTime` parses it as UTC either way.
+ */
+function durationSeconds(createdAt: string | null | undefined): number | null {
+  const start = eventTime(createdAt ?? undefined);
+  return start == null ? null : Math.floor((Date.now() - start) / 1000);
 }
 
 /**
@@ -247,7 +254,9 @@ async function scanFinished(config: NtfyConfig): Promise<void> {
 async function scanPendingQuestions(config: NtfyConfig): Promise<void> {
   for (const q of pendingQuestions() as QuestionRow[]) {
     if (notifiedQuestions.has(q.id)) continue;
-    const waited = (Date.now() - Date.parse(q.asked_at)) / 1000;
+    const started = eventTime(q.asked_at);
+    if (started == null) continue;
+    const waited = (Date.now() - started) / 1000;
     if (waited >= config.minResponseSeconds) {
       const asker = q.person_name ? `${q.person_name} asked:` : "A question is waiting:";
       const message = `${asker} ${q.question}`;
