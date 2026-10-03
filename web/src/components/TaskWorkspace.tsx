@@ -180,6 +180,9 @@ export function TaskWorkspace({ projectName, onBack }: { projectName: string; on
   const [draft, setDraft] = useState("");
   const [dragId, setDragId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Whether this project's server-owned autonomous queue loop is running.
+  // Read once on open (Phase 5); recovery after a restart is Phase 8.
+  const [loopRunning, setLoopRunning] = useState(false);
 
   // Load this project's queue from the backend. Runs on open and again if the
   // project changes under us (e.g. navigating between projects).
@@ -193,6 +196,16 @@ export function TaskWorkspace({ projectName, onBack }: { projectName: string; on
         setRows(tasks.map(mapTask));
       })
       .catch(() => { if (!cancelled) setError("Could not load this project's tasks."); });
+    return () => { cancelled = true; };
+  }, [projectName]);
+
+  // Read whether the queue loop is already running for this project, so the
+  // Start/Stop control is honest on load rather than assuming stopped.
+  useEffect(() => {
+    let cancelled = false;
+    api.queueStatus(projectName)
+      .then((s) => { if (!cancelled) setLoopRunning(s.running); })
+      .catch(() => {});
     return () => { cancelled = true; };
   }, [projectName]);
 
@@ -272,6 +285,37 @@ export function TaskWorkspace({ projectName, onBack }: { projectName: string; on
       await api.stopTask(projectName, selected.id);
     } catch {
       setError("Could not stop the task.");
+    }
+  };
+
+  // Rerun (Phase 5): reset a task to pending WITHOUT starting it, so it drops
+  // back onto the queue to be reordered and Run later. Keeps previous attempts
+  // as history; it does not touch any session.
+  const rerun = async (id: string) => {
+    try {
+      const updated = await api.rerunTask(projectName, id);
+      setRows((prev) => prev.map((x) => (x.id === id ? mapTask(updated) : x)));
+    } catch {
+      setError("Could not rerun the task.");
+    }
+  };
+
+  // Project-level queue control (Phase 5): start/stop the server-owned loop for
+  // this project only. This toggles automatic processing, not an individual task.
+  const startQueue = async () => {
+    try {
+      await api.startQueue(projectName);
+      setLoopRunning(true);
+    } catch {
+      setError("Could not start the queue.");
+    }
+  };
+  const stopQueue = async () => {
+    try {
+      await api.stopQueue(projectName);
+      setLoopRunning(false);
+    } catch {
+      setError("Could not stop the queue.");
     }
   };
 
@@ -366,6 +410,20 @@ export function TaskWorkspace({ projectName, onBack }: { projectName: string; on
             <span className="ml-1 truncate text-xs text-fg-faint">{projectName}</span>
           </div>
           <button
+            onClick={loopRunning ? stopQueue : startQueue}
+            className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-sm font-medium transition ${
+              loopRunning
+                ? "border border-warn/40 text-warn hover:bg-warn/10"
+                : "border border-line text-fg-subtle hover:text-fg hover:bg-fg/5"
+            }`}
+            aria-label={loopRunning ? t("Stop queue") : t("Start queue")}
+            title={loopRunning ? t("Stop the autonomous queue") : t("Start the autonomous queue")}
+          >
+            <StatusDot taskStatus={loopRunning ? "running" : "stopped"} bare />
+            {loopRunning ? t("Running") : t("Stopped")}
+            <span className="hidden sm:inline"> ·{loopRunning ? t("Stop") : t("Start")}</span>
+          </button>
+          <button
             onClick={() => setAdding(true)}
             className="inline-flex items-center gap-1.5 rounded-lg bg-accent px-2.5 py-1 text-sm font-medium text-white transition hover:bg-accent/90"
           >
@@ -438,6 +496,7 @@ export function TaskWorkspace({ projectName, onBack }: { projectName: string; on
                   onDragEnd={() => setDragId(null)}
                   onOpenSession={() => setPreview(task)}
                   onStart={() => task.status === "running" ? stop() : start(task.id)}
+                  onRerun={() => rerun(task.id)}
                   onRename={(title) => rename(task.id, title)}
                   onRemove={() => remove(task)}
                 />
@@ -465,6 +524,7 @@ export function TaskWorkspace({ projectName, onBack }: { projectName: string; on
               <RunControls
                 task={selected}
                 onStart={() => selected.status === "running" ? stop() : start(selected.id)}
+                onRerun={() => rerun(selected.id)}
               />
             </div>
 
@@ -532,24 +592,30 @@ export function TaskWorkspace({ projectName, onBack }: { projectName: string; on
   );
 }
 
-/** The Run/Resume and Rerun controls, shared by a task row and the session
-    header, so both show the same buttons for the same states. `onRerun` is
-    optional: re-running is Phase 5, so the button is hidden until wired. */
+/** The Run and Rerun controls, shared by a task row and the session header, so
+    both show the same buttons for the same states (Phase 5).
+
+    * Run starts this Task immediately, bypassing the queue: it inherently resets
+      a failed/stopped/completed Task before running a fresh attempt.
+    * Rerun only resets a Task to pending without starting it, so it can be
+      reordered and Run later. Neither touches an existing attempt's history.
+    * Resume is Phase 6; keep these two distinct from it. */
 function RunControls({ task, onStart, onRerun }: { task: MockTask; onStart: () => void; onRerun?: () => void }) {
   const atMax = task.attempts >= task.maxAttempts;
-  const canStart = task.status !== "running" && !atMax;
+  const canRun = task.status !== "running" && !atMax && task.status !== "completed";
+  const canRerun = !!onRerun && ["failed", "stopped", "completed"].includes(task.status) && task.attempts > 0;
   return (
     <div className="inline-flex items-center gap-0.5">
       {task.status === "running" ? (
         <ActionBtn title={t("Stop")} onClick={onStart} aria-label={t("Stop")}>
           <span className="h-3 w-3 rounded-sm bg-current" />
         </ActionBtn>
-      ) : canStart && task.status !== "completed" ? (
-        <ActionBtn title={t(task.status === "pending" ? "Run" : "Resume")} onClick={onStart} aria-label={t(task.status === "pending" ? "Run" : "Resume")}>
+      ) : canRun ? (
+        <ActionBtn title={t(task.status === "pending" ? "Run" : "Run again")} onClick={onStart} aria-label={t(task.status === "pending" ? "Run" : "Run again")}>
           <LuPlay className="h-3.5 w-3.5" />
         </ActionBtn>
       ) : null}
-      {onRerun && canStart && task.attempts > 0 ? (
+      {canRerun ? (
         <ActionBtn title={t("Re-run task")} onClick={onRerun} aria-label={t("Re-run task")}>
           <LuRotateCcw className="h-3.5 w-3.5" />
         </ActionBtn>

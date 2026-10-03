@@ -55,21 +55,32 @@ test("tasks are scoped to their project and editable/deletable", () => {
   assert.deepEqual(tasks.listTasks(pb).map((t) => t.id), [b.id], "project b untouched");
 });
 
-test("max_attempts is validated", () => {
+test("there is no per-task max attempts; the budget is server-wide (Phase 5)", () => {
+  // max_attempts is one server-wide default, not stored per Task. Passing it to
+  // create or edit is simply ignored.
   assert.throws(() => tasks.createTask({ workspace: ws("v"), title: "" }), /title/);
-  assert.throws(() => tasks.createTask({ workspace: ws("v"), title: "x", maxAttempts: 0 }), /max_attempts/);
-  assert.throws(() => tasks.createTask({ workspace: ws("v"), title: "x", maxAttempts: 2.5 }), /max_attempts/);
-  const ok = tasks.createTask({ workspace: ws("v"), title: "capped", maxAttempts: 3 });
-  assert.equal(ok.max_attempts, 3);
+  const task = tasks.createTask({ workspace: ws("v"), title: "x", maxAttempts: 99 });
+  assert.equal(task.max_attempts, null, "no per-Task value is stored");
+  const edited = tasks.editTask(task.id, { title: "renamed", maxAttempts: 42 });
+  assert.equal(edited.title, "renamed");
+  assert.equal(edited.max_attempts, null, "editing does not set a per-Task ceiling");
 });
 
-test("editing cannot change max_attempts while running, but edits freely otherwise", () => {
-  const task = tasks.createTask({ workspace: ws("e"), title: "run", maxAttempts: 1 });
+test("rerun resets a task to pending without starting it (Phase 5)", () => {
+  const task = tasks.createTask({ workspace: ws("r"), title: "fail me" });
   tasks.startAttempt(task.id);
-  assert.throws(() => tasks.editTask(task.id, { maxAttempts: 9 }), /running/);
-  const edited = tasks.editTask(task.id, { title: "still going" });
-  assert.equal(edited.title, "still going");
-  assert.equal(edited.max_attempts, 1, "the running ceiling is kept");
+  assert.equal(tasks.getTask(task.id).status, "running");
+  // Rerun cannot fire while a run is live.
+  assert.throws(() => tasks.rerunTask(task.id), /running/);
+  // Settle the attempt and mark the task failed, then Rerun.
+  const attempt = tasks.listAttemptsByTask(task.id)[0];
+  tasks.finishAttempt(attempt.id, "failed");
+  tasks.setTaskStatus(task.id, "failed");
+  const reset = tasks.rerunTask(task.id);
+  assert.equal(reset.status, "pending", "Rerun returns it to the queue");
+  assert.equal(reset.completed_at, null, "the terminal marker is cleared");
+  assert.equal(reset.attempts, 1, "Rerun does not start a new attempt");
+  assert.equal(db.lastAttemptNumber(task.id), 1, "no fresh attempt row is opened");
 });
 
 test("starting an attempt is sequential and marks both running", () => {

@@ -1136,6 +1136,9 @@ later persistence phases.
 * **Fields carried now.** In addition to the minimum in §4, include `max_attempts INTEGER` (NULL
   means unbounded; default NULL) even though retry logic is Phase 5, so the column exists before
   the logic that needs it. Project-level Task instructions (§7) are deliberately **excluded**.
+  (From Phase 5 on this column is **not** used per-Task: there is no per-Task max attempts — a
+  single server-wide default bounds every Task. The column is left in place but the execution layer
+  ignores its value and applies the shared default.)
 * **Backend module + minimal endpoints.** Orchestration lives in a dedicated server-side service
   module, not in route handlers. Add the minimum `/api/projects/:name/tasks*` endpoints needed to
   exercise CRUD so the layer is testable end-to-end, without building out the full API surface
@@ -1174,7 +1177,8 @@ These record the choices made before implementation so later phases build on the
   described above. No separate title field is needed at creation. A Task can be renamed from
   the Tasks view afterwards (edit → title), the way chats are renamed.
 * **No per-task max attempts.** `max_attempts` is not user-configurable in the UI. It remains
-  in the schema from Phase 1 (server-controlled) but the Task editor does not expose it.
+  in the schema from Phase 1 but the Task editor does not expose it, and (from Phase 5) there is
+  no per-Task max at all — a single server-wide default bounds every Task instead.
 * **Bottom panel keeps the mock transcript.** Autonomous execution is Phase 3, so the selected
   Task's lower panel continues to show the seeded/mock attempt history for visual validation.
   Only the queue — list, order, create/edit/delete, status display, and tabs — is live here.
@@ -1385,15 +1389,70 @@ must be preserved.
 
 ## Phase 5 — Retry/attempt handling
 
-Implement:
+This phase closes out the retry/attempts behaviour that Phases 3–4 scaffolded, wires the
+Project-level queue Start/Stop control into the UI (it was never added), and pins down the
+Rerun vs Run semantics. Most of its items already exist from earlier phases:
 
-* maximum attempts
-* fresh session per autonomous attempt
-* failed state
-* rerun
-* attempt history
-* recently-completed behavior
-* appropriate queue handling
+* **maximum attempts** — the `max_attempts` column exists (Phase 1), but there is **no per-Task
+  max attempts**. A single **server-wide default** applies to every Task. Implement it as one
+  server-side constant (e.g. `DEFAULT_MAX_ATTEMPTS` in the execution layer) used wherever the
+  old `task.max_attempts ?? Infinity` / `?? undefined` lived, so every Task is bounded by the same
+  value. No per-Task override, no per-Task editor field.
+* **fresh session per autonomous attempt** — already correct: each attempt opens a new
+  `kind = 'autonomous'` session with no prior context.
+* **failed state**, **attempt history** — already present (natural-end settle records `failed`;
+  `listAttemptsByTask` renders history).
+* **appropriate queue handling** — the loop runs one agent at a time in durable order and cannot
+  bypass a failed Task.
+
+### Auto-retry in the queue loop (resolved)
+
+The Project queue loop **auto-retries** a naturally-failed attempt up to the server-wide
+`DEFAULT_MAX_ATTEMPTS`, then marks the Task `failed`:
+
+```
+attempt ends without completion marker
+   ↓
+attempts < DEFAULT_MAX_ATTEMPTS?
+   +-- yes → reset the Task to `pending` so the next poll launches a fresh attempt
+   +-- no  → mark the Task `failed` (budget exhausted); the loop stalls on it, cannot bypass
+```
+
+Every auto-retry uses a brand-new session; the previous failed attempt stays as history. This is
+the behaviour the §10 retry diagram describes. A natural end must therefore always move off
+`running` — either back to `pending` (retry) or to `failed` (budget gone) — never hang.
+
+### Rerun vs Run (resolved from CodeLoop)
+
+These two controls are distinct, matching CodeLoop's actual behaviour:
+
+* **Rerun** resets a Task to its initial `pending` state **without starting it**. It exists so a
+  user can clear a `failed`/`stopped` Task back onto the queue and reorder/re-run it later. It does
+  **not** launch an attempt.
+* **Run** (the individual per-Task button) **bypasses the queue entirely** and starts that Task
+  immediately. Because a `failed`/`stopped`/`completed` Task cannot run in place, Run first resets
+  it to `pending` and then starts a fresh attempt — i.e. it inherently includes the Rerun reset as
+  part of starting.
+
+Neither reuses a failed attempt's conversation context. Keep both conceptually separate from
+`Resume` (Phase 6) and from non-autonomous `Continue conversation` (Phase 3).
+
+### Project-level queue Start/Stop control (added to this phase)
+
+The Project-level **Running [Stop] / Stopped [Start]** queue control (sketched in §17, §20 but
+never built) lives here. It toggles the server-owned autonomous loop for that Project only — it is
+**not** the state of any individual Task and **does not** itself execute a Task. Wire it to the
+existing `POST /api/projects/:name/queue/start` and `.../queue/stop` endpoints and their backed-in
+`startLoop`/`stopLoop` (`task-queue.ts`); fix any wiring bugs found while connecting it. While the
+loop is running, a per-Task `Run` still bypasses it and takes the single live agent slot, so guard
+against launching two attempts at once (the existing `hasLiveTaskRun()` gate covers cross-project;
+keep per-Project Run disabled or clearly distinct while the loop holds the agent).
+
+### Not in scope here
+
+* **Recently-completed behaviour** — already resolved in Phase 0: a completed Task goes straight to
+  the Completed tab with no lingering “recently completed” state. Nothing to add.
+* New persistence/schema. Retry uses only what Phases 1–4 already store.
 
 Do not reuse failed autonomous attempt conversation context automatically.
 

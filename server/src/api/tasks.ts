@@ -4,7 +4,8 @@ import { workspaceRoot } from "../workspaces.js";
 import * as tasks from "../tasks.js";
 import { startTask, stopTask } from "../task-execution.js";
 import { startLoop, stopLoop, isLoopRunning } from "../task-queue.js";
-import type { TaskStatus } from "../db.js";
+import type { TaskRow, TaskStatus } from "../db.js";
+import { DEFAULT_MAX_ATTEMPTS } from "../task-prompt.js";
 
 /**
  * Minimal Tasks API for Phase 1: CRUD plus the two lifecycle hooks the service
@@ -29,6 +30,10 @@ export function tasksRouter(): Router {
     return res.status(500).json({ error: String(e) });
   };
 
+  /** Every Task reports the same server-wide attempt budget (Phase 5), so the
+    view can show "3/5" and gate run controls without a per-Task value. */
+  const expose = (row: TaskRow): TaskRow => ({ ...row, max_attempts: DEFAULT_MAX_ATTEMPTS });
+
   /** A status the browser or a later phase can send, validated against the five states. */
   const parseStatus = (value: unknown): TaskStatus | undefined => {
     if (["pending", "running", "completed", "failed", "stopped"].includes(value as string)) {
@@ -40,7 +45,7 @@ export function tasksRouter(): Router {
   // List a project's Tasks in queue order.
   router.get("/projects/:name/tasks", (req, res) => {
     try {
-      res.json(tasks.listTasks(projectPath(req.params.name)));
+      res.json(tasks.listTasks(projectPath(req.params.name)).map(expose));
     } catch (e) {
       fail(res, e);
     }
@@ -50,14 +55,13 @@ export function tasksRouter(): Router {
   // made from; the service names it from the prompt when no title is given.
   router.post("/projects/:name/tasks", (req, res) => {
     const body = req.body ?? {};
-    const maxAttempts = parseMax(body.max_attempts);
     try {
+      // No per-Task max attempts (Phase 5): only title/description are taken.
       res.status(201).json(
         tasks.createTask({
           workspace: projectPath(req.params.name),
           title: body.title || undefined,
           description: body.description || undefined,
-          maxAttempts,
         }),
       );
     } catch (e) {
@@ -80,7 +84,8 @@ export function tasksRouter(): Router {
     }
   });
 
-  // Read one task.
+  // Read one task. Left unexposed: single reads are rarely rendered with an
+  // attempt count, and the list always exposes the server-wide budget.
   router.get("/projects/:name/tasks/:id", (req, res) => {
     try {
       res.json(tasks.getTask(req.params.id));
@@ -89,15 +94,24 @@ export function tasksRouter(): Router {
     }
   });
 
-  // Edit a task's title/description/max_attempts.
+  // Edit a task's title/description.
   router.put("/projects/:name/tasks/:id", (req, res) => {
     const body = req.body ?? {};
     try {
-      res.json(tasks.editTask(req.params.id, {
+      res.json(expose(tasks.editTask(req.params.id, {
         title: body.title,
         description: body.description,
-        maxAttempts: parseMax(body.max_attempts),
-      }));
+      })!));
+    } catch (e) {
+      fail(res, e);
+    }
+  });
+
+  // Rerun (Phase 5): reset a task to pending WITHOUT starting it, so it can be
+  // reordered and Run later. Distinct verb from /start.
+  router.post("/projects/:name/tasks/:id/rerun", (req, res) => {
+    try {
+      res.json(expose(tasks.rerunTask(req.params.id)));
     } catch (e) {
       fail(res, e);
     }
@@ -160,6 +174,16 @@ export function tasksRouter(): Router {
     }
   });
 
+  // Current queue-loop state for this project, so the UI toggle reflects it on
+  // first load rather than assuming stopped.
+  router.get("/projects/:name/queue/status", (req, res) => {
+    try {
+      res.json({ running: isLoopRunning(projectPath(req.params.name)) });
+    } catch (e) {
+      fail(res, e);
+    }
+  });
+
   // The runs of one Task, oldest first: each carries the session it worked in,
   // so the view can render an attempt's history once it exists without another
   // round-trip. Previous attempts stay as history; a delete still drops them.
@@ -173,11 +197,3 @@ export function tasksRouter(): Router {
 
   return router;
 }
-
-// Whole number >= 1, or undefined to mean "leave it unset" rather than force a
-// zero that then has nowhere to go.
-const parseMax = (value: unknown): number | null | undefined => {
-  if (value === undefined || value === null || value === "") return undefined;
-  const n = Number(value);
-  return Number.isInteger(n) && n >= 1 ? n : undefined;
-};

@@ -32,15 +32,13 @@ interface CreateTaskInput {
   /** Chosen title, when one was given. Otherwise derived from the prompt. */
   title?: string;
   description?: string;
-  /** Highest allowed autonomous attempts, or null for unbounded. */
-  maxAttempts?: number | null;
 }
 
 interface EditTaskInput {
   title?: string;
   description?: string;
-  /** Not changed while a Task runs — a run may already be counting down to it. */
-  maxAttempts?: number | null;
+  // There is no per-Task max attempts (Phase 5): the attempt budget is a single
+  // server-wide default, so editing never touches it.
 }
 
 const utcNow = (): string =>
@@ -63,15 +61,6 @@ const resolveTitle = (input: Pick<CreateTaskInput, "title" | "description">): st
   return titleFrom(input.description ?? "")?.trim();
 };
 
-/** A positive integer ceiling on attempts, or null meaning "no limit". */
-const parseMaxAttempts = (value: unknown): number | null => {
-  if (value === undefined || value === null) return null;
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
-    throw new TaskError("invalid", "max_attempts must be a whole number >= 1");
-  }
-  return value;
-};
-
 export const listTasks = (workspace: string): db.TaskRow[] =>
   db.listTasksByWorkspace(workspace);
 
@@ -87,12 +76,12 @@ export const createTask = (input: CreateTaskInput): db.TaskRow => {
   }
   const title = resolveTitle(input);
   if (!title) throw new TaskError("invalid", "a title or prompt is required");
+  // max_attempts is a server-wide default (Phase 5), not stored per Task.
   return db.createTask({
     id: randomUUID(),
     workspace: input.workspace,
     title,
     description: input.description ?? "",
-    max_attempts: parseMaxAttempts(input.maxAttempts),
   });
 };
 
@@ -101,16 +90,21 @@ export const editTask = (id: string, patch: EditTaskInput): db.TaskRow | undefin
   const fields: db.UpdatableTaskFields = {};
   if (patch.title !== undefined) fields.title = validateTitle(patch.title);
   if (patch.description !== undefined) fields.description = patch.description;
-  if (patch.maxAttempts !== undefined) {
-    if (task.status === "running") {
-      throw new TaskError(
-        "invalid",
-        "max_attempts cannot change while a task is running",
-      );
-    }
-    fields.max_attempts = parseMaxAttempts(patch.maxAttempts);
-  }
+  // No per-Task max attempts to edit (Phase 5): the budget is server-wide.
   return db.updateTaskFields(id, fields);
+};
+
+/** Rerun (Phase 5): reset a Task back to its initial pending state WITHOUT
+    starting it, so it can be reordered and Run later. It does not launch an
+    attempt and does not touch any attempt's history. A Task that is currently
+    running cannot be Rerun — wait for it to stop first. */
+export const rerunTask = (id: string): db.TaskRow => {
+  const task = getTask(id);
+  if (task.status === "running") {
+    throw new TaskError("invalid", "cannot rerun a task that is running");
+  }
+  // Just read this same id, so the update cannot come back empty.
+  return setTaskStatus(id, "pending")!;
 };
 
 export const deleteTask = (id: string): void => {

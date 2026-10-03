@@ -11,8 +11,11 @@ import type { TaskRow } from "./db.js";
  * populate it here without changing this contract.
  */
 
-/** Attempts the Completion Requirement warns about before failure defaults to. */
-const DEFAULT_MAX_ATTEMPTS = 5;
+/** Attempts the Completion Requirement warns about before failure defaults to.
+    This is the one server-wide cap every Task is bounded by — there is no
+    per-Task max (Phase 5) — so the execution layer imports it here rather than
+    carrying its own copy. */
+export const DEFAULT_MAX_ATTEMPTS = 5;
 
 interface BuildPromptOptions {
   /** §7 Project Workflow instructions (deferred; empty until implemented). */

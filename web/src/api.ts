@@ -397,6 +397,25 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ status: "stopped" }),
     }),
+  /** Rerun a Task (Phase 5): reset it to pending WITHOUT starting it, so it can
+    be reordered and Run later. */
+  rerunTask: (project: string, id: string) =>
+    json<Task>(`/api/projects/${encodeURIComponent(project)}/tasks/${id}/rerun`, {
+      method: "POST",
+    }),
+  /** Project-level queue loop control (Phase 5): start/stop the server-owned
+    autonomous processor for this project only. */
+  startQueue: (project: string) =>
+    json<{ ok: true; running: boolean }>(`/api/projects/${encodeURIComponent(project)}/queue/start`, {
+      method: "POST",
+    }),
+  stopQueue: (project: string) =>
+    json<{ ok: true; running: boolean }>(`/api/projects/${encodeURIComponent(project)}/queue/stop`, {
+      method: "POST",
+    }),
+  /** Current queue-loop running state, read on load so the toggle is honest. */
+  queueStatus: (project: string) =>
+    json<{ running: boolean }>(`/api/projects/${encodeURIComponent(project)}/queue/status`, { method: "GET" }),
   /** Every run of one Task, oldest first, each carrying its session id. */
   getTaskAttempts: (project: string, id: string) =>
     json<TaskAttempt[]>(`/api/projects/${encodeURIComponent(project)}/tasks/${id}/attempts`),

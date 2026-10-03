@@ -2,7 +2,7 @@ import { nanoid } from "nanoid";
 import { sessions, EXECUTOR_KIND } from "./session-manager.js";
 import * as db from "./db.js";
 import * as tasks from "./tasks.js";
-import { buildTaskPrompt } from "./task-prompt.js";
+import { buildTaskPrompt, DEFAULT_MAX_ATTEMPTS } from "./task-prompt.js";
 import { waitForCompletionPromise } from "./task-completion.js";
 
 /**
@@ -101,8 +101,9 @@ export const startTask = (taskId: string): { task: db.TaskRow; attempt: db.TaskA
 
   // Kick off the autonomous work. The CodeLoop prompt marks the session
   // running itself; listen first so the guard only settles the attempt after
-  // that. It wraps the task in the shared framing plus the completion marker.
-  void sessions.prompt(sessionId, buildTaskPrompt(task, { maxAttempts: task.max_attempts ?? undefined }))
+  // that. It wraps the task in the shared framing plus the completion marker,
+  // warning about the server-wide attempt budget.
+  void sessions.prompt(sessionId, buildTaskPrompt(task, { maxAttempts: DEFAULT_MAX_ATTEMPTS }))
     .catch((e: unknown) => {
       // The run could not even begin: settle it honestly rather than leave it
       // hanging running forever.
@@ -126,7 +127,9 @@ export const stopTask = (taskId: string): db.TaskRow => {
     forget(run);
     // Settled before the abort resolves, so the view reflects the stop at once.
     tasks.finishAttempt(run.attemptId, "stopped");
-    settleTaskAfterEnd(run.taskId);
+    // An intentional stop is its own state, kept distinct from a natural-end
+    // failure. Retain the attempt/session as history; it can be Rerun later.
+    tasks.setTaskStatus(taskId, "stopped");
     void sessions.abort(run.sessionId).catch(() => {});
   } else {
     // Nothing to unwind: just move the Task to stopped if it was running.
@@ -165,28 +168,27 @@ function trackEnd(run: TaskRun): void {
   sessions.on(`session:${run.sessionId}`, handler);
 }
 
-/**
- * Record the natural end of a run (Phase 4): an attempt that ended on its own,
- * without being stopped. Completion detection decides whether it finished or
- * failed — the promise emitted on its own line means done, anything else
- * (including ending with no promise) means incomplete — so the attempt and Task
- * are recorded as completed or failed accordingly.
- */
+/** Judge a run that reached its own end (Phase 4/5): the completion marker
+    decides complete-or-failed, and a failed attempt is retried by the loop up
+    to the server-wide budget before the Task is marked failed. This keeps the
+    Task out of the permanent "running" state and gives the queue a clear next
+    action every time. */
 const finishSettled = (run: TaskRun): Promise<void> => {
   if (run.ended) return Promise.resolve();
   run.ended = true;
   forget(run);
   return waitForCompletionPromise(run.sessionId, run.startSeq).then((completed) => {
     tasks.finishAttempt(run.attemptId, completed ? "completed" : "failed");
-    tasks.setTaskStatus(run.taskId, completed ? "completed" : "failed");
+    const task = tasks.getTask(run.taskId);
+    if (completed) {
+      tasks.setTaskStatus(run.taskId, "completed");
+      return;
+    }
+    // No completion marker: retried by the queue loop while attempts under the
+    // server-wide default remain, otherwise failed. Never left hanging.
+    tasks.setTaskStatus(
+      run.taskId,
+      task.attempts < DEFAULT_MAX_ATTEMPTS ? "pending" : "failed",
+    );
   });
 };
-
-/** Move a Task back into the queue now that one of its attempts has settled,
-    whether it ended on its own (failed) or was stopped. This keeps the Task
-    out of the permanent "running" state and ready to be retried. */
-function settleTaskAfterEnd(taskId: string): void {
-  const task = tasks.getTask(taskId);
-  const max = task.max_attempts ?? Infinity;
-  tasks.setTaskStatus(taskId, task.attempts < max ? "pending" : "failed");
-}
