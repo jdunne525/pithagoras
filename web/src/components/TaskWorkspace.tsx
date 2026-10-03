@@ -834,9 +834,10 @@ function EmptyState({ primary = false }: { primary?: boolean }) {
   return (
     <div className={`flex flex-1 items-center justify-center ${primary ? "py-8" : "py-16"}`}>
       {primary ? (
-        <div className="text-center">
+        <div className="max-w-md text-center">
           <p className="text-sm text-fg-subtle">{t("No tasks yet.")}</p>
           <p className="mt-1 text-xs text-fg-faint">{t("Add one to see its history below.")}</p>
+          <p className="mt-3 leading-relaxed text-xs text-fg-faint">{t("Tasks are prompts that Pithagoras works on until they're completed. Failed attempts are automatically retried with fresh context like a Ralph Wiggum loop, and each project can provide additional instructions that are included with every prompt.")}</p>
         </div>
       ) : (
         <div className="text-center">

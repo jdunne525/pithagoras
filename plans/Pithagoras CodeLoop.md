@@ -406,17 +406,17 @@ The previous attempt remains available as history.
 
 Rerunning should not reuse the failed/stopped attempt's conversational context.
 
-### Resume
+### Resume (resolved: not a separate operation)
 
-Resume means:
+There is **no separate "Resume" operation** in Pithagoras. Returning an existing pi
+session to life from its same context — resuming a stopped/failed Task's conversation the
+way an ordinary chat resumes — is exactly what **Continue conversation** does below.
 
-> Return an existing Task to autonomous execution using the appropriate existing session/context where supported.
-
-This is distinct from a fresh Rerun.
-
-Before implementation, inspect the current CodeLoop behavior and the Pithagoras session-resume capabilities carefully. Do not assume CodeLoop's existing Resume implementation is identical to the desired Pithagoras behavior.
-
-If the intended Pithagoras Resume behavior is to continue the most recent session and inject a simple continuation instruction such as `resume`, implement that behavior explicitly rather than treating Resume as another Rerun.
+Do not build a distinct Resume action, route, or button that duplicates it. The design
+investigation confirmed that the existing Continue conversation mechanism already resumes a
+pi session from the same context (it re-sends a prompt into the Task's existing session,
+just like a normal chat follow-up). Any earlier plan text proposing a dedicated Resume was
+superseded by this finding.
 
 ### Continue conversation
 
@@ -439,6 +439,12 @@ A completed, stopped, or otherwise inspectable Task may therefore provide a chat
 
 This should reuse Pithagoras's existing chat/session mechanisms wherever practical.
 
+Continue conversation is a plain session follow-up: it sends a message into the Task's
+existing pi session via the ordinary session-prompt path. It does **not** create a new
+`task_attempts` row and does **not** increment the Task's attempt count, because it is not
+a new autonomous run. If the view shows an attempt number, continuing leaves it unchanged
+(runs through the same attempt rather than starting a new one).
+
 Do not conflate "Continue conversation" with "Rerun Task."
 
 ---
@@ -447,25 +453,32 @@ Do not conflate "Continue conversation" with "Rerun Task."
 
 Tasks must not be left permanently `running` if the server restarts or crashes.
 
-Use the existing Pithagoras orphan/recovery architecture where possible.
-
-At startup, inspect persisted Task state and reconcile Tasks whose execution was interrupted.
+Use the existing Pithagoras orphan/recovery architecture where possible. On startup the
+orphan recovery (`recoverOrphans`) marks sessions left running by the previous server as
+`interrupted`; Tasks must be reconciled alongside that so no Task is ever left marked
+`running` when nothing is actually executing it.
 
 The first implementation should favor correctness and recoverability over attempting to magically continue an interrupted Pi process.
 
-A reasonable initial behavior is:
+Queue loop across restart (decided):
+
+Whether the server-owned Project queue loop comes back automatically after a restart is a
+**configuration setting**, not a fixed behavior. The default is **disabled**: the loop does
+not re-enable itself on boot, so nothing starts running autonomously just because the
+server came back up. Operators can opt in via the setting; when enabled, a restarted server
+may resume its queued Projects.
+
+Recovery semantics (decided):
 
 ```text
 running Task at server shutdown
         ↓
-execution/session becomes interrupted
+execution/session becomes interrupted (marked by orphan recovery)
         ↓
-Task becomes pending or stopped according to chosen recovery semantics
+Task is returned to `pending`
         ↓
 user/server can run it again
 ```
-
-Do not leave a Task permanently marked `running` when no execution exists.
 
 ---
 
@@ -481,13 +494,25 @@ Always restart the development server using ./xyz.ps1 after completing a task.
 
 Do not alter the semantics of `AGENTS.md`.
 
-`AGENTS.md` remains the normal filesystem/project instruction mechanism.
+`AGENTS.md` remains the normal filesystem/project instruction mechanism — this new setting
+never reads, writes, or otherwise touches it.
 
-The new setting is specifically additional instructions for autonomous Task execution.
+The new setting is specifically additional instructions for autonomous Task execution, applied
+only to the Tasks functionality (not to ordinary chats, routines, or channels).
 
-The Task runner should incorporate the Project's Task instructions into the Task prompt.
+Concrete shape (decided):
 
-Keep this mechanism separate from the existing `AGENTS.md` file.
+* Storage: a single free-text `instructions` column on the `projects` table (added with the
+  usual SQLite migration, existing databases kept working). This is distinct from any
+  `AGENTS.md` handling.
+* Editing UI: edited on the existing Projects page, alongside the project's other settings,
+  with copy that makes clear the text applies specifically to autonomous Tasks in that
+  project.
+* Injection: the stored text is appended as its own plain-text block inside the Task prompt
+  built for every autonomous run (the queue loop and manual Start). It is a separate block
+  from, and does not alter, `AGENTS.md`.
+* Scope: injected only into autonomous Task runs. It is not sent into user "Continue
+  conversation" follow-ups, which are plain session messages.
 
 ---
 
@@ -588,10 +613,12 @@ Individual Task actions should be available where appropriate, such as:
 * Run
 * Stop
 * Rerun
-* Resume
 * Edit
 * Delete
 * Mark complete where appropriate
+
+(There is no separate Resume action: resuming a Task's existing pi session from its same
+context is the Continue conversation control in the Task execution view.)
 
 Do not overload every Task row with unnecessary controls.
 
@@ -629,9 +656,38 @@ The Tasks view might temporarily show:
 ○ Update documentation      Pending
 ```
 
-After the completion has been acknowledged according to the CodeLoop behavior, the completed Task can move out of the active Tasks view and remain available through Completed.
+After the completion has been acknowledged, the completed Task can move out of the active
+Tasks view and remain available through Completed.
 
-Before implementation, inspect the actual CodeLoop implementation to determine precisely what event constitutes this acknowledgment/transition. Do not invent a new definition without first checking CodeLoop.
+This section deliberately **overrides** the earlier Phase 0 prototype resolution, which had
+declared "no recently-completed-stays-visible distinction" (completed → Completed view
+immediately). The explicit design decision below stands: a newly completed Task does stay in
+the active view until it is acknowledged.
+
+Acknowledgment (decided):
+
+A completed Task is acknowledged — and therefore eligible to leave the active view — by
+either of two actions:
+
+* **Viewing it.** Clicking the completed Task to open/inspect it immediately marks it
+  acknowledged. The active view's list itself is not rebuilt until the user leaves the task
+  (so the running/pending/stopped rows are not disrupted mid-stream), but the clicked Task
+  is now acknowledged and will not reappear in a fresh active-view pass.
+* **Opening the Completed/History tab.** Navigating to the Completed tab automatically marks
+  *every* completed Task acknowledged at once.
+
+In both cases the Completed/History tab always lists all completed Tasks regardless of
+whether any particular one has been acknowledged — acknowledgment only controls presence in
+the active Tasks view, never presence in Completed.
+
+No dedicated acknowledgment state needs to be persisted: acknowledgment is a client-side
+view concern (what the active list shows), not a stored field. This keeps the persistence
+model free of any extra "recently completed" column.
+
+Before implementation, still inspect the actual CodeLoop implementation to mirror the precise
+visual transition between "just completed" and "acknowledged" if CodeLoop offers anything
+useful beyond what is described here. Do not invent a new definition without first checking
+CodeLoop.
 
 The exact visual indicator for completed Tasks is not prescribed. The UI only needs to make the lifecycle state obvious.
 
@@ -787,12 +843,15 @@ Add the minimum backend operations necessary for:
 * starting a Task
 * stopping a Task
 * rerunning a Task
-* resuming a Task/session where supported
-* continuing an associated session/conversation
+* continuing an associated session/conversation (a plain follow-up into the Task's existing
+  pi session via the ordinary session-prompt path — there is NO separate "Resume" endpoint,
+  because resuming a session from its same context is exactly what Continue conversation does)
 * retrieving Task execution/history information
-* acknowledging/transitioning recently completed Tasks if required by the CodeLoop behavior
 
 Follow the existing Express/API conventions.
+
+Acknowledging a recently completed Task is a client-side view concern (see §18) and needs no
+API endpoint or persisted state.
 
 Do not prematurely create a large REST abstraction.
 
@@ -810,7 +869,9 @@ Add the minimum schema required for:
 * Tasks
 * Task-to-session/attempt relationships
 * Task execution state
-* any minimal acknowledgment state required for recently completed Tasks
+
+Acknowledgment of recently completed Tasks is a client-side view concern (§18), so no
+acknowledgment state lives in the database.
 
 Do not duplicate existing session event/history data.
 
@@ -824,15 +885,19 @@ Preserve all existing chat/session data.
 
 # 25. Concurrency
 
-Do not initially assume Tasks must be globally serialized.
+Autonomous Tasks must never run concurrently. At most one Task attempt is executing at any
+time across the whole server; a second Task that would start while one is running is queued
+rather than launched.
 
-Pithagoras already supports multiple simultaneous chat sessions.
+This applies both to the Project queue loop and to manual Start/Rerun of individual Tasks: the
+single-agent rule wins over everything, so starting a Task while another is running enqueues
+it (respecting queue order where a loop owns ordering) instead of opening a second session.
 
-The Task runner should therefore use the existing session/executor model rather than introducing a global polling loop that unnecessarily prevents unrelated agent sessions from running.
+Ordinary Pithagoras chat sessions are not Tasks and are unaffected — they keep using the
+existing session/executor model. Only autonomous Task execution is globally serialized.
 
-If resource limits require restricting Task concurrency, isolate that policy from the Task model so it can be changed later.
-
-Project-level queue execution may naturally process Tasks according to their queue semantics, but this should not unnecessarily block ordinary Pithagoras chat sessions.
+If/when resource limits later require allowing more than one Task at a time, that policy is
+isolated from the Task model so it can be relaxed later without restructuring Tasks.
 
 ---
 
@@ -1458,31 +1523,40 @@ Do not reuse failed autonomous attempt conversation context automatically.
 
 ---
 
-## Phase 6 — Resume
+## Phase 6 — Resume (resolved: no distinct work)
 
-Note: live Task execution/session viewing and "Continue conversation" are implemented in Phase 3. This phase focuses solely on **Resume** — returning an existing Task to *autonomous* execution via the appropriate existing session/context where supported, kept distinct from a fresh Rerun (Phase 5) and from non-autonomous Continue conversation (Phase 3).
+The design investigation concluded that there is **no separate "Resume" operation**. Returning
+an existing pi session to life from its same context — resuming a stopped or failed Task's
+conversation exactly like an ordinary chat resumes — is already provided by **Continue
+conversation**, which was implemented in Phase 3.
 
-Implement:
+So Phase 6 is a verification/cleanup step rather than a build step:
 
-* Resume behavior (return an existing Task to autonomous execution)
-* appropriate session continuation for Resume
-* preservation of previous attempts across a Resume
-* clear distinction between Rerun, Resume, and Continue conversation
+* Confirm the Continue conversation control resumes the Task's existing pi session from its
+  same context via the ordinary session-prompt path (a normal follow-up).
+* Confirm it does **not** create a new `task_attempts` row and does **not** increment the
+  Task's attempt count (it runs within the current attempt).
+* Ensure there is no stray Resume button, route, or handler left over from the plan.
 
-Inspect the actual CodeLoop Resume behavior and Pithagoras session-resume capabilities before implementing; do not assume Resume is another Rerun. Reuse existing Pithagoras session/resume mechanisms wherever possible.
+Nothing else here changes the Rerun-vs-Continue distinction established in Phase 5: Rerun
+starts a fresh session/attempt; Continue resumes the current one.
 
 ---
 
 ## Phase 7 — Project Task instructions
 
-Implement:
+Implement project-level instructions for autonomous Tasks, kept fully separate from
+`AGENTS.md`:
 
-* Project-level Task instructions
-* persistence
-* editing UI
-* injection into Task execution prompts
-
-Keep this separate from `AGENTS.md`.
+* **Persistence:** add a single free-text `instructions` column to the `projects` table via
+  the usual SQLite migration (existing databases kept working).
+* **Editing UI:** add the field on the existing Projects page, with copy stating it applies
+  specifically to autonomous Tasks in that project.
+* **Injection:** append the stored text as its own plain-text block inside the Task prompt
+  built for every autonomous run (queue loop and manual Start). It sits alongside — and never
+  alters — `AGENTS.md`.
+* **Scope:** injected only into autonomous Task runs, not into user "Continue conversation"
+  follow-ups.
 
 ---
 
@@ -1490,19 +1564,28 @@ Keep this separate from `AGENTS.md`.
 
 Implement/test:
 
-* server restart during Task execution
-* stale running Tasks
-* process/session cleanup
-* reconnecting browser
-* SSE replay
-* Task history
-* recently completed acknowledgment behavior
-* error handling
-* concurrent Tasks
-* deletion behavior
-* queue ordering
-* Project deletion behavior
-* Task/session cleanup rules
+* **Server restart / recovery.** No Task is ever left marked `running` when nothing is
+  executing it. An interrupted Task is reconciled back to `pending` (keeping its
+  attempt/session history) alongside orphan-session recovery. Verify a stopped/failed Task
+  with a dead session is recoverable by running it again.
+* **Queue loop across restart** behaves per the configuration setting: default off (the loop
+  does not re-enable itself on boot); document/opt-in path when enabled.
+* Stale running Tasks; process/session cleanup; reconnecting browser; SSE replay; Task
+  history.
+* **Recently completed acknowledgment.** A newly completed Task stays in the active view until
+  acknowledged, then moves to Completed. Acknowledgment happens either by clicking the
+  completed Task to view it (acknowledged immediately, active list rebuilt only after the
+  user leaves the task) or by opening the Completed/History tab (marks all completed Tasks
+  acknowledged at once). The Completed tab always lists every completed Task regardless of
+  acknowledgment state.
+* **Concurrent Tasks.** Never run two Task attempts at once anywhere. Starting a Task while
+  another runs queues it (respecting queue order under the loop) instead of opening a second
+  session. Manual Start/Rerun are subject to the same single-agent rule.
+* **Deletion.** Deleting a Task aborts its underlying pi session if it is still running
+  (reuse the existing stop/abort mechanism), then drops the Task and its attempts.
+* **Project deletion.** Cascades to the project's Tasks and their attempts; the shared
+  sessions they used are left orphaned like other project deletions.
+* Error handling; queue ordering; Task/session cleanup rules.
 
 ---
 
@@ -1530,7 +1613,7 @@ Also inspect the corresponding CodeLoop implementation for:
 * recently completed → Completed transition
 * Task editing
 * Rerun
-* Resume
+* Resume (implemented here as Continue conversation — resuming a session from its same context)
 * task/session history
 * completion detection
 * retry behavior
