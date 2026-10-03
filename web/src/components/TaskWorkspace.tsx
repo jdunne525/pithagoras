@@ -160,6 +160,11 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
   const [rows, setRows] = useState<MockTask[]>([]);
   const [tab, setTab] = useState<Tab>("actions");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Tasks completed in this session are kept in the active view until the user
+  // acknowledges them (Phase 8, overriding the Phase 0 decision that moved a
+  // completed Task straight out of Actions). This is purely a client-side view
+  // concern: nothing is stored or sent to the server.
+  const [recentlyCompleted, setRecentlyCompleted] = useState<Set<string>>(new Set());
   const [resumeText, setResumeText] = useState("");
   const [composerOpen, setComposerOpen] = useState(false);
   const [preview, setPreview] = useState<MockTask | null>(null);
@@ -302,10 +307,24 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
     try {
       const updated = await api.completeTask(projectName, id);
       setRows((prev) => prev.map((x) => (x.id === id ? mapTask(updated) : x)));
+      // Keep it in the active view until acknowledged (Phase 8), rather than
+      // moving it straight into Completed as the Phase 0 design intended.
+      setRecentlyCompleted((prev) => new Set(prev).add(id));
       notifyActivity();
     } catch {
       setError("Could not mark the task complete.");
     }
+  };
+
+  // Acknowledge a just-completed Task so it leaves the active view for the
+  // Completed tab (Phase 8). The Task itself is not changed — only the view.
+  const acknowledge = (id: string) => {
+    setRecentlyCompleted((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
   };
 
   // Project-level queue control (Phase 5): start/stop the server-owned loop for
@@ -398,8 +417,13 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
 
 
   // One list filtered by the open tab: Actions shows everything not completed,
-  // Completed shows only finished Tasks.
-  const actions = tab === "actions" ? rows.filter((x) => x.status !== "completed") : rows.filter((x) => x.status === "completed");
+  // plus Tasks just completed this session until they are acknowledged; Completed
+  // shows only finished Tasks that have been acknowledged.
+  const awaiting = (id: string) => recentlyCompleted.has(id);
+  const actions =
+    tab === "actions"
+      ? rows.filter((x) => x.status !== "completed" || awaiting(x.id))
+      : rows.filter((x) => x.status === "completed" && !awaiting(x.id));
   const ago = (iso?: string) => (iso ? formatRelative((Date.now() - new Date(iso).getTime()) / 60000, "minute") : null);
 
   return (
@@ -457,7 +481,7 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
         <div className="flex items-center px-3 pb-2">
           <div className="flex border-b border-line">
             {TABS.map((label) => {
-              const n = label === "actions" ? rows.filter((x) => x.status !== "completed").length : rows.filter((x) => x.status === "completed").length;
+              const n = label === "actions" ? rows.filter((x) => x.status !== "completed" || awaiting(x.id)).length : rows.filter((x) => x.status === "completed" && !awaiting(x.id)).length;
               return (
                 <button
                   key={label}
@@ -528,6 +552,8 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
                   onComplete={() => markComplete(task.id)}
                   onRename={(title) => rename(task.id, title)}
                   onRemove={() => remove(task)}
+                  awaitingAck={awaiting(task.id)}
+                  onAcknowledge={() => acknowledge(task.id)}
                 />
               ))}
             </ul>
@@ -638,6 +664,22 @@ function RunControls({ task, onStart, onRerun, onComplete }: { task: MockTask; o
   );
 }
 
+/** A compact “Acknowledged” link for a Task completed this session: it drops
+    the still-visible row out of the active view without changing the Task. */
+function AcknowledgedLink({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      title={t("Mark as acknowledged")}
+      aria-label={t("Mark as acknowledged")}
+      className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium text-fg-subtle transition hover:bg-fg/5 hover:text-fg"
+    >
+      <LuCheck className="h-3 w-3" />
+      {t("Acknowledged")}
+    </button>
+  );
+}
+
 function TaskRow({
   task,
   selected,
@@ -653,6 +695,8 @@ function TaskRow({
   onComplete,
   onRename,
   onRemove,
+  awaitingAck,
+  onAcknowledge,
 }: {
   task: MockTask;
   selected: boolean;
@@ -668,6 +712,10 @@ function TaskRow({
   onComplete?: () => void;
   onRename?: (title: string) => void;
   onRemove: () => void;
+  /** True when this Task was completed this session and is still shown in the
+      active view waiting to be acknowledged (Phase 8). */
+  awaitingAck: boolean;
+  onAcknowledge?: () => void;
 }) {
   // Rename is local to the row: opening an input replaces the title, Enter saves
   // it server-side, Escape or leaving cancels. The prompt's first line already
@@ -805,6 +853,9 @@ function TaskRow({
         )}
       </div>
       <div className="flex shrink-0 items-center gap-1 opacity-0 transition focus-within:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100">
+        {awaitingAck && onAcknowledge ? (
+          <AcknowledgedLink onClick={onAcknowledge} />
+        ) : null}
         <RunControls task={task} onStart={onStart} onRerun={onRerun} />
         {task.status === "completed" && task.attempts > 0 && (
           <ActionBtn title={t("View session")} onClick={onOpenSession} aria-label={t("View session")}>

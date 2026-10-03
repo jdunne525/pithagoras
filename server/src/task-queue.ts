@@ -1,4 +1,4 @@
-import { getSetting, putSetting, listTasksByWorkspace } from "./db.js";
+import { getSetting, putSetting, listTasksByWorkspace, settingValuesWithPrefix } from "./db.js";
 import { startTask, stopTask, hasLiveTaskRun, isRunning } from "./task-execution.js";
 import * as tasks from "./tasks.js";
 
@@ -37,6 +37,32 @@ const loops = new Map<string, LoopHolder>();
 
 function keyFor(workspace: string): string {
   return `${LOOP_KEY_PREFIX}${workspace}`;
+}
+
+/** Every Project whose loop was persisted as running, for restart recovery.
+ *  A live loop keeps only a flag in memory (the `loops` map), so after a crash
+ *  the only record is what `saveLoopState` wrote. Scanning those restores the
+ *  list of Projects a loop could resume. */
+export function activeLoopWorkspaces(): string[] {
+  const values = settingValuesWithPrefix(LOOP_KEY_PREFIX);
+  const out: string[] = [];
+  for (const [key, raw] of Object.entries(values)) {
+    try {
+      if ((JSON.parse(raw) as LoopState).running) {
+        out.push(key.slice(LOOP_KEY_PREFIX.length));
+      }
+    } catch {
+      /* corrupt value — ignore */
+    }
+  }
+  return out;
+}
+
+/** Clear a Project's persisted loop flag without touching any Task (recovery
+ *  has no live loop to abort, unlike stopLoop). Used on restart so a stale
+ *  "running" flag from a crashed loop does not linger in the settings table. */
+export function clearPersistedLoop(workspace: string): void {
+  saveLoopState(workspace, { running: false, currentTask: null });
 }
 
 function loadLoopState(workspace: string): LoopState {

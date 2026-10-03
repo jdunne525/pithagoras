@@ -1736,6 +1736,16 @@ export function setSessionTools(sessionId: string, tools: SessionTools): Session
  * pi's, so they go straight to the table rather than widening a type that
  * every launch reads.
  */
+/** Every stored setting value whose key begins with `prefix`, keyed by full
+ *  name. Used by restart recovery to find which Projects had a loop running,
+ *  since a loop keeps only a flag in memory while it runs. */
+export function settingValuesWithPrefix(prefix: string): Record<string, string> {
+  const rows = getDb().prepare("SELECT key, value FROM settings WHERE key LIKE ?").all(
+    prefix + "%",
+  ) as { key: string; value: string }[];
+  return Object.fromEntries(rows.map((r) => [r.key, r.value]));
+}
+
 export function putSetting(key: string, value: string): void {
   const db = getDb();
   if (value)
@@ -1975,6 +1985,14 @@ export function getTask(id: string): TaskRow | undefined {
   return getDb().prepare("SELECT * FROM tasks WHERE id = ?").get(id) as TaskRow | undefined;
 }
 
+/** Every Task marked running anywhere. At a server start nothing runs yet, so
+ *  this is the set left stale by the previous process — see task-recovery. */
+export function listAllRunningTasks(): TaskRow[] {
+  return getDb()
+    .prepare("SELECT * FROM tasks WHERE status = 'running'")
+    .all() as TaskRow[];
+}
+
 /** A Project's Tasks in creation order: the queue order the workspace shows. */
 export function listTasksByWorkspace(workspace: string): TaskRow[] {
   return getDb()
@@ -2010,6 +2028,21 @@ export function updateTaskFields(id: string, fields: UpdatableTaskFields): TaskR
 export function deleteTask(id: string): void {
   getDb().prepare("DELETE FROM task_attempts WHERE task_id = ?").run(id);
   getDb().prepare("DELETE FROM tasks WHERE id = ?").run(id);
+}
+
+/** Drop every Task of a Project and the attempts that ran them, in one
+ *  transaction. The sessions they used are left orphaned, like the other
+ *  project deletions. Used when a Project is deleted so its Tasks do not linger.
+ *  Order matters: drop the attempts first (they reference the Task), then the
+ *  Tasks themselves. */
+export function deleteTasksByWorkspace(workspace: string): void {
+  const ids = getDb()
+    .prepare("SELECT id FROM tasks WHERE workspace = ?")
+    .all(workspace) as { id: string }[];
+  getDb().transaction(() => {
+    for (const { id } of ids) getDb().prepare("DELETE FROM task_attempts WHERE task_id = ?").run(id);
+    getDb().prepare("DELETE FROM tasks WHERE workspace = ?").run(workspace);
+  })();
 }
 
 /** Rewrite a project's Tasks into the given order (first runs first). Positions

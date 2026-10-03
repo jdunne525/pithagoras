@@ -154,6 +154,20 @@ export const stopTask = (taskId: string): db.TaskRow => {
 };
 
 /**
+ * Abort a Task's running attempt without changing its status — used by delete,
+ * where the row is going away anyway and there is no state to record. It unwinds
+ * the underlying pi process (via SessionManager) so nothing is left running after
+ * the Task is dropped. Nothing to unwind means this is a no-op.
+ */
+export const abortLiveRun = (taskId: string): void => {
+  const run = liveRunOf(taskId);
+  if (!run) return;
+  run.ended = true;
+  forget(run);
+  void sessions.abort(run.sessionId).catch(() => {});
+};
+
+/**
  * Once a run has marked its session running, a later non-running status is the
  * run reaching its own end. Completion detection then judges the outcome
  * (complete-or-failed) exactly once, and this removes its own listener, so a

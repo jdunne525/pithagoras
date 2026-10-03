@@ -21,6 +21,8 @@ import {
   listRoutineSessions,
   listSessions,
   updateSession,
+  deleteTasksByWorkspace,
+  listTasksByWorkspace,
 } from "./db.js";
 import { checkWorkspace, isWithin, workspaceRoot } from "./workspaces.js";
 import { DATA_DIR } from "./data-dir.js";
@@ -33,6 +35,8 @@ import {
   type WizardInput,
 } from "./agent-setup.js";
 import { sessions, CommandFailed, EXECUTOR_KIND, IMAGE_ROOT } from "./session-manager.js";
+import { reconcileInterruptedTasks, recoverQueuedLoopsAfterRestart } from "./task-recovery.js";
+import { abortLiveRun } from "./task-execution.js";
 import { readNtfyConfig, saveNtfyConfig, startNtfyNotifications, stopNtfyNotifications } from "./ntfy.js";
 import { ImageError, MAX_IMAGE_BYTES, MAX_IMAGES, imagePath, mimeOf, parseImages, saveImages } from "./prompt-images.js";
 import { toolSource } from "./tool-policy.js";
@@ -497,6 +501,12 @@ app.delete("/api/projects/:name", async (req, res) => {
       if (late.some((r) => routineSupervisor.isRunning(r.slug))) {
         return res.status(409).json({ error: "A routine started running in this project meanwhile. Wait for it to finish, or stop it." });
       }
+      // Every Task of this Project — unwind any still-running one (its pi
+      // process must not keep going after the folder is gone), then drop the
+      // Tasks and the attempts they ran. Their shared sessions are left
+      // orphaned, like the other project deletions.
+      for (const task of listTasksByWorkspace(project.path)) abortLiveRun(task.id);
+      deleteTasksByWorkspace(project.path);
       deleteProjectFolder(WORKSPACE_ROOT, project.name);
       const switchedOff = switchOffRoutines([...routines, ...late]);
       getDb().transaction(() => {
@@ -1507,6 +1517,11 @@ startLlamaProxy(
   (sessionId, load) => sessions.reportModelLoad(sessionId, load),
 );
 sessions.recoverOrphans();
+// Tasks share this moment: reconcile any left `running` by the previous server
+// back to `pending`, then restore queue-loop state per the restart-resume
+// setting. Done before any pi launches, so nothing a run could start races.
+reconcileInterruptedTasks();
+recoverQueuedLoopsAfterRestart();
 getDb().prepare("UPDATE canvases SET active_call = NULL, status = 'interrupted', agent_read_revision = revision WHERE active_call IS NOT NULL").run();
 pinConnection();
 // The memory tidied up at its set time, when the portal runs Understory.

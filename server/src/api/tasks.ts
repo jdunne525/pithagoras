@@ -3,8 +3,9 @@ import { getProject, ProjectError } from "../projects.js";
 import { workspaceRoot } from "../workspaces.js";
 import * as tasks from "../tasks.js";
 import { completeTask } from "../tasks.js";
-import { startTask, stopTask } from "../task-execution.js";
+import { startTask, stopTask, abortLiveRun } from "../task-execution.js";
 import { startLoop, stopLoop, isLoopRunning } from "../task-queue.js";
+import { taskLoopResumeEnabled, setTaskLoopResumeEnabled } from "../task-recovery.js";
 import type { TaskRow, TaskStatus } from "../db.js";
 import { DEFAULT_MAX_ATTEMPTS } from "../task-prompt.js";
 
@@ -129,9 +130,11 @@ export function tasksRouter(): Router {
     }
   });
 
-  // Delete a task (and its attempts).
+  // Delete a task (and its attempts). If it is still running, unwind the pi
+  // process behind it first so nothing keeps working once the row is gone.
   router.delete("/projects/:name/tasks/:id", (req, res) => {
     try {
+      abortLiveRun(req.params.id);
       tasks.deleteTask(req.params.id);
       res.json({ ok: true });
     } catch (e) {
@@ -194,6 +197,18 @@ export function tasksRouter(): Router {
     } catch (e) {
       fail(res, e);
     }
+  });
+
+  // Restart-resume opt-in (Phase 8/§13): whether queued loops resume when the
+  // server starts. Default off — a restarted server must never run Tasks on its
+  // own. Read and set here; recovery reads the same flag at boot.
+  router.get("/task-loop-resume", (req, res) => {
+    res.json({ enabled: taskLoopResumeEnabled() });
+  });
+  router.patch("/task-loop-resume", (req, res) => {
+    const enabled = req.body?.enabled === true;
+    setTaskLoopResumeEnabled(enabled);
+    res.json({ enabled: taskLoopResumeEnabled() });
   });
 
   // The runs of one Task, oldest first: each carries the session it worked in,
