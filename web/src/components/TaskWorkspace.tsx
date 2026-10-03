@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type PointerEvent as ReactPointerEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { Modal } from "./Modal";
 import { StatusDot, type TaskStatus } from "./StatusDot";
@@ -10,7 +10,7 @@ import { api, type Task, type TaskAttempt } from "../api";
 import { Streamdown } from "streamdown";
 import { useSessionEvents } from "../use-session-events";
 import { TaskTranscript } from "./TaskTranscript";
-import { LuArrowUp, LuChevronLeft, LuChevronRight, LuFileText, LuGripVertical, LuListChecks, LuPen, LuPlay, LuPlus, LuRotateCcw, LuTrash2, LuX } from "react-icons/lu";
+import { LuArrowUp, LuCheck, LuChevronLeft, LuChevronRight, LuFileText, LuGripVertical, LuListChecks, LuPen, LuPlay, LuPlus, LuRotateCcw, LuTrash2, LuX } from "react-icons/lu";
 
 /**
  * A task in the workspace is not a session: it has no events, so what a task
@@ -152,23 +152,10 @@ const normDate = (s: string): string => s.replace(" ", "T");
 const TABS = ["actions", "completed"] as const;
 type Tab = (typeof TABS)[number];
 
-/** A short word for an attempt's outcome, used in the Runs chips. */
-const statusLabel = (status: TaskAttempt["status"]): string => {
-  switch (status) {
-    case "running":
-      return t("Running");
-    case "completed":
-      return t("Completed");
-    case "failed":
-      return t("Failed");
-    case "stopped":
-      return t("Stopped");
-    default:
-      return t("Pending");
-  }
-};
+/** Called after any change to the queue, so the sidebar can keep its pending-count badge current. */
+type OnTaskActivity = () => void;
 
-export function TaskWorkspace({ projectName, onBack }: { projectName: string; onBack?: () => void }) {
+export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { projectName: string; onBack?: () => void; onTaskActivity?: OnTaskActivity }) {
   const navigate = useNavigate();
   const [rows, setRows] = useState<MockTask[]>([]);
   const [tab, setTab] = useState<Tab>("actions");
@@ -269,11 +256,16 @@ export function TaskWorkspace({ projectName, onBack }: { projectName: string; on
     api.getTaskAttempts(projectName, selected.id).then(setAttempts);
   }, [sessionRunning, activeSessionId]);
 
+  // The queue changed: tell the parent to re-read this project's pending count,
+  // so the sidebar badge stays honest without the sidebar polling.
+  const notifyActivity = () => onTaskActivity?.();
+
   const start = async (id: string) => {
     try {
       const { attempt } = await api.startTask(projectName, id);
       setAttempts((prev) => [...prev, attempt]);
       setActiveAttemptId(attempt.id);
+      notifyActivity();
     } catch {
       setError("Could not start the task.");
     }
@@ -283,6 +275,7 @@ export function TaskWorkspace({ projectName, onBack }: { projectName: string; on
     if (!selected) return;
     try {
       await api.stopTask(projectName, selected.id);
+      notifyActivity();
     } catch {
       setError("Could not stop the task.");
     }
@@ -295,8 +288,23 @@ export function TaskWorkspace({ projectName, onBack }: { projectName: string; on
     try {
       const updated = await api.rerunTask(projectName, id);
       setRows((prev) => prev.map((x) => (x.id === id ? mapTask(updated) : x)));
+      notifyActivity();
     } catch {
       setError("Could not rerun the task.");
+    }
+  };
+
+  // Mark a task complete no matter what state it is in now — pending, running,
+  // failed, stopped or already done. This is “finished by hand”, so it does not
+  // start or rerun anything and leaves prior attempts as history. A task that
+  // was not yet completed simply leaves the Actions tab for the Completed one.
+  const markComplete = async (id: string) => {
+    try {
+      const updated = await api.completeTask(projectName, id);
+      setRows((prev) => prev.map((x) => (x.id === id ? mapTask(updated) : x)));
+      notifyActivity();
+    } catch {
+      setError("Could not mark the task complete.");
     }
   };
 
@@ -306,6 +314,7 @@ export function TaskWorkspace({ projectName, onBack }: { projectName: string; on
     try {
       await api.startQueue(projectName);
       setLoopRunning(true);
+      notifyActivity();
     } catch {
       setError("Could not start the queue.");
     }
@@ -314,6 +323,7 @@ export function TaskWorkspace({ projectName, onBack }: { projectName: string; on
     try {
       await api.stopQueue(projectName);
       setLoopRunning(false);
+      notifyActivity();
     } catch {
       setError("Could not stop the queue.");
     }
@@ -336,6 +346,7 @@ export function TaskWorkspace({ projectName, onBack }: { projectName: string; on
       const created = await api.createTask(projectName, text);
       setRows((prev) => [...prev, mapTask(created)]);
       setTab("actions");
+      notifyActivity();
     } catch {
       setError("Could not create the task.");
     }
@@ -376,6 +387,7 @@ export function TaskWorkspace({ projectName, onBack }: { projectName: string; on
       await api.deleteTask(projectName, task.id);
       setRows((prev) => prev.filter((x) => x.id !== task.id));
       if (selectedId === task.id) setSelectedId(null);
+      notifyActivity();
     } catch {
       setError("Could not delete the task.");
     }
@@ -392,48 +404,58 @@ export function TaskWorkspace({ projectName, onBack }: { projectName: string; on
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-canvas">
-      {/* The top is short: where you pick a task. Below it, the conversation fills the rest. */}
-      <div className="flex shrink-0 flex-col border-b border-line">
-        <div className="flex items-center gap-2 px-3 py-1.5">
-          <button
-            onClick={onBack ?? (() => navigate("/projects"))}
-            className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-fg-subtle hover:text-fg"
-            title={t("Back to projects")}
-            aria-label={t("Back to projects")}
-          >
-            <LuChevronLeft className="h-3.5 w-3.5" />
-            <span className="hidden sm:inline">{t("Back to projects")}</span>
-          </button>
-          <LuListChecks className="h-4 w-4 shrink-0 text-accent" />
-          <div className="min-w-0 flex-1">
-            <span className="text-sm font-semibold text-fg">{t("Tasks")}</span>
-            <span className="ml-1 truncate text-xs text-fg-faint">{projectName}</span>
+      {/* The task list takes what is left of the space above the conversation,
+            rather than a fixed sliver, so a longer queue grows instead of
+            leaving dead space beneath it. */}
+      <div className="flex-1 min-h-0 flex-col border-b border-line">
+        {/* The header row carries everything at a glance: the breadcrumb on the left,
+            the queue control and the add action pushed to the right. On narrow screens
+            the two sides wrap instead of overlapping the project name. */}
+        <div className="flex flex-wrap items-center gap-2 justify-between px-3 py-1.5">
+          <div className="flex min-w-0 items-center gap-2">
+            <button
+              onClick={onBack ?? (() => navigate("/projects"))}
+              className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-fg-subtle hover:text-fg"
+              title={t("Back to projects")}
+              aria-label={t("Back to projects")}
+            >
+              <LuChevronLeft className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">{t("Back to projects")}</span>
+            </button>
+            <LuListChecks className="h-4 w-4 shrink-0 text-accent" />
+            <div className="min-w-0">
+              <span className="text-sm font-semibold text-fg">{t("Tasks")}</span>
+              <span className="ml-1 truncate text-xs text-fg-faint">{projectName}</span>
+            </div>
           </div>
-          <button
-            onClick={loopRunning ? stopQueue : startQueue}
-            className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-sm font-medium transition ${
-              loopRunning
-                ? "border border-warn/40 text-warn hover:bg-warn/10"
-                : "border border-line text-fg-subtle hover:text-fg hover:bg-fg/5"
-            }`}
-            aria-label={loopRunning ? t("Stop queue") : t("Start queue")}
-            title={loopRunning ? t("Stop the autonomous queue") : t("Start the autonomous queue")}
-          >
-            <StatusDot taskStatus={loopRunning ? "running" : "stopped"} bare />
-            {loopRunning ? t("Running") : t("Stopped")}
-            <span className="hidden sm:inline"> ·{loopRunning ? t("Stop") : t("Start")}</span>
-          </button>
-          <button
-            onClick={() => setAdding(true)}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-accent px-2.5 py-1 text-sm font-medium text-white transition hover:bg-accent/90"
-          >
-            <LuPlus className="h-3.5 w-3.5" />
-            {t("New task")}
-          </button>
+          <div className="flex shrink-0 items-center gap-1.5">
+            <button
+              onClick={loopRunning ? stopQueue : startQueue}
+              className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-sm font-medium transition ${
+                loopRunning
+                  ? "border-warn/40 bg-warn/10 text-warn hover:bg-warn/20"
+                  : "border-line bg-raised text-fg-subtle hover:text-fg hover:bg-fg/5"
+              }`}
+              aria-label={loopRunning ? t("Stop queue") : t("Start queue")}
+              title={loopRunning ? t("Stop the autonomous queue") : t("Start the autonomous queue")}
+            >
+              <StatusDot taskStatus={loopRunning ? "running" : "stopped"} bare />
+              {loopRunning ? t("Stop queue") : t("Start queue")}
+            </button>
+            <button
+              onClick={() => setAdding(true)}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-accent px-2.5 py-1 text-sm font-medium text-white transition hover:bg-accent/90"
+            >
+              <LuPlus className="h-3.5 w-3.5" />
+              {t("New task")}
+            </button>
+          </div>
         </div>
 
-        <div className="flex items-center px-3 pb-2 text-xs">
-          <div className="inline-flex items-center rounded-lg bg-raised/60 p-0.5">
+        {/* Tabs sit on a line beneath the header, the open one dropping down into the list.
+            The counts stay so you can see how many are queued versus finished. */}
+        <div className="flex items-center px-3 pb-2">
+          <div className="flex border-b border-line">
             {TABS.map((label) => {
               const n = label === "actions" ? rows.filter((x) => x.status !== "completed").length : rows.filter((x) => x.status === "completed").length;
               return (
@@ -441,17 +463,21 @@ export function TaskWorkspace({ projectName, onBack }: { projectName: string; on
                   key={label}
                   onClick={() => setTab(label)}
                   aria-current={tab === label}
-                  className={`rounded-md px-2.5 py-1 font-medium transition ${tab === label ? "bg-fg/10 text-fg" : "text-fg-subtle hover:text-fg-muted"}`}
+                  className={`flex items-center gap-1.5 border-b -mb-px pb-2 px-3 text-sm font-medium transition ${
+                    tab === label
+                      ? "border-accent text-fg"
+                      : "border-transparent text-fg-subtle hover:text-fg"
+                  }`}
                 >
                   {t(label === "actions" ? "Actions" : "Completed")}
-                  <span className="ml-1.5 text-[10px] tabular-nums text-fg-faint">{n}</span>
+                  <span className="text-[10px] tabular-nums text-fg-faint">{n}</span>
                 </button>
               );
             })}
           </div>
         </div>
 
-        <div className="max-h-[40%] min-h-0 overflow-y-auto px-2 pb-2">
+        <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
           {error ? (
             <p className="py-4 text-center text-xs text-warn">{error}</p>
           ) : rows.length === 0 && !adding ? (
@@ -490,13 +516,16 @@ export function TaskWorkspace({ projectName, onBack }: { projectName: string; on
                   selected={selectedId === task.id}
                   dragging={dragId === task.id}
                   ago={ago(lastOf(task))}
-                  onSelect={() => { setSelectedId(task.id); setTab("actions"); setComposerOpen(false); }}
+                  // Selecting a task only opens it: never move between tabs just because a
+                  // row was picked, or clicking a finished task in Completed would jump home.
+                  onSelect={() => { setSelectedId(task.id); setComposerOpen(false); }}
                   onMove={(toId) => moveTask(task.id, toId)}
                   onDragStart={() => setDragId(task.id)}
                   onDragEnd={() => setDragId(null)}
                   onOpenSession={() => setPreview(task)}
                   onStart={() => task.status === "running" ? stop() : start(task.id)}
                   onRerun={() => rerun(task.id)}
+                  onComplete={() => markComplete(task.id)}
                   onRename={(title) => rename(task.id, title)}
                   onRemove={() => remove(task)}
                 />
@@ -506,8 +535,9 @@ export function TaskWorkspace({ projectName, onBack }: { projectName: string; on
         </div>
       </div>
 
-      {/* The conversation fills what is left of the page. */}
-      <div className="flex min-h-0 flex-1 flex-col">
+      {/* The conversation sits below the list, taking only the space it needs.
+            The list above grows to use the rest. */}
+      <div className="flex shrink-0 min-h-0 flex-col">
         {!selected ? (
           <EmptyState />
         ) : (
@@ -525,41 +555,18 @@ export function TaskWorkspace({ projectName, onBack }: { projectName: string; on
                 task={selected}
                 onStart={() => selected.status === "running" ? stop() : start(selected.id)}
                 onRerun={() => rerun(selected.id)}
+                onComplete={() => markComplete(selected.id)}
               />
             </div>
 
             {/* The conversation fills what is left of the page. It renders one
-                attempt's real transcript, streamed from its session, with the
-                previous runs shown as selectable chips above it. */}
+                attempt's real transcript, streamed from its session. */}
             {loadingAttempts ? (
               <div className="flex flex-1 items-center justify-center py-16">
                 <span className="text-fg-muted">{t("Loading history…")}</span>
               </div>
             ) : (
               <>
-                {attempts.length > 0 && (
-                  <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-line px-3 py-2">
-                    <span className="text-[10px] font-semibold uppercase tracking-wider text-fg-faint">
-                      {t("Runs")}
-                    </span>
-                    {attempts.map((a) => (
-                      <button
-                        key={a.id}
-                        onClick={() => setActiveAttemptId(a.id)}
-                        aria-current={a.id === activeAttemptId}
-                        className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs transition ${
-                          a.id === activeAttemptId
-                            ? "border-accent/60 bg-accent/10 text-fg"
-                            : "border-line text-fg-subtle hover:text-fg"
-                        }`}
-                      >
-                        <StatusDot taskStatus={a.status} bare />
-                        #{a.attempt_number} · {statusLabel(a.status)}
-                      </button>
-                    ))}
-                  </div>
-                )}
-
                 <div className="min-h-0 flex-1 overflow-y-auto">
                   {activeSessionId ? (
                     <TaskTranscript sessionId={activeSessionId} events={events} running={sessionRunning} />
@@ -600,7 +607,7 @@ export function TaskWorkspace({ projectName, onBack }: { projectName: string; on
     * Rerun only resets a Task to pending without starting it, so it can be
       reordered and Run later. Neither touches an existing attempt's history.
     * Resume is Phase 6; keep these two distinct from it. */
-function RunControls({ task, onStart, onRerun }: { task: MockTask; onStart: () => void; onRerun?: () => void }) {
+function RunControls({ task, onStart, onRerun, onComplete }: { task: MockTask; onStart: () => void; onRerun?: () => void; onComplete?: () => void }) {
   const atMax = task.attempts >= task.maxAttempts;
   const canRun = task.status !== "running" && !atMax && task.status !== "completed";
   const canRerun = !!onRerun && ["failed", "stopped", "completed"].includes(task.status) && task.attempts > 0;
@@ -620,6 +627,13 @@ function RunControls({ task, onStart, onRerun }: { task: MockTask; onStart: () =
           <LuRotateCcw className="h-3.5 w-3.5" />
         </ActionBtn>
       ) : null}
+      {/* Mark complete is available for every task that is not already done,
+          no matter what state it is in — pending, running, failed or stopped. */}
+      {onComplete && task.status !== "completed" ? (
+        <ActionBtn title={t("Mark completed")} onClick={onComplete} aria-label={t("Mark completed")}>
+          <LuCheck className="h-3.5 w-3.5" />
+        </ActionBtn>
+      ) : null}
     </div>
   );
 }
@@ -636,6 +650,7 @@ function TaskRow({
   onOpenSession,
   onStart,
   onRerun,
+  onComplete,
   onRename,
   onRemove,
 }: {
@@ -650,6 +665,7 @@ function TaskRow({
   onOpenSession: () => void;
   onStart: () => void;
   onRerun?: () => void;
+  onComplete?: () => void;
   onRename?: (title: string) => void;
   onRemove: () => void;
 }) {
@@ -680,8 +696,72 @@ function TaskRow({
     setEditing(false);
   };
 
+  // Reorder on touch devices. The native draggable above only fires for real
+  // pointers, so on a phone a press-and-hold on the grip starts text
+  // selection instead of dragging — which blocks reordering. Follow the
+  // pointer by hand for non-mouse pointers: a light tap still selects, and the
+  // list can still be scrolled until the gesture clearly means to move the row.
+  const rowRef = useRef<HTMLLIElement>(null);
+  const draggingRef = useRef(false);
+  const startGripDrag = (e: ReactPointerEvent<HTMLButtonElement>) => {
+    if (e.pointerType !== "touch" || e.button !== 0) return;
+    const pid = e.pointerId;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const body = document.body;
+    const savedSelect = body.style.userSelect;
+    const savedWebkit = body.style.webkitUserSelect;
+    const savedTouch = body.style.touchAction;
+    let engaged = false;
+    const onPointerMove = (ev: PointerEvent) => {
+      if (ev.pointerId !== pid) return;
+      if (!engaged && Math.hypot(ev.clientX - startX, ev.clientY - startY) < 12) return;
+      engaged = true;
+      ev.preventDefault();
+      // Stop the page panning and text selecting while a row is being moved.
+      body.style.userSelect = "none";
+      body.style.webkitUserSelect = "none";
+      body.style.touchAction = "none";
+      if (!draggingRef.current) {
+        draggingRef.current = true;
+        onDragStart();
+      }
+      const el = rowRef.current;
+      const ul = el?.parentElement;
+      if (!el || !ul) return;
+      const kids = Array.from(ul.children) as HTMLLIElement[];
+      const idx = kids.indexOf(el);
+      const rect = el.getBoundingClientRect();
+      const mid = rect.top + rect.height / 2;
+      if (idx > 0 && ev.clientY < mid - 10) {
+        const prevId = kids[idx - 1].getAttribute("data-task-id");
+        if (prevId && prevId !== task.id) onMove(prevId);
+      } else if (idx < kids.length - 1 && ev.clientY > mid + 10) {
+        const nextId = kids[idx + 1].getAttribute("data-task-id");
+        if (nextId && nextId !== task.id) onMove(nextId);
+      }
+    };
+    const end = () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+      body.style.userSelect = savedSelect;
+      body.style.webkitUserSelect = savedWebkit;
+      body.style.touchAction = savedTouch;
+      if (draggingRef.current) {
+        draggingRef.current = false;
+        onDragEnd();
+      }
+    };
+    window.addEventListener("pointermove", onPointerMove, { passive: false });
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+  };
+
   return (
     <li
+      ref={rowRef}
+      data-task-id={task.id}
       draggable
       onDragStart={(e) => { onDragStart(); e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", task.id); }}
       onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; }}
@@ -693,6 +773,7 @@ function TaskRow({
         type="button"
         aria-label={t("Drag to reorder")}
         title={t("Drag to reorder")}
+        onPointerDown={startGripDrag}
         className="shrink-0 p-0.5 text-fg-faint opacity-0 hover:text-fg-muted group-hover:opacity-100 focus:opacity-100 [@media(hover:none)]:opacity-100"
       >
         <LuGripVertical className="h-3.5 w-3.5" />

@@ -1,7 +1,7 @@
 import { LuMenu, LuX } from "react-icons/lu";
 import { appendLiveEvent, resetLiveEvents } from "./live-events";
 import { fillFrom } from "./editor-fills";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, Route, Routes, useNavigate, useParams } from "react-router-dom";
 import { api, SIGNED_OUT, type PortalEvent, type Session, type SessionStatus } from "./api";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -178,6 +178,32 @@ function Shell({
    */
   const [sessionsAsked, setSessionsAsked] = useState(false);
   const { places, reload: reloadPlaces } = usePlaces(sessions, sessionsAsked);
+
+  // Pending-task counts per project, shared so the sidebar badges stay honest as
+  // runs progress on the tasks page. One entry per project name; a missing or
+  // zero value simply means nothing is shown.
+  const [pendingByProject, setPendingByProject] = useState<Record<string, number>>({});
+  const refreshPending = useCallback(async (project: string) => {
+    try {
+      const tasks = await api.listTasks(project);
+      setPendingByProject((prev) => ({
+        ...prev,
+        [project]: tasks.filter((x) => x.status !== "completed").length,
+      }));
+    } catch {}
+  }, []);
+  // Seed the badges once the projects are known, and keep them seeded when new
+  // projects appear (e.g. a freshly created one).
+  const pendingKey = useMemo(
+    () => places?.projects.map((p) => p.name).join(",") ?? "",
+    [places],
+  );
+  useEffect(() => {
+    if (!places || places.projects.length === 0) return;
+    void Promise.all(places.projects.map((p) => refreshPending(p.name)));
+  // Only when the set of project names changes (a project added/renamed), not on
+  // every render where `places` gets a fresh identity.
+  }, [pendingKey, refreshPending]);
 
   /** A chat started in `workspace`, or in Home without one, and opened. */
   const startChat = async (workspace?: string) => {
@@ -489,6 +515,7 @@ function Shell({
         hasBrowser={hasBrowser}
         hasMemory={hasMemory}
         places={places}
+        pendingByProject={pendingByProject}
         onNavigate={(to) => { setMobileNav(false); navigate(`/${to}`); }}
         onOpenFolder={(key) => { setMobileNav(false); navigate(`/sessions?folder=${encodeURIComponent(key)}`); }}
         onOpenTasks={(name) => {
@@ -560,6 +587,7 @@ function Shell({
           <TaskWorkspace
             projectName={taskProject?.name ?? projectId ?? t("your project")}
             onBack={() => navigate("/projects")}
+            onTaskActivity={() => refreshPending(taskProject?.name ?? projectId ?? "")}
           />
         ) : view === "projects" ? (
           <ProjectsPage

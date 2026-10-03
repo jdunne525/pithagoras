@@ -45,6 +45,7 @@ export function Sidebar({
   hasBrowser,
   hasMemory = false,
   places,
+  pendingByProject,
   onSelect,
   onNewChat,
   onDelete,
@@ -79,6 +80,8 @@ export function Sidebar({
   onOpenFolder: (key: string) => void;
   /** Open the tasks workspace for a project, named by its folder name. */
   onOpenTasks?: (name: string) => void;
+  /** Pending-task count per project, owned by the parent so it stays current. */
+  pendingByProject?: Record<string, number>;
 }) {
   const [storedCollapsed, setCollapsed] = useState(() => local.get("sidebarCollapsed") === "true");
   const collapsed = forceExpanded ? false : storedCollapsed;
@@ -288,6 +291,11 @@ export function Sidebar({
                       >
                         <LuListChecks className="h-3.5 w-3.5 shrink-0 text-fg-faint" />
                         {t("Tasks")}
+                        {(pendingByProject?.[f.name] ?? 0) > 0 && (
+                          <span className="ml-auto text-[10px] tabular-nums text-fg-faint">
+                            {pendingByProject?.[f.name] ?? 0}
+                          </span>
+                        )}
                       </button>
                     )}
                     {chats.length === 0 && (

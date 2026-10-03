@@ -403,6 +403,12 @@ export const api = {
     json<Task>(`/api/projects/${encodeURIComponent(project)}/tasks/${id}/rerun`, {
       method: "POST",
     }),
+  /** Mark a Task complete regardless of its current state — the manual
+    "finished by hand" action, distinct from a run finishing on its own. */
+  completeTask: (project: string, id: string) =>
+    json<Task>(`/api/projects/${encodeURIComponent(project)}/tasks/${id}/complete`, {
+      method: "POST",
+    }),
   /** Project-level queue loop control (Phase 5): start/stop the server-owned
     autonomous processor for this project only. */
   startQueue: (project: string) =>

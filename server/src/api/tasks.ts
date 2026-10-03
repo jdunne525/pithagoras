@@ -2,6 +2,7 @@ import express, { type Router } from "express";
 import { getProject, ProjectError } from "../projects.js";
 import { workspaceRoot } from "../workspaces.js";
 import * as tasks from "../tasks.js";
+import { completeTask } from "../tasks.js";
 import { startTask, stopTask } from "../task-execution.js";
 import { startLoop, stopLoop, isLoopRunning } from "../task-queue.js";
 import type { TaskRow, TaskStatus } from "../db.js";
@@ -112,6 +113,17 @@ export function tasksRouter(): Router {
   router.post("/projects/:name/tasks/:id/rerun", (req, res) => {
     try {
       res.json(expose(tasks.rerunTask(req.params.id)));
+    } catch (e) {
+      fail(res, e);
+    }
+  });
+
+  // Mark complete: settle a task to completed no matter what state it was in,
+  // including while it is running. A distinct verb from /status so the intent
+  // ("done by hand") is clear, and it bypasses any per-state guard.
+  router.post("/projects/:name/tasks/:id/complete", (req, res) => {
+    try {
+      res.json(expose(completeTask(req.params.id)));
     } catch (e) {
       fail(res, e);
     }

@@ -107,6 +107,17 @@ export const rerunTask = (id: string): db.TaskRow => {
   return setTaskStatus(id, "pending")!;
 };
 
+/** Mark a Task complete regardless of the state it is in now. Unlike Rerun it
+    needs no pre-condition: a pending, running, failed, stopped or already
+    completed Task all settle to completed, recording when it happened. This is
+    the manual "finished by hand" path, separate from a run finishing on its
+    own. */
+export const completeTask = (id: string): db.TaskRow => {
+  // Read first so a missing id reports "missing" like the rest do.
+  getTask(id);
+  return setTaskStatus(id, "completed")!;
+};
+
 export const deleteTask = (id: string): void => {
   getTask(id); // exists? report missing rather than deleting nothing.
   db.deleteTask(id);
