@@ -20,6 +20,19 @@ export interface Session {
   kind?: "task" | "agent" | "routine";
 }
 
+/** One run of a Task: the session it worked in, its place in the queue, and
+whether it finished on its own, was stopped, completed, or failed. */
+export interface TaskAttempt {
+  id: string;
+  task_id: string;
+  session_id: string | null;
+  attempt_number: number;
+  status: "pending" | "running" | "completed" | "failed" | "stopped";
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
 /** A set of instructions the agent pulls in when the description matches. */
 export interface Skill {
   name: string;
@@ -371,6 +384,22 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(patch),
     }),
+  /** Start a Task: create its session, open a new attempt, and hand the Task
+    to the session. Returns the new attempt and the session it ran in. */
+  startTask: (project: string, id: string) =>
+    json<{ task: Task; attempt: TaskAttempt; sessionId: string }>(
+      `/api/projects/${encodeURIComponent(project)}/tasks/${id}/start`,
+      { method: "POST" }
+    ),
+  /** Stop a Task: settle its current attempt as stopped and unwind the run. */
+  stopTask: (project: string, id: string) =>
+    json<Task>(`/api/projects/${encodeURIComponent(project)}/tasks/${id}/status`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "stopped" }),
+    }),
+  /** Every run of one Task, oldest first, each carrying its session id. */
+  getTaskAttempts: (project: string, id: string) =>
+    json<TaskAttempt[]>(`/api/projects/${encodeURIComponent(project)}/tasks/${id}/attempts`),
   setTaskOrder: (project: string, ids: string[]) =>
     json<{ ok: true }>(`/api/projects/${encodeURIComponent(project)}/tasks/order`, {
       method: "PUT",

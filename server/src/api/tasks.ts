@@ -2,6 +2,7 @@ import express, { type Router } from "express";
 import { getProject, ProjectError } from "../projects.js";
 import { workspaceRoot } from "../workspaces.js";
 import * as tasks from "../tasks.js";
+import { startTask, stopTask } from "../task-execution.js";
 import type { TaskStatus } from "../db.js";
 
 /**
@@ -112,20 +113,36 @@ export function tasksRouter(): Router {
   });
 
   // Lifecycle: move a task between states (start/stop/rerun/recovery live here).
+  // Stopping is special — it unwinds the running agent as well as the status,
+  // so it goes through the execution module rather than a bare status change.
   router.patch("/projects/:name/tasks/:id/status", (req, res) => {
-    const status = parseStatus(req.body?.status);
+    const body = req.body ?? {};
+    const status = parseStatus(body.status);
     if (!status) return res.status(400).json({ error: "status required: pending|running|completed|failed|stopped" });
     try {
-      res.json(tasks.setTaskStatus(req.params.id, status));
+      res.json(status === "stopped" ? stopTask(req.params.id) : tasks.setTaskStatus(req.params.id, status));
     } catch (e) {
       fail(res, e);
     }
   });
 
-  // Begin a fresh autonomous attempt; pass sessionId once the session exists.
+  // Begin a fresh autonomous run of a Task. This creates the session the
+  // attempt works in and hands the Task to it, so the browser passes nothing
+  // but the id and gets back the new attempt and its session.
   router.post("/projects/:name/tasks/:id/start", (req, res) => {
     try {
-      res.status(201).json(tasks.startAttempt(req.params.id, req.body?.sessionId ?? null));
+      res.status(201).json(startTask(req.params.id));
+    } catch (e) {
+      fail(res, e);
+    }
+  });
+
+  // The runs of one Task, oldest first: each carries the session it worked in,
+  // so the view can render an attempt's history once it exists without another
+  // round-trip. Previous attempts stay as history; a delete still drops them.
+  router.get("/projects/:name/tasks/:id/attempts", (req, res) => {
+    try {
+      res.json(tasks.listAttemptsByTask(req.params.id));
     } catch (e) {
       fail(res, e);
     }

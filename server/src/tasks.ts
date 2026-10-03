@@ -146,6 +146,11 @@ export const setTaskStatus = (id: string, status: TaskStatus): db.TaskRow | unde
   return db.updateTaskFields(id, fields);
 };
 
+/** Every run of one Task, oldest first — used by the Tasks view to render
+ * history without another round-trip. */
+export const listAttemptsByTask = (taskId: string): db.TaskAttemptRow[] =>
+  db.listAttemptsByTask(taskId);
+
 /**
  * Begin a fresh attempt (§6, §7): bump the Task's attempt count, open a new
  * attempt row, and mark both it and the Task running. The previous attempt, if

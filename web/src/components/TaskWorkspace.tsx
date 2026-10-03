@@ -6,8 +6,10 @@ import { ThinkingBlock } from "./ChatActivity";
 import { confirmDialog } from "./ConfirmDialog";
 import { isEnter } from "../shortcuts";
 import { formatRelative, t } from "../i18n";
-import { api, type Task } from "../api";
+import { api, type Task, type TaskAttempt } from "../api";
 import { Streamdown } from "streamdown";
+import { useSessionEvents } from "../use-session-events";
+import { TaskTranscript } from "./TaskTranscript";
 import { LuArrowUp, LuChevronLeft, LuChevronRight, LuFileText, LuGripVertical, LuListChecks, LuPen, LuPlay, LuPlus, LuRotateCcw, LuTrash2, LuX } from "react-icons/lu";
 
 /**
@@ -150,6 +152,22 @@ const normDate = (s: string): string => s.replace(" ", "T");
 const TABS = ["actions", "completed"] as const;
 type Tab = (typeof TABS)[number];
 
+/** A short word for an attempt's outcome, used in the Runs chips. */
+const statusLabel = (status: TaskAttempt["status"]): string => {
+  switch (status) {
+    case "running":
+      return t("Running");
+    case "completed":
+      return t("Completed");
+    case "failed":
+      return t("Failed");
+    case "stopped":
+      return t("Stopped");
+    default:
+      return t("Pending");
+  }
+};
+
 export function TaskWorkspace({ projectName, onBack }: { projectName: string; onBack?: () => void }) {
   const navigate = useNavigate();
   const [rows, setRows] = useState<MockTask[]>([]);
@@ -190,12 +208,82 @@ export function TaskWorkspace({ projectName, onBack }: { projectName: string; on
   const running = rows.some((x) => x.status === "running");
   const selected = useMemo(() => rows.find((x) => x.id === selectedId) ?? null, [rows, selectedId]);
 
-  // Run/Resume/Stop/Rerun drive execution — Phase 3. Keep the buttons, but do
-  // nothing rather than pretend a run is happening. They take args so the call
-  // sites below stay valid until they are wired up.
-  const start = (..._args: unknown[]) => {};
-  const stop = () => {};
-  const rerun = (..._args: unknown[]) => {};
+  // --- Phase 3: the bottom panel drives a real autonomous run. Each Task has
+  // several attempts; this tracks them and renders the active one from its own
+  // session, streamed live. A new attempt is created on Start (or Re-run,
+  // which is Phase 5); stopping settles the current one and unwinds the run.
+  const [attempts, setAttempts] = useState<TaskAttempt[]>([]);
+  const [activeAttemptId, setActiveAttemptId] = useState<string | null>(null);
+  const [loadingAttempts, setLoadingAttempts] = useState(false);
+
+  const activeAttempt = useMemo(
+    () => attempts.find((a) => a.id === activeAttemptId) ?? attempts.at(-1) ?? null,
+    [attempts, activeAttemptId]
+  );
+  const activeSessionId = activeAttempt?.session_id ?? null;
+  // Live events for the active session: replays history, then streams as it
+  // runs. `running` here is whether the session is actively working, distinct
+  // from the Task status but equal to it while a run is open.
+  const { events, running: sessionRunning } = useSessionEvents(activeSessionId);
+
+  useEffect(() => {
+    if (!projectName || !selected) return;
+    let cancelled = false;
+    setLoadingAttempts(true);
+    api.getTaskAttempts(projectName, selected.id)
+      .then((list) => {
+        if (cancelled) return;
+        setAttempts(list);
+        // Select the newest run so a Task with history opens on its latest attempt.
+        const latest = [...list].sort((a, b) => a.attempt_number - b.attempt_number).at(-1);
+        setActiveAttemptId(latest?.id ?? null);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setLoadingAttempts(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectName, selected]);
+
+  // When a run stops streaming, the backend has settled the attempt (a natural
+  // end becomes failed; a stop becomes stopped) and reset the Task. Reconcile
+  // our local copies so the status and chips stay honest without polling.
+  useEffect(() => {
+    if (!activeSessionId || sessionRunning || !selected || selected.status !== "running") return;
+    api.listTasks(projectName).then((tasks) => setRows(tasks.map(mapTask)));
+    api.getTaskAttempts(projectName, selected.id).then(setAttempts);
+  }, [sessionRunning, activeSessionId]);
+
+  const start = async (id: string) => {
+    try {
+      const { attempt } = await api.startTask(projectName, id);
+      setAttempts((prev) => [...prev, attempt]);
+      setActiveAttemptId(attempt.id);
+    } catch {
+      setError("Could not start the task.");
+    }
+  };
+
+  const stop = async () => {
+    if (!selected) return;
+    try {
+      await api.stopTask(projectName, selected.id);
+    } catch {
+      setError("Could not stop the task.");
+    }
+  };
+
+  // Continuing an open conversation sends to the running session without
+  // creating a new attempt: a normal message, not a new run.
+  const sendResume = () => {
+    const text = resumeText.trim();
+    if (!text || !activeSessionId) return;
+    api.prompt(activeSessionId, text).catch(() => setError("Could not send the message."));
+    setResumeText("");
+    // Keep the composer open so a follow-up can be sent in the same breath.
+  };
 
   const addTask = useCallback(async (prompt: string) => {
     const text = prompt.trim();
@@ -251,10 +339,7 @@ export function TaskWorkspace({ projectName, onBack }: { projectName: string; on
 
   // Continuing a session drives the agent — Phase 3. The composer stays, but
   // sending does nothing until it is wired up.
-  const sendResume = () => {
-    setResumeText("");
-    setComposerOpen(false);
-  };
+
 
   // One list filtered by the open tab: Actions shows everything not completed,
   // Completed shows only finished Tasks.
@@ -353,7 +438,6 @@ export function TaskWorkspace({ projectName, onBack }: { projectName: string; on
                   onDragEnd={() => setDragId(null)}
                   onOpenSession={() => setPreview(task)}
                   onStart={() => task.status === "running" ? stop() : start(task.id)}
-                  onRerun={() => rerun(task)}
                   onRename={(title) => rename(task.id, title)}
                   onRemove={() => remove(task)}
                 />
@@ -381,24 +465,64 @@ export function TaskWorkspace({ projectName, onBack }: { projectName: string; on
               <RunControls
                 task={selected}
                 onStart={() => selected.status === "running" ? stop() : start(selected.id)}
-                onRerun={() => rerun(selected)}
               />
             </div>
 
-            <Conversation
-              messages={selected.msgs ?? seedMessages(selected)}
-              running={selected.status === "running"}
-            />
+            {/* The conversation fills what is left of the page. It renders one
+                attempt's real transcript, streamed from its session, with the
+                previous runs shown as selectable chips above it. */}
+            {loadingAttempts ? (
+              <div className="flex flex-1 items-center justify-center py-16">
+                <span className="text-fg-muted">{t("Loading history…")}</span>
+              </div>
+            ) : (
+              <>
+                {attempts.length > 0 && (
+                  <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-line px-3 py-2">
+                    <span className="text-[10px] font-semibold uppercase tracking-wider text-fg-faint">
+                      {t("Runs")}
+                    </span>
+                    {attempts.map((a) => (
+                      <button
+                        key={a.id}
+                        onClick={() => setActiveAttemptId(a.id)}
+                        aria-current={a.id === activeAttemptId}
+                        className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs transition ${
+                          a.id === activeAttemptId
+                            ? "border-accent/60 bg-accent/10 text-fg"
+                            : "border-line text-fg-subtle hover:text-fg"
+                        }`}
+                      >
+                        <StatusDot taskStatus={a.status} bare />
+                        #{a.attempt_number} · {statusLabel(a.status)}
+                      </button>
+                    ))}
+                  </div>
+                )}
 
-            <ResumeComposer
-              open={composerOpen}
-              value={resumeText}
-              onChange={setResumeText}
-              onSend={sendResume}
-              onClose={() => { setComposerOpen(false); setResumeText(""); }}
-              canSend={resumeText.trim().length > 0}
-              onOpen={() => setComposerOpen(true)}
-            />
+                <div className="min-h-0 flex-1 overflow-y-auto">
+                  {activeSessionId ? (
+                    <TaskTranscript sessionId={activeSessionId} events={events} running={sessionRunning} />
+                  ) : (
+                    <div className="flex h-full items-center justify-center py-16">
+                      <span className="text-fg-muted">{t("This run has no activity yet.")}</span>
+                    </div>
+                  )}
+                </div>
+
+                {activeSessionId && selected.status === "running" && (
+                  <ResumeComposer
+                    open={composerOpen}
+                    value={resumeText}
+                    onChange={setResumeText}
+                    onSend={sendResume}
+                    onClose={() => { setComposerOpen(false); setResumeText(""); }}
+                    canSend={resumeText.trim().length > 0}
+                    onOpen={() => setComposerOpen(true)}
+                  />
+                )}
+              </>
+            )}
           </>
         )}
       </div>
@@ -409,8 +533,9 @@ export function TaskWorkspace({ projectName, onBack }: { projectName: string; on
 }
 
 /** The Run/Resume and Rerun controls, shared by a task row and the session
-    header, so both show the same buttons for the same states. */
-function RunControls({ task, onStart, onRerun }: { task: MockTask; onStart: () => void; onRerun: () => void }) {
+    header, so both show the same buttons for the same states. `onRerun` is
+    optional: re-running is Phase 5, so the button is hidden until wired. */
+function RunControls({ task, onStart, onRerun }: { task: MockTask; onStart: () => void; onRerun?: () => void }) {
   const atMax = task.attempts >= task.maxAttempts;
   const canStart = task.status !== "running" && !atMax;
   return (
@@ -424,7 +549,7 @@ function RunControls({ task, onStart, onRerun }: { task: MockTask; onStart: () =
           <LuPlay className="h-3.5 w-3.5" />
         </ActionBtn>
       ) : null}
-      {canStart && task.attempts > 0 ? (
+      {onRerun && canStart && task.attempts > 0 ? (
         <ActionBtn title={t("Re-run task")} onClick={onRerun} aria-label={t("Re-run task")}>
           <LuRotateCcw className="h-3.5 w-3.5" />
         </ActionBtn>
@@ -458,7 +583,7 @@ function TaskRow({
   onDragEnd: () => void;
   onOpenSession: () => void;
   onStart: () => void;
-  onRerun: () => void;
+  onRerun?: () => void;
   onRename?: (title: string) => void;
   onRemove: () => void;
 }) {

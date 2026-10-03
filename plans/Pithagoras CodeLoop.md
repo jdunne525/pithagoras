@@ -1209,6 +1209,32 @@ Use existing SSE/session infrastructure for activity display.
 
 Implement the lower Task execution view using the existing Pithagoras activity/session renderer.
 
+> **Status: implemented.** Backend orchestration lives in `server/src/task-execution.ts`
+> (`startTask` / `stopTask` / natural-end settle); routes added in `server/src/api/tasks.ts`
+> (`POST /start`, `PATCH /status`, `GET /attempts`). Frontend: `web/src/use-session-events.ts`
+> (SSE replay-then-stream per session), `web/src/components/TaskTranscript.tsx` (renders one
+> attempt's transcript), the rewritten bottom panel in `TaskWorkspace.tsx`, and API helpers in
+> `web/src/api.ts`. Server + web type-check and build clean; `server/test/tasks.test.mjs` passes.
+> See the resolved decisions below.
+
+### Prerequisites / baseline (resolved)
+
+* **Phases 0–2 are complete.** The Phase 0 prototype, Phase 1 persistence (`tasks` / `task_attempts`, the DB helpers, and the `kind = 'autonomous'` label), and Phase 2 wired UI plus durable queue order are the authoritative baseline. Build directly on the committed Phase 1/2 code. Do not re-implement Task persistence, the backend Task service module, or the Tasks page here.
+* **Attempt ↔ session model already exists.** Reuse the Phase 1 `task_attempts` row (populate its `session_id` when the attempt actually runs) and the `kind = 'autonomous'` session label established in Phase 1. A Task owns the lifecycle; each autonomous attempt gets its own fresh Pithagoras agent session created through `SessionManager`.
+
+### Status transitions at natural end (resolved)
+
+* **A naturally-finished attempt is `failed`.** Because completion detection is deferred to Phase 4, an autonomous attempt that reaches Pi's natural end *and was not intentionally stopped* is recorded as `failed` (incomplete) via the existing `db.updateAttemptFields(...)` / `recordAttemptEnd` path — it is **not** left hanging in `running`. This keeps every Task out of a permanent `running` state before the completion protocol lands.
+* `stop Task` still records `stopped` (intentional), kept distinct from the natural-end `failed`. Both retain the attempt/session as history; neither deletes the Task or its session.
+
+### Live execution view (resolved)
+
+* **The bottom panel is fully wired, now (in Phase 3).** Every part of the selected Task's lower area is live in this phase — no mock, seeded, or stale transcript (the Phase 2 placeholder is replaced). It reuses the existing Pithagoras activity/session renderer rather than introducing a new one, and preserves existing behavior such as scroll handling. This includes:
+  * **Live running-attempt activity** — the currently running attempt's agent messages and tool activity stream in real time through the existing SSE/session infrastructure.
+  * **Multi-attempt historical viewing** — inspecting a completed, stopped, failed, or running Task shows its prior attempts' sessions/events in chronological order (from existing Pithagoras sessions/history, not duplicated into the Task DB), without a separate Raw-JSONL viewer.
+  * **Continue conversation** — a chat-style input lets the user continue interacting with the Task's agent session as a normal (non-autonomous) conversation, reusing existing chat/session mechanisms. This stays conceptually distinct from Rerun/Resume.
+* **Deferred from Phase 6:** only **Resume** (returning an existing Task to *autonomous* execution) remains in Phase 6; Rerun stays in Phase 5. Start / Stop wiring is inherent to this phase's execution work.
+
 ---
 
 ## Phase 4 — Completion protocol
@@ -1242,18 +1268,18 @@ Do not reuse failed autonomous attempt conversation context automatically.
 
 ---
 
-## Phase 6 — Task conversation/resume
+## Phase 6 — Resume
+
+Note: live Task execution/session viewing and "Continue conversation" are implemented in Phase 3. This phase focuses solely on **Resume** — returning an existing Task to *autonomous* execution via the appropriate existing session/context where supported, kept distinct from a fresh Rerun (Phase 5) and from non-autonomous Continue conversation (Phase 3).
 
 Implement:
 
-* Task execution/session viewing
-* Continue conversation
-* Resume behavior
-* appropriate session continuation
-* preservation of previous attempts
+* Resume behavior (return an existing Task to autonomous execution)
+* appropriate session continuation for Resume
+* preservation of previous attempts across a Resume
 * clear distinction between Rerun, Resume, and Continue conversation
 
-Reuse existing Pithagoras session/resume mechanisms wherever possible.
+Inspect the actual CodeLoop Resume behavior and Pithagoras session-resume capabilities before implementing; do not assume Resume is another Rerun. Reuse existing Pithagoras session/resume mechanisms wherever possible.
 
 ---
 
