@@ -37,6 +37,18 @@ import { isValidSlug, slugify } from "./slug.js";
 const RESERVED = new Set(["home"]);
 /** What pi reads as a project's instructions. */
 export const INSTRUCTIONS_FILE = "AGENTS.md";
+
+/**
+ * Autonomous-Task instructions for a project, kept fully separate from
+ * AGENTS.md (§14 / Phase 7).
+ *
+ * AGENTS.md is what pi reads on its own for every chat and project here, so it
+ * cannot carry Task-only guidance without leaking into ordinary chats. This is a
+ * second file in the same folder: edited through the Projects page and handed
+ * explicitly to a Task when it runs, never read by pi on its own, and never
+ * written anywhere a chat would see it. It dies with the folder on delete.
+ */
+export const TASK_INSTRUCTIONS_FILE = "PITHAGORAS_TASKS.md";
 const MAX_INSTRUCTIONS = 100_000;
 /** What is read back: characters can be up to four bytes, and this is a ceiling, not a target. */
 const MAX_READ_BYTES = MAX_INSTRUCTIONS * 4;
@@ -215,6 +227,47 @@ export function writeInstructions(root: string, name: string, text: string): voi
   } finally {
     closeSync(fd);
   }
+}
+
+/** A project's autonomous-Task instructions, or "" when none. Operates on a folder path. */
+export function readTaskInstructions(projectDir: string): string {
+  const fd = openInstructions(path.join(projectDir, TASK_INSTRUCTIONS_FILE), constants.O_RDONLY);
+  if (fd === undefined) return "";
+  try {
+    if (fstatSync(fd).size > MAX_READ_BYTES) {
+      throw new ProjectError("invalid", `${TASK_INSTRUCTIONS_FILE} is too large to edit here; edit it in the folder`);
+    }
+    return readFileSync(fd, "utf8");
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Save a project's autonomous-Task instructions; blank removes the file. */
+export function writeTaskInstructions(projectDir: string, text: string): void {
+  checkInstructions(text);
+  const file = path.join(projectDir, TASK_INSTRUCTIONS_FILE);
+  if (!text.trim()) {
+    rmSync(file, { force: true });
+    return;
+  }
+  const fd = openInstructions(file, constants.O_WRONLY | constants.O_CREAT);
+  if (fd === undefined) throw new ProjectError("missing", `${TASK_INSTRUCTIONS_FILE} could not be created`);
+  try {
+    ftruncateSync(fd, 0);
+    writeFileSync(fd, text.trimEnd() + "\n");
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Name-keyed helpers: the routes read and write a project's Task instructions by name. */
+export function readProjectTaskInstructions(root: string, name: string): string {
+  return readTaskInstructions(resolveProject(root, name));
+}
+
+export function writeProjectTaskInstructions(root: string, name: string, text: string): void {
+  writeTaskInstructions(resolveProject(root, name), text);
 }
 
 /** What is in a project, for the question "are you sure?". */

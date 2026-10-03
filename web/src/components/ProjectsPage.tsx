@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { LuFileText, LuFolderGit2, LuFolderKanban, LuListChecks, LuPlus, LuTrash2 } from "react-icons/lu";
+import { LuBookMarked, LuFileText, LuFolderGit2, LuFolderKanban, LuListChecks, LuPlus, LuTrash2 } from "react-icons/lu";
 import { PageHeader } from "./PageHeader";
 import { RowsSkeleton } from "./Skeleton";
 import { api, type Project, type Session } from "../api";
@@ -39,6 +39,7 @@ export function ProjectsPage({
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState<Project | null>(null);
+  const [editingTasks, setEditingTasks] = useState<Project | null>(null);
 
   const load = useCallback(() => {
     api
@@ -216,6 +217,17 @@ export function ProjectsPage({
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
+                        setEditingTasks(p);
+                      }}
+                      className="rounded p-1.5 text-fg-subtle hover:text-accent"
+                      title={t("Task instructions")}
+                      aria-label={t("Task instructions for {name}", { name: p.name })}
+                    >
+                      <LuBookMarked className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
                         remove(p);
                       }}
                       className="rounded p-1.5 text-fg-subtle hover:text-danger"
@@ -258,6 +270,16 @@ export function ProjectsPage({
           onClose={() => setEditing(null)}
           onSaved={() => {
             setEditing(null);
+            load();
+          }}
+        />
+      )}
+      {editingTasks && (
+        <TaskInstructions
+          project={editingTasks}
+          onClose={() => setEditingTasks(null)}
+          onSaved={() => {
+            setEditingTasks(null);
             load();
           }}
         />
@@ -420,6 +442,90 @@ function Instructions({
           />
           <p className="mt-2 text-[11px] text-fg-subtle">
             {tx("Chats started after saving pick this up. One already open does after {command}. Leave it empty to remove the file.", { command: <code>/reload</code> })}
+          </p>
+        </>
+      )}
+    </Modal>
+  );
+}
+
+/**
+ * A project's autonomous-Task instructions (§14 / Phase 7), kept separate from
+ * AGENTS.md. These apply only to Tasks that run here, never to ordinary chats,
+ * and are handed explicitly to a Task when it runs rather than read by pi on
+ * its own.
+ */
+function TaskInstructions({
+  project,
+  onClose,
+  onSaved,
+}: {
+  project: Project;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [text, setText] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    api
+      .projectTaskInstructions(project.name)
+      .then((r) => {
+        setText(r.text);
+      })
+      .catch((e) => setError((e as Error).message));
+  }, [project.name]);
+
+  const save = async () => {
+    if (text === null || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.setProjectTaskInstructions(project.name, text);
+      onSaved();
+    } catch (e) {
+      setError((e as Error).message);
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      title={t("Task instructions · {name}", { name: project.name })}
+      subtitle={t("Applied only to autonomous Tasks in this project — kept out of AGENTS.md")}
+      onClose={onClose}
+      footer={
+        <div className="flex items-center justify-end gap-2">
+          {error && <p className="mr-auto text-xs text-danger">{error}</p>}
+          <button onClick={onClose} className="rounded-lg px-3 py-1.5 text-sm text-fg-muted hover:bg-fg/5">
+            {t("Cancel")}
+          </button>
+          <button
+            onClick={save}
+            disabled={text === null || busy}
+            className="rounded-lg bg-accent/12 px-3 py-1.5 text-sm text-accent ring-1 ring-inset ring-accent/25 hover:bg-accent/20 disabled:opacity-40"
+          >
+            {busy ? t("Saving…") : t("Save")}
+          </button>
+        </div>
+      }
+    >
+      {text === null ? (
+        <p className="py-8 text-center text-sm text-fg-subtle">{error ? "" : t("Loading…")}</p>
+      ) : (
+        <>
+          <textarea
+            autoFocus
+            aria-label={t("Task instructions")}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            rows={14}
+            placeholder={t("Standing guidance for autonomous Tasks in this project, e.g. how to restart the dev server after each task.")}
+            className={`${FIELD} resize-y font-mono text-xs`}
+          />
+          <p className="mt-2 text-[11px] text-fg-subtle">
+            {t("This is added to every Task that runs in this project. It does not change AGENTS.md and is not sent to ordinary chats. Leave it empty to remove it.")}
           </p>
         </>
       )}

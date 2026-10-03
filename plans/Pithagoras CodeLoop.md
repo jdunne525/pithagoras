@@ -1558,6 +1558,32 @@ Implement project-level instructions for autonomous Tasks, kept fully separate f
 * **Scope:** injected only into autonomous Task runs, not into user "Continue conversation"
   follow-ups.
 
+### Status: implemented
+
+Done without changing the database: Pithagoras keeps projects as filesystem folders and their
+agent guidance as `AGENTS.md`, so the planned `instructions` column has no `projects` table to
+live on. Following the architectural rule that this must never touch `AGENTS.md` (which pi reads
+for every chat and would leak Task-only guidance into ordinary chats), the instructions are
+stored in a dedicated sidecar file `PITHAGORAS_TASKS.md` in each project folder
+(`server/src/projects.ts::TASK_INSTRUCTIONS_FILE`, plus `readTaskInstructions`
+/`writeTaskInstructions` and name-keyed `readProjectTaskInstructions`
+/`writeProjectTaskInstructions`). Existing databases are unaffected because no schema changed,
+and the file dies with the folder on project delete (§8).
+
+* **Editing UI:** a separate "Task instructions" button and modal on the Projects page
+  (`web/src/components/ProjectsPage.tsx::TaskInstructions`) with copy making clear it applies
+  only to autonomous Tasks in that project — distinct from the AGENTS.md editor.
+* **API:** `GET`/`PUT /api/projects/:name/task-instructions` (`server/src/server.ts`), backed by
+  `web/src/api.ts::projectTaskInstructions` / `setProjectTaskInstructions`.
+* **Injection:** `startTask` reads the project's instructions from `task.workspace` and passes
+  them to the already-existing `buildTaskPrompt(task, { projectInstructions })`, so both the
+  queue loop and manual Start carry the block. The prompt builder was unchanged in contract
+  (Phase 4 threaded `projectInstructions` through as an argument for exactly this).
+* **Scope:** only autonomous runs go through `buildTaskPrompt`; "Continue conversation" uses the
+  ordinary `POST /api/sessions/:id/prompt` path and is never injected.
+
+Server and web builds type-check clean; new behaviour covered by `server/test/task-instructions.test.mjs`.
+
 ---
 
 ## Phase 8 — Recovery and polish

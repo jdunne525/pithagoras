@@ -82,8 +82,10 @@ import {
   getProject,
   listProjects,
   readInstructions,
+  readProjectTaskInstructions,
   titleFrom,
   writeInstructions,
+  writeProjectTaskInstructions,
 } from "./projects.js";
 import {
   contextLimitProblem,
@@ -428,6 +430,26 @@ app.put("/api/projects/:name/instructions", (req, res) => {
   if (typeof text !== "string") return res.status(400).json({ error: "text required" });
   try {
     writeInstructions(WORKSPACE_ROOT, req.params.name, text);
+    res.json({ ok: true });
+  } catch (e) {
+    projectFailure(res, e);
+  }
+});
+
+/** A project's autonomous-Task instructions, kept separate from AGENTS.md (§14 / Phase 7). */
+app.get("/api/projects/:name/task-instructions", (req, res) => {
+  try {
+    res.json({ text: readProjectTaskInstructions(WORKSPACE_ROOT, req.params.name) });
+  } catch (e) {
+    projectFailure(res, e);
+  }
+});
+
+app.put("/api/projects/:name/task-instructions", (req, res) => {
+  const text = req.body?.text;
+  if (typeof text !== "string") return res.status(400).json({ error: "text required" });
+  try {
+    writeProjectTaskInstructions(WORKSPACE_ROOT, req.params.name, text);
     res.json({ ok: true });
   } catch (e) {
     projectFailure(res, e);

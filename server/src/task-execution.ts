@@ -3,6 +3,7 @@ import { sessions, EXECUTOR_KIND } from "./session-manager.js";
 import * as db from "./db.js";
 import * as tasks from "./tasks.js";
 import { buildTaskPrompt, DEFAULT_MAX_ATTEMPTS } from "./task-prompt.js";
+import { readTaskInstructions } from "./projects.js";
 import { waitForCompletionPromise } from "./task-completion.js";
 
 /**
@@ -99,11 +100,25 @@ export const startTask = (taskId: string): { task: db.TaskRow; attempt: db.TaskA
   // judges complete-or-failed.
   trackEnd(run);
 
+  // Project-specific Task instructions (§14 / Phase 7): appended as their own
+  // block inside this prompt for every autonomous run. Kept out of AGENTS.md,
+  // so they never leak into ordinary chats — read straight from the folder and
+  // handed here explicitly. A failure to read them must not stop the Task.
+  let projectInstructions = "";
+  try {
+    projectInstructions = readTaskInstructions(task.workspace);
+  } catch (e) {
+    console.error(`[portal] task ${taskId}: could not read project instructions:`, e);
+  }
+
   // Kick off the autonomous work. The CodeLoop prompt marks the session
   // running itself; listen first so the guard only settles the attempt after
   // that. It wraps the task in the shared framing plus the completion marker,
   // warning about the server-wide attempt budget.
-  void sessions.prompt(sessionId, buildTaskPrompt(task, { maxAttempts: DEFAULT_MAX_ATTEMPTS }))
+  void sessions.prompt(
+    sessionId,
+    buildTaskPrompt(task, { maxAttempts: DEFAULT_MAX_ATTEMPTS, projectInstructions }),
+  )
     .catch((e: unknown) => {
       // The run could not even begin: settle it honestly rather than leave it
       // hanging running forever.

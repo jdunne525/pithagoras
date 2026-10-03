@@ -364,6 +364,14 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ text }),
     }),
+  /** A project's autonomous-Task instructions, kept separate from AGENTS.md (§14). */
+  projectTaskInstructions: (name: string) =>
+    json<{ text: string }>(`/api/projects/${encodeURIComponent(name)}/task-instructions`),
+  setProjectTaskInstructions: (name: string, text: string) =>
+    json<{ ok: true }>(`/api/projects/${encodeURIComponent(name)}/task-instructions`, {
+      method: "PUT",
+      body: JSON.stringify({ text }),
+    }),
   deleteProject: (name: string) =>
     json<{ ok: true; sessionsDeleted: number }>(`/api/projects/${encodeURIComponent(name)}`, { method: "DELETE" }),
   renameSession: (id: string, title: string) =>
