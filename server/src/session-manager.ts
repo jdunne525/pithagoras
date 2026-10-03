@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { LiveEvents } from "./live-events.js";
 import { forgetChat, noteToolCall, subagentGone } from "./memory-llm.js";
 import { ModelErrors } from "./model-errors.js";
+import { markCompactionResume } from "./ntfy.js";
 import { EventEmitter } from "node:events";
 import type { PersonRow, Role } from "./people.js";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -666,6 +667,26 @@ class SessionManager extends EventEmitter {
   }
 
   /**
+   * Send a resume message after a compaction that left a mid-turn run unfinished.
+   *
+   * Deferred to the next turn of the event loop so the compaction has fully
+   * unwound first: compact() still marks the session idle on the way out, and a
+   * prompt started inside that unwind would be invisible to it. Fired once, when
+   * compaction_end reported pi will not resume the turn itself. The ntfy alert
+   * for the aborted run's idle is suppressed separately — the resumed turn ends
+   * naturally, and only that end is announced.
+   */
+  private scheduleResumeAfterCompaction(sessionId: string): void {
+    setImmediate(() => {
+      const live = this.live.get(sessionId);
+      if (!live || this.stopping.has(live.client)) return;
+      void this.prompt(sessionId, "Compaction detected, resume where you left off if needed.").catch((e) => {
+        console.error(`[portal] could not resume a compaction-interrupted turn: ${e.message}`);
+      });
+    });
+  }
+
+  /**
    * Push a change to pi's settings file into every session already open.
    *
    * Without this, tuning compaction would apply to sessions started later and
@@ -738,6 +759,15 @@ class SessionManager extends EventEmitter {
    * Not the session's status, which a command sent marks running as well.
    */
   private inRun = new Set<string>();
+
+  /**
+   * Sessions a compaction caught mid-turn — an agent run was still going when
+   * the compaction began, so pi left the turn unfinished. Flagged on
+   * compaction_start while inRun, cleared on compaction_end: if pi is not going
+   * to resume the turn itself (compaction_end.willRetry), a resume message is
+   * sent after the compaction so the turn can pick up where it stopped.
+   */
+  private compactionInterruptedRun = new Set<string>();
 
   /** The extensions whose failure has been said since the last run began, per session. */
   private failuresSaid = new Map<string, Set<string>>();
@@ -1078,6 +1108,25 @@ class SessionManager extends EventEmitter {
         this.inRun.delete(sessionId);
         this.settleWaiting(sessionId);
         if (!this.failed.delete(sessionId)) this.mark(sessionId, "idle");
+      }
+      // A compaction caught mid-turn — a run was still going when it began —
+      // leaves the turn unfinished: pi either resumes it itself (overflow,
+      // compaction_end.willRetry) or, as with a manual compaction of a running
+      // conversation, stops it and goes quiet. Detect the mid-turn case here and
+      // send a resume once the compaction has unwound so the turn continues.
+      // A compaction of an idle chat (the turn had already concluded) is not this.
+      if (msg.type === "compaction_start") {
+        if (this.inRun.has(sessionId)) {
+          this.compactionInterruptedRun.add(sessionId);
+          // The aborted run can read idle for one poll between the compaction
+          // and the resume; never announce that as a finished chat.
+          markCompactionResume(sessionId);
+        }
+      }
+      if (msg.type === "compaction_end") {
+        if (this.compactionInterruptedRun.delete(sessionId) && msg.willRetry !== true) {
+          this.scheduleResumeAfterCompaction(sessionId);
+        }
       }
     });
 

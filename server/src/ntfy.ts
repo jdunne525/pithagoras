@@ -130,6 +130,14 @@ const lastStatus = new Map<string, string>();
 const notifiedSessions = new Set<string>();
 /** Questions already announced as waiting, until answered. */
 const notifiedQuestions = new Set<string>();
+/**
+ * Sessions whose running turn was cut short by a mid-turn compaction and which
+ * a resume message has just been sent into. Their status can read idle for one
+ * poll between the aborted turn and the resume that follows the compaction; that
+ * idle is not a finish, so the poller skips it. The resumed turn's own natural
+ * end — the only finish worth announcing here — is left to count normally.
+ */
+const suppressedFinishes = new Set<string>();
 
 interface SessionRow {
   id: string;
@@ -171,6 +179,15 @@ export function startNtfyNotifications(intervalMs = 20_000): void {
   console.log(`[portal] ntfy push notifications polling every ${Math.round(intervalMs / 1000)}s`);
 }
 
+/**
+ * Mark a session whose turn a compaction just disrupted, so the next idle it
+ * shows — the moment between the aborted turn and the resume — is never called
+ * a finished chat. Call this when the compaction is detected, before the resume.
+ */
+export function markCompactionResume(sessionId: string): void {
+  suppressedFinishes.add(sessionId);
+}
+
 export function stopNtfyNotifications(): void {
   if (timer) {
     clearInterval(timer);
@@ -194,6 +211,15 @@ async function tick(): Promise<void> {
 
 /** A chat that was running when last checked is now idle or an error — announce it. */
 async function scanFinished(config: NtfyConfig): Promise<void> {
+  // Reconcile any session we are resuming a compaction-interrupted turn for:
+  // record whatever it reads now (idle from the aborted turn, or running again
+  // once the resume has started) and stop watching it, so exactly the resumed
+  // turn's own end is treated as a finish afterwards.
+  for (const id of [...suppressedFinishes]) {
+    const row = sessionsByStatus().find((r) => r.id === id);
+    if (row) lastStatus.set(id, row.status);
+    suppressedFinishes.delete(id);
+  }
   for (const row of sessionsByStatus()) {
     const previous = lastStatus.get(row.id);
     if (previous === "running" && (row.status === "idle" || row.status === "error")) {
