@@ -155,8 +155,27 @@ type Tab = (typeof TABS)[number];
 /** Called after any change to the queue, so the sidebar can keep its pending-count badge current. */
 type OnTaskActivity = () => void;
 
+/** Whether the viewport is under a mobile width. Used to hide the session
+    transcript while the resume composer is open on phone screens, so the
+    controls do not sit on top of the conversation. */
+function useIsMobile(breakpoint = 768): boolean {
+  const [mobile, setMobile] = useState(() =>
+    typeof window !== "undefined" && window.matchMedia(`(max-width: ${breakpoint - 1}px`).matches,
+  );
+  useEffect(() => {
+    const mql = window.matchMedia(`(min-width: ${breakpoint}px)`);
+    // Invert: mql.matches means wide, which is not mobile.
+    const read = () => setMobile(!mql.matches);
+    read();
+    mql.addEventListener("change", read);
+    return () => mql.removeEventListener("change", read);
+  }, [breakpoint]);
+  return mobile;
+}
+
 export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { projectName: string; onBack?: () => void; onTaskActivity?: OnTaskActivity }) {
   const navigate = useNavigate();
+  const isMobile = useIsMobile();
   const [rows, setRows] = useState<MockTask[]>([]);
   const [tab, setTab] = useState<Tab>("actions");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -377,6 +396,9 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
   // owns the queue. This really reorders — unlike the mock, which would not move.
   const moveTask = useCallback(async (fromId: string, toId: string) => {
     if (fromId === toId) return;
+    const key = `${fromId}->${toId}`;
+    if (key === lastMoveRef.current) return;
+    lastMoveRef.current = key;
     setRows((prev) => {
       const arr = [...prev];
       const from = arr.findIndex((x) => x.id === fromId);
@@ -388,6 +410,13 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
       return arr;
     });
   }, [projectName]);
+
+  // Guard against redundant repeats. On touch, one continuous finger drag emits
+  // many pointermove events before the row leaves its slot. Without a guard the
+  // same move is replayed against freshly-updated state and the row oscillates
+  // back to where it started, leaving the order unchanged. Remember the last
+  // (from -> to) pair and skip identical repeats until the next distinct move.
+  const lastMoveRef = useRef<null | string>(null);
 
   const rename = useCallback(async (id: string, title: string) => {
     const text = title.trim();
@@ -431,7 +460,7 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
       {/* The task list takes what is left of the space above the conversation,
             rather than a fixed sliver, so a longer queue grows instead of
             leaving dead space beneath it. */}
-      <div className="flex-1 min-h-0 flex-col border-b border-line">
+      <div className="flex min-h-0 flex-1 flex-col border-b border-line">
         {/* The header row carries everything at a glance: the breadcrumb on the left,
             the queue control and the add action pushed to the right. On narrow screens
             the two sides wrap instead of overlapping the project name. */}
@@ -448,8 +477,8 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
             </button>
             <LuListChecks className="h-4 w-4 shrink-0 text-accent" />
             <div className="min-w-0">
-              <span className="text-sm font-semibold text-fg">{t("Tasks")}</span>
-              <span className="ml-1 truncate text-xs text-fg-faint">{projectName}</span>
+              <span className="hidden md:inline text-sm font-semibold text-fg">{t("Tasks")}</span>
+              <span className="ml-1 hidden md:inline truncate text-xs text-fg-faint">{projectName}</span>
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
@@ -510,14 +539,15 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
             <ul className="space-y-0.5 pt-0.5">
               {adding && (
                 <li className="mb-1 rounded-xl border border-line bg-raised p-2">
-                  <input
+                  <textarea
                     autoFocus
+                    rows={3}
                     value={draft}
                     onChange={(e) => setDraft(e.target.value)}
-                    onKeyDown={(e) => isEnter(e) && draft.trim() && addTask(draft.trim())}
+                    onKeyDown={(e) => isEnter(e) && (e.ctrlKey || e.metaKey) && draft.trim() && addTask(draft.trim())}
                     placeholder={t("Write what you want done")}
                     aria-label={t("Write what you want done")}
-                    className="w-full rounded px-2 py-1 text-sm outline-none placeholder:text-fg-faint"
+                    className="w-full rounded-md border border-line bg-surface px-2 py-1 text-sm leading-relaxed outline-none placeholder:text-fg-faint focus:border-accent"
                   />
                   <div className="mt-1 flex justify-end gap-1.5">
                     <button onClick={() => { setAdding(false); setDraft(""); }} className="rounded px-2.5 py-1 text-xs text-fg-subtle hover:bg-fg/5">
@@ -594,8 +624,12 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
             ) : (
               <>
                 <div className="min-h-0 flex-1 overflow-y-auto">
-                  {activeSessionId ? (
+                  {activeSessionId && !(composerOpen && isMobile) ? (
                     <TaskTranscript sessionId={activeSessionId} events={events} running={sessionRunning} />
+                  ) : composerOpen && isMobile ? (
+                    // While editing on a phone the transcript is hidden so the
+                    // composer's controls never overlap the session text.
+                    <div className="pointer-events-none" />
                   ) : (
                     <div className="flex h-full items-center justify-center py-16">
                       <span className="text-fg-muted">{t("This run has no activity yet.")}</span>
@@ -722,7 +756,7 @@ function TaskRow({
   // named the task, so renaming is how you make that name your own.
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(task.text);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
     if (editing) {
       setValue(task.text);
@@ -829,14 +863,15 @@ function TaskRow({
       <StatusDot taskStatus={task.status} bare />
       <div className="min-w-0 flex-1">
         {editing ? (
-          <input
+          <textarea
             ref={inputRef}
+            rows={3}
             value={value}
             onChange={(e) => setValue(e.target.value)}
-            onKeyDown={(e) => { if (isEnter(e)) { e.preventDefault(); commit(); } else if (e.key === "Escape") { e.preventDefault(); cancel(); } }}
+            onKeyDown={(e) => { if (isEnter(e) && (e.ctrlKey || e.metaKey)) { e.preventDefault(); commit(); } else if (e.key === "Escape") { e.preventDefault(); cancel(); } }}
             onBlur={cancel}
             aria-label={t("Rename task")}
-            className="w-full rounded-md border border-line bg-surface px-2 py-0.5 text-sm text-fg outline-none focus:border-accent"
+            className="w-full rounded-md border border-line bg-surface px-2 py-1 text-sm leading-relaxed text-fg outline-none focus:border-accent"
           />
         ) : (
           <button onClick={onSelect} draggable={false} className="min-w-0 flex-1 text-left">
