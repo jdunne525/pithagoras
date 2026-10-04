@@ -673,7 +673,7 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
             (header and transcript both) so the edit area keeps every pixel left
             on a small screen. */}
       {!adding && editingRows.size === 0 ? (
-      <div className="flex min-h-0 shrink-0 max-h-[28rem] flex-col">
+      <div className="flex min-h-0 shrink-0 max-h-[16rem] flex-col">
         {!selected ? (
           <EmptyState />
         ) : (
