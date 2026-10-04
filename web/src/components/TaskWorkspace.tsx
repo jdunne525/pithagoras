@@ -298,6 +298,48 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
     api.getTaskAttempts(projectName, selected.id).then(setAttempts);
   }, [sessionRunning, activeSessionId]);
 
+  // The loop drives Tasks on the server, so a Task can start (or finish) at any
+  // moment the view never hears about directly. While the queue is running we
+  // poll the list: apply the drift, and the moment the loop launches a Task we
+  // make sure its fresh session is the one being followed — selecting it if it
+  // is not already, or reloading its attempts if it is — so its transcript
+  // streams live instead of appearing only once something else changes.
+  const prevStatusesRef = useRef<Record<string, Task["status"]>>({});
+  useEffect(() => {
+    if (!loopRunning) return undefined;
+    let cancelled = false;
+    const refresh = () => {
+      api.listTasks(projectName)
+        .then((tasks) => {
+          if (cancelled) return;
+          const next = tasks.map(mapTask);
+          const prev = prevStatusesRef.current;
+          // A Task the loop just started: its status flipped from not-running.
+          const launched = next.find((n) => n.status === "running" && prev[n.id] !== "running");
+          setRows(next);
+          prevStatusesRef.current = Object.fromEntries(next.map((n) => [n.id, n.status]));
+          if (!launched) return;
+          if (launched.id !== selectedId) {
+            setSelectedId(launched.id);
+          } else {
+            // Already the selected Task but its attempt/session was not loaded
+            // yet (it started while we were looking at it): load it now so the
+            // session content begins streaming immediately.
+            api.getTaskAttempts(projectName, launched.id)
+              .then((list) => {
+                const latest = [...list].sort((a, b) => a.attempt_number - b.attempt_number).at(-1);
+                if (latest) setActiveAttemptId(latest.id);
+              })
+              .catch(() => {});
+          }
+        })
+        .catch(() => {});
+    };
+    refresh();
+    const interval = setInterval(refresh, 1500);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [loopRunning, projectName]);
+
   // The queue changed: tell the parent to re-read this project's pending count,
   // so the sidebar badge stays honest without the sidebar polling.
   const notifyActivity = () => onTaskActivity?.();
