@@ -1474,6 +1474,17 @@ export function Chat({
           <p className="truncate font-mono text-[11px] text-fg-faint">{session.workspace}</p>
         </div>
         <div className="ml-auto flex items-center gap-2">
+          {running && (
+            <button
+              type="button"
+              aria-label={t("Stop generation")}
+              title={t("Stop generation (Esc)")}
+              onClick={() => void attempt(onAbort)}
+              className="prompt-action prompt-stop"
+            >
+              <LuSquare aria-hidden className="h-4 w-4" fill="currentColor" />
+            </button>
+          )}
           {session.status === "interrupted" && (
             <span className="rounded-md bg-warn/10 px-2 py-0.5 text-[11px] text-warn">
               {t("interrupted — send a message to resume")}
