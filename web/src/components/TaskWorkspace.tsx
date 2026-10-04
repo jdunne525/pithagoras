@@ -1,6 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type PointerEvent as ReactPointerEvent } from "react";
 import { useNavigate } from "react-router-dom";
-import { Modal } from "./Modal";
 import { StatusDot, type TaskStatus } from "./StatusDot";
 import { ThinkingBlock } from "./ChatActivity";
 import { confirmDialog } from "./ConfirmDialog";
@@ -186,7 +185,12 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
   const [recentlyCompleted, setRecentlyCompleted] = useState<Set<string>>(new Set());
   const [resumeText, setResumeText] = useState("");
   const [composerOpen, setComposerOpen] = useState(false);
-  const [preview, setPreview] = useState<MockTask | null>(null);
+  // Id of the task whose conversation is shown inline at the foot of the
+  // workspace (opened from “View session”). `null` means the normal activity
+  // transcript is showing. Keeping it inline — not a centered dialog — keeps
+  // the session view in the same area used for the task list and never overlaps
+  // the rest of the UI.
+  const [viewingMockId, setViewingMockId] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState("");
   // Ids of Task rows whose rename input is open. Raised from each row so the
@@ -240,6 +244,7 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
 
   const running = rows.some((x) => x.status === "running");
   const selected = useMemo(() => rows.find((x) => x.id === selectedId) ?? null, [rows, selectedId]);
+  const viewedTask = useMemo(() => rows.find((x) => x.id === viewingMockId) ?? null, [rows, viewingMockId]);
   // A task row is being renamed, or a new one is being written. On a phone the
   // virtual keyboard leaves very little room, so while either is open we drop
   // the whole activity view below (see its guard) to give the edit area all the
@@ -586,11 +591,21 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
                   ago={ago(lastOf(task))}
                   // Selecting a task only opens it: never move between tabs just because a
                   // row was picked, or clicking a finished task in Completed would jump home.
-                  onSelect={() => { setSelectedId(task.id); setComposerOpen(false); }}
+                  onSelect={() => {
+                    setSelectedId(task.id);
+                    setComposerOpen(false);
+                    // Picking another task leaves any inline session view, since
+                    // that view belongs to the task it was opened for.
+                    if (viewingMockId && viewingMockId !== task.id) setViewingMockId(null);
+                  }}
                   onMove={(toId) => moveTask(task.id, toId)}
                   onDragStart={() => setDragId(task.id)}
                   onDragEnd={() => setDragId(null)}
-                  onOpenSession={() => setPreview(task)}
+                  onOpenSession={() => {
+                    setSelectedId(task.id);
+                    setComposerOpen(false);
+                    setViewingMockId(task.id);
+                  }}
                   onStart={() => task.status === "running" ? stop() : start(task.id)}
                   onRerun={() => rerun(task.id)}
                   onComplete={() => markComplete(task.id)}
@@ -606,12 +621,17 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
         </div>
       </div>
 
-      {/* The conversation sits below the list, taking only the space it needs.
-            The list above grows to use the rest. While a task is being created
-            or edited, though, drop this whole view (header and transcript both)
-            so the edit area keeps every pixel left on a small screen. */}
+      {/* The conversation sits below the list, taking only the space it needs,
+            but capped so a long history (a session with many attempts) can
+            scroll inside this box instead of growing past it and overlapping the
+            list above. The cap keeps this panel in the same fixed area at the
+            foot of the workspace no matter how much a task has done — whether it
+            is showing the normal activity or a completed task's "View session".
+            While a task is being created or edited, though, drop this whole view
+            (header and transcript both) so the edit area keeps every pixel left
+            on a small screen. */}
       {!adding && editingRows.size === 0 ? (
-      <div className="flex shrink-0 min-h-0 flex-col">
+      <div className="flex min-h-0 shrink-0 max-h-[28rem] flex-col">
         {!selected ? (
           <EmptyState />
         ) : (
@@ -638,6 +658,27 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
             {loadingAttempts ? (
               <div className="flex flex-1 items-center justify-center py-16">
                 <span className="text-fg-muted">{t("Loading history…")}</span>
+              </div>
+            ) : viewedTask ? (
+              // The session view renders inline in this bottom panel, in the same
+              // area the activity normally uses, instead of a centered dialog that
+              // would overlap the whole workspace. Nothing else about the layout
+              // changes — the header row above stays put regardless of state.
+              <div className="flex min-h-0 flex-1 flex-col">
+                <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-2">
+                  <LuFileText className="h-4 w-4 shrink-0 text-accent" aria-hidden />
+                  <p className="min-w-0 flex-1 truncate text-sm text-fg">{t("Session")}</p>
+                  <button
+                    type="button"
+                    onClick={() => setViewingMockId(null)}
+                    className="rounded-lg p-1.5 text-fg-subtle transition hover:bg-fg/10 hover:text-fg"
+                    aria-label={t("Back to activity")}
+                    title={t("Back to activity")}
+                  >
+                    <LuX className="h-4 w-4" />
+                  </button>
+                </div>
+                <Conversation messages={viewedTask.msgs ?? seedMessages(viewedTask)} running={viewedTask.status === "running"} />
               </div>
             ) : (
               <>
@@ -673,7 +714,6 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
       </div>
       ) : null}
 
-      {preview && <SessionPreview task={preview} onClose={() => setPreview(null)} />}
     </div>
   );
 }
@@ -895,7 +935,7 @@ function TaskRow({
             value={value}
             onChange={(e) => setValue(e.target.value)}
             onKeyDown={(e) => { if (isEnter(e) && (e.ctrlKey || e.metaKey)) { e.preventDefault(); commit(); } else if (e.key === "Escape") { e.preventDefault(); cancel(); } }}
-            onBlur={cancel}
+            onBlur={commit}
             aria-label={t("Rename task")}
             className="w-full rounded-md border border-line bg-surface px-2 py-1 text-sm leading-relaxed text-fg outline-none focus:border-accent"
           />
@@ -1134,25 +1174,5 @@ function ResumeComposer({
         </div>
       </div>
     </form>
-  );
-}
-
-/** The modal that shows a task's parsed transcript, one attempt after another. */
-function SessionPreview({ task, onClose }: { task: MockTask; onClose: () => void }) {
-  const messages = task.msgs ?? seedMessages(task);
-  return (
-    <Modal title={t("Session")} onClose={onClose}>
-      <div className="max-h-[80vh] min-w-[20rem] overflow-y-auto space-y-4 p-4">
-        <p className="text-sm font-medium text-fg">{task.text}</p>
-        {messages.map((attempt, i) => (
-          <Fragment key={i}>
-            {i > 0 && <AttemptDivider n={i + 1} />}
-            {attempt.map((item) => (
-              <MessageItem key={item.id} item={item} running={false} />
-            ))}
-          </Fragment>
-        ))}
-      </div>
-    </Modal>
   );
 }
