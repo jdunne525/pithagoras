@@ -8,6 +8,7 @@ import { formatRelative, t } from "../i18n";
 import { api, type Task, type TaskAttempt } from "../api";
 import { Streamdown } from "streamdown";
 import { useSessionEvents } from "../use-session-events";
+import { useFollowBottom } from "../use-follow-bottom";
 import { TaskTranscript } from "./TaskTranscript";
 import { LuArrowUp, LuCheck, LuChevronLeft, LuChevronRight, LuFileText, LuGripVertical, LuListChecks, LuPen, LuPlay, LuPlus, LuRotateCcw, LuTrash2, LuX } from "react-icons/lu";
 
@@ -178,11 +179,6 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
   const [rows, setRows] = useState<MockTask[]>([]);
   const [tab, setTab] = useState<Tab>("actions");
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  // Tasks completed in this session are kept in the active view until the user
-  // acknowledges them (Phase 8, overriding the Phase 0 decision that moved a
-  // completed Task straight out of Actions). This is purely a client-side view
-  // concern: nothing is stored or sent to the server.
-  const [recentlyCompleted, setRecentlyCompleted] = useState<Set<string>>(new Set());
   const [resumeText, setResumeText] = useState("");
   const [composerOpen, setComposerOpen] = useState(false);
   // Id of the task whose conversation is shown inline at the foot of the
@@ -267,6 +263,19 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
   // runs. `running` here is whether the session is actively working, distinct
   // from the Task status but equal to it while a run is open.
   const { events, running: sessionRunning } = useSessionEvents(activeSessionId);
+  // Keep this session's transcript pinned to its end while a run streams, using
+  // the same follow-the-bottom logic the main chat does (see use-follow-bottom):
+  // new tokens stay in view, and scrolling up to read is left alone instead of
+  // snapping back. Without it the running view would fight with itself on every
+  // stream tick, bouncing between the top and whatever the run had reached.
+  const transcriptScroller = useFollowBottom<HTMLDivElement>();
+  // Follow the transcript whenever its content changes, like the main chat does
+  // (see Chat). Following starts on and stays until you scroll up to read; new
+  // tokens then re-pin you to the end. Tied to the attempt's events and session,
+  // so switching an attempt or a run ending settles without chasing content.
+  useEffect(() => {
+    transcriptScroller.follow();
+  }, [events, activeSessionId]);
 
   useEffect(() => {
     if (!projectName || !selected) return;
@@ -386,24 +395,13 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
     try {
       const updated = await api.completeTask(projectName, id);
       setRows((prev) => prev.map((x) => (x.id === id ? mapTask(updated) : x)));
-      // Keep it in the active view until acknowledged (Phase 8), rather than
-      // moving it straight into Completed as the Phase 0 design intended.
-      setRecentlyCompleted((prev) => new Set(prev).add(id));
+      // A completed Task is finished by definition, so it leaves the Actions tab
+      // for Completed right away. Acknowledgment is not a user-facing concern:
+      // completion is the only state that matters.
       notifyActivity();
     } catch {
       setError("Could not mark the task complete.");
     }
-  };
-
-  // Acknowledge a just-completed Task so it leaves the active view for the
-  // Completed tab (Phase 8). The Task itself is not changed — only the view.
-  const acknowledge = (id: string) => {
-    setRecentlyCompleted((prev) => {
-      if (!prev.has(id)) return prev;
-      const next = new Set(prev);
-      next.delete(id);
-      return next;
-    });
   };
 
   // Project-level queue control (Phase 5): start/stop the server-owned loop for
@@ -505,14 +503,13 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
   // sending does nothing until it is wired up.
 
 
-  // One list filtered by the open tab: Actions shows everything not completed,
-  // plus Tasks just completed this session until they are acknowledged; Completed
-  // shows only finished Tasks that have been acknowledged.
-  const awaiting = (id: string) => recentlyCompleted.has(id);
+  // One list filtered by the open tab: Actions shows every Task that is not
+  // completed; Completed shows every finished Task. Completion is terminal, so
+  // a Task moves straight from one tab to the other with no intermediate state.
   const actions =
     tab === "actions"
-      ? rows.filter((x) => x.status !== "completed" || awaiting(x.id))
-      : rows.filter((x) => x.status === "completed" && !awaiting(x.id));
+      ? rows.filter((x) => x.status !== "completed")
+      : rows.filter((x) => x.status === "completed");
   const ago = (iso?: string) => (iso ? formatRelative((Date.now() - new Date(iso).getTime()) / 60000, "minute") : null);
 
   return (
@@ -571,7 +568,7 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
         <div className="flex items-center px-3 pb-2">
           <div className="flex border-b border-line">
             {TABS.map((label) => {
-              const n = label === "actions" ? rows.filter((x) => x.status !== "completed" || awaiting(x.id)).length : rows.filter((x) => x.status === "completed" && !awaiting(x.id)).length;
+              const n = label === "actions" ? rows.filter((x) => x.status !== "completed").length : rows.filter((x) => x.status === "completed").length;
               return (
                 <button
                   key={label}
@@ -583,7 +580,7 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
                       : "border-transparent text-fg-subtle hover:text-fg"
                   }`}
                 >
-                  {t(label === "actions" ? "Actions" : "Completed")}
+                  {t(label === "actions" ? "Pending" : "Completed")}
                   <span className="text-[10px] tabular-nums text-fg-faint">{n}</span>
                 </button>
               );
@@ -653,8 +650,6 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
                   onComplete={() => markComplete(task.id)}
                   onRename={(title) => rename(task.id, title)}
                   onRemove={() => remove(task)}
-                  awaitingAck={awaiting(task.id)}
-                  onAcknowledge={() => acknowledge(task.id)}
                   onEditStateChange={(open) => notifyEdit(task.id, open)}
                 />
               ))}
@@ -724,7 +719,7 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
               </div>
             ) : (
               <>
-                <div className="min-h-0 flex-1 overflow-y-auto">
+                <div {...transcriptScroller.attach} onScroll={transcriptScroller.onScroll} onWheel={transcriptScroller.onWheel} className="min-h-0 flex-1 overflow-y-auto">
                   {activeSessionId && !(composerOpen && isMobile) ? (
                     <TaskTranscript sessionId={activeSessionId} events={events} running={sessionRunning} />
                   ) : composerOpen && isMobile ? (
@@ -799,22 +794,6 @@ function RunControls({ task, onStart, onRerun, onComplete }: { task: MockTask; o
   );
 }
 
-/** A compact “Acknowledged” link for a Task completed this session: it drops
-    the still-visible row out of the active view without changing the Task. */
-function AcknowledgedLink({ onClick }: { onClick: () => void }) {
-  return (
-    <button
-      onClick={onClick}
-      title={t("Mark as acknowledged")}
-      aria-label={t("Mark as acknowledged")}
-      className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium text-fg-subtle transition hover:bg-fg/5 hover:text-fg"
-    >
-      <LuCheck className="h-3 w-3" />
-      {t("Acknowledged")}
-    </button>
-  );
-}
-
 function TaskRow({
   task,
   selected,
@@ -830,8 +809,6 @@ function TaskRow({
   onComplete,
   onRename,
   onRemove,
-  awaitingAck,
-  onAcknowledge,
   onEditStateChange,
 }: {
   task: MockTask;
@@ -848,10 +825,6 @@ function TaskRow({
   onComplete?: () => void;
   onRename?: (title: string) => void;
   onRemove: () => void;
-  /** True when this Task was completed this session and is still shown in the
-      active view waiting to be acknowledged (Phase 8). */
-  awaitingAck: boolean;
-  onAcknowledge?: () => void;
   /** Called when the rename input opens or closes, so the parent can hide the
       activity view while a task is being edited on a small screen. */
   onEditStateChange?: (open: boolean) => void;
@@ -996,9 +969,6 @@ function TaskRow({
         )}
       </div>
       <div className="flex shrink-0 items-center gap-1 opacity-0 transition focus-within:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100">
-        {awaitingAck && onAcknowledge ? (
-          <AcknowledgedLink onClick={onAcknowledge} />
-        ) : null}
         <RunControls task={task} onStart={onStart} onRerun={onRerun} />
         {task.status === "completed" && task.attempts > 0 && (
           <ActionBtn title={t("View session")} onClick={onOpenSession} aria-label={t("View session")}>
@@ -1047,9 +1017,14 @@ function EmptyState({ primary = false }: { primary?: boolean }) {
 /** The conversation: every attempt laid out in one scrolling view, each attempt
     marked so the attempts read as attempts rather than one long run. */
 function Conversation({ messages, running }: { messages: MockMsg[][]; running: boolean }) {
-  const list = useRef<HTMLDivElement>(null);
+  // Same follow-the-bottom behaviour as the live transcript and the main chat:
+  // a still-running mock settles to its end, and a finished one just stays put.
+  const scroller = useFollowBottom<HTMLDivElement>();
+  useEffect(() => {
+    scroller.follow();
+  }, [messages]);
   return (
-    <div ref={list} className="flex-1 overflow-y-auto px-3 py-3">
+    <div {...scroller.attach} onScroll={scroller.onScroll} className="flex-1 overflow-y-auto px-3 py-3">
       <div className="mx-auto w-full max-w-3xl space-y-3">
         {messages.length === 0 ? (
           <p className="py-10 text-center text-sm text-fg-subtle">{t("Not started yet.")}</p>
