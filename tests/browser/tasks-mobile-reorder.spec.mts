@@ -2,8 +2,11 @@ import { test, expect, type Page, type Locator } from '@playwright/test';
 
 /**
  * Mobile (touch) drag-to-reorder of Tasks in the workspace. On phones the
- * native `draggable` attribute never fires, so the grip must follow the pointer
- * by hand and call setTaskOrder. This pins that behaviour.
+ * native `draggable` attribute never fires, so pressing and holding anywhere on
+ * a row follows the pointer by hand and calls setTaskOrder. A deliberate
+ * long-press-plus-drag engages (the finger holds a moment and moves past a small
+ * threshold), so an ordinary tap still opens the task and the list still scrolls.
+ * This pins that behaviour.
  */
 const AT = new Date().toISOString();
 
@@ -42,29 +45,32 @@ async function mockTasks(page: Page, order: string[]) {
   return { getLastOrder: () => lastOrder };
 }
 
-// Dispatch a hand-followed touch drag (pointerdown -> moves -> pointerup) on a
-// target element, emulating what a finger does on a phone. Events are dispatched
-// from within the element itself (as `this`) so they attach exactly where React
-// listens, and bubble up to the window-level listener.
+// Dispatch a hand-followed touch drag (pointerdown -> holds -> moves -> pointerup)
+// on a target element, emulating what a finger does on a phone. Events are
+// dispatched from within the element itself (as `this`) so they attach exactly
+// where React listens (via delegation) and bubble up to the window listeners.
+// The hold between down and moving exceeds the gesture's ~120ms gate, so the
+// drag engages rather than being read as a plain tap.
 async function touchDrag(page: Page, grip: Locator, toX: number, toY: number, steps = 8) {
-  await grip.evaluate((el, args) => {
-    const { toX, toY, steps } = args;
-    const pid = 1;
-    const b = el.getBoundingClientRect();
-    const sx = b.left + b.width / 2;
-    const sy = b.top + b.height / 2;
-    const evt = (type: string, x: number, y: number) => {
+  const start = await grip.boundingBox();
+  const sx = start!.x + start!.width / 2;
+  const sy = start!.y + start!.height / 2;
+  const emit = async (type: string, x: number, y: number) => {
+    await grip.evaluate((el, arg) => {
       el.dispatchEvent(new PointerEvent(type, {
-        bubbles: true, cancelable: true, pointerId: pid,
-        pointerType: "touch", clientX: x, clientY: y,
+        bubbles: true, cancelable: true, pointerId: 1,
+        pointerType: "touch", clientX: arg.x, clientY: arg.y,
       }));
-    };
-    evt("pointerdown", sx, sy);
-    for (let i = 1; i <= steps; i++) {
-      evt("pointermove", sx + (toX - sx) * (i / steps), sy + (toY - sy) * (i / steps));
-    }
-    evt("pointerup", toX, toY);
-  }, { toX, toY, steps });
+    }, { x, y });
+  };
+  await emit("pointerdown", sx, sy);
+  await page.waitForTimeout(200);
+  for (let i = 1; i <= steps; i++) {
+    await emit("pointermove", sx + (toX - sx) * (i / steps), sy + (toY - sy) * (i / steps));
+    await page.waitForTimeout(20);
+  }
+  await page.waitForTimeout(20);
+  await emit("pointerup", toX, toY);
 }
 
 test('phone: dragging a task grip upward reorders and persists', async ({ page }) => {

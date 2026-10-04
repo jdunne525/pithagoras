@@ -859,36 +859,75 @@ function TaskRow({
     setEditing(false);
   };
 
-  // Reorder on touch devices. The native draggable above only fires for real
-  // pointers, so on a phone a press-and-hold on the grip starts text
-  // selection instead of dragging — which blocks reordering. Follow the
-  // pointer by hand for non-mouse pointers: a light tap still selects, and the
-  // list can still be scrolled until the gesture clearly means to move the row.
+  // ---- Touch reorder -------------------------------------------------------
+  // On a phone the native `draggable` above never fires, so we follow the finger
+  // by hand and call moveTask via onMove. For this to feel right on touch:
+  //
+  //   * A press-and-hold must MOVE the row, not select its text. Pressing used
+  //     to wash the label dark grey (the browser's native selection) instead of
+  //     dragging, because selection was only stopped once a drag had started. We
+  //     disable it from the very first pointerdown, so nothing can highlight.
+  //   * A plain tap must still open the task and the list must still scroll. So
+  //     we only "grab" the row once the gesture clearly means to: the finger has
+  //     held for a moment AND started past a small threshold. A quick scroll
+  //     (fast, little hold) slips through untouched; a deliberate long-press-
+  //     plus-drag engages. Grabbing anywhere on the row — not just the grip — is
+  //     what makes it discoverable on a small screen.
+  const DRAG_HOLD_MS = 120;
+  const DRAG_THRESHOLD_PX = 12;
   const rowRef = useRef<HTMLLIElement>(null);
   const draggingRef = useRef(false);
-  const startGripDrag = (e: ReactPointerEvent<HTMLButtonElement>) => {
-    if (e.pointerType !== "touch" || e.button !== 0) return;
+  // Whether the current pointer session grabbed the row to drag it. Set once the
+  // gesture engages so we can stop the following click from opening the task — a
+  // release after a drag is not a tap. Reset at the start of every new press.
+  const draggedRef = useRef(false);
+  const gestureRef = useRef<{
+    pid: number; startX: number; startY: number; startTime: number; engaged: boolean;
+  } | null>(null);
+
+  const beginDragGesture = (e: ReactPointerEvent<HTMLLIElement>) => {
+    // Desktop mice drive the native draggable above. Everything else (touch,
+    // pen) uses this hand-followed drag so phones can reorder too.
+    if (e.pointerType === "mouse" || e.button !== 0) return;
     const pid = e.pointerId;
     const startX = e.clientX;
     const startY = e.clientY;
+    gestureRef.current = { pid, startX, startY, startTime: Date.now(), engaged: false };
+    draggedRef.current = false;
     const body = document.body;
     const savedSelect = body.style.userSelect;
     const savedWebkit = body.style.webkitUserSelect;
     const savedTouch = body.style.touchAction;
-    let engaged = false;
-    const onPointerMove = (ev: PointerEvent) => {
-      if (ev.pointerId !== pid) return;
-      if (!engaged && Math.hypot(ev.clientX - startX, ev.clientY - startY) < 12) return;
-      engaged = true;
-      ev.preventDefault();
-      // Stop the page panning and text selecting while a row is being moved.
-      body.style.userSelect = "none";
-      body.style.webkitUserSelect = "none";
+    // Kill text selection for the whole press so a long-press can never produce
+    // the dark grey highlight that used to block reordering. Page scrolling is
+    // left alone until the row is actually grabbed (see engage() below).
+    body.style.userSelect = "none";
+    body.style.webkitUserSelect = "none";
+
+    const engage = () => {
+      if (gestureRef.current?.pid !== pid) return;
+      gestureRef.current.engaged = true;
+      draggedRef.current = true;
+      // The row is being moved now, so stop the page panning — otherwise the
+      // reorder fights the list scroll.
       body.style.touchAction = "none";
       if (!draggingRef.current) {
         draggingRef.current = true;
         onDragStart();
       }
+    };
+
+    const onPointerMove = (ev: PointerEvent) => {
+      if (ev.pointerId !== pid) return;
+      const g = gestureRef.current;
+      if (!g) return;
+      if (!g.engaged) {
+        const held = Date.now() - g.startTime >= DRAG_HOLD_MS;
+        const moved = Math.hypot(ev.clientX - g.startX, ev.clientY - g.startY) >= DRAG_THRESHOLD_PX;
+        if (!held || !moved) return;
+        engage();
+      }
+      ev.preventDefault();
       const el = rowRef.current;
       const ul = el?.parentElement;
       if (!el || !ul) return;
@@ -904,7 +943,10 @@ function TaskRow({
         if (nextId && nextId !== task.id) onMove(nextId);
       }
     };
+
     const end = () => {
+      if (gestureRef.current?.pid !== pid) return;
+      gestureRef.current = null;
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerup", end);
       window.removeEventListener("pointercancel", end);
@@ -916,6 +958,7 @@ function TaskRow({
         onDragEnd();
       }
     };
+
     window.addEventListener("pointermove", onPointerMove, { passive: false });
     window.addEventListener("pointerup", end);
     window.addEventListener("pointercancel", end);
@@ -926,6 +969,7 @@ function TaskRow({
       ref={rowRef}
       data-task-id={task.id}
       draggable
+      onPointerDown={beginDragGesture}
       onDragStart={(e) => { onDragStart(); e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", task.id); }}
       onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; }}
       onDrop={(e) => { e.preventDefault(); const from = e.dataTransfer.getData("text/plain"); if (from && from !== task.id) onMove(from); }}
@@ -936,7 +980,6 @@ function TaskRow({
         type="button"
         aria-label={t("Drag to reorder")}
         title={t("Drag to reorder")}
-        onPointerDown={startGripDrag}
         className="shrink-0 p-0.5 text-fg-faint opacity-0 hover:text-fg-muted group-hover:opacity-100 focus:opacity-100 [@media(hover:none)]:opacity-100"
       >
         <LuGripVertical className="h-3.5 w-3.5" />
@@ -955,7 +998,7 @@ function TaskRow({
             className="w-full rounded-md border border-line bg-surface px-2 py-1 text-sm leading-relaxed text-fg outline-none focus:border-accent"
           />
         ) : (
-          <button onClick={onSelect} draggable={false} className="min-w-0 flex-1 text-left">
+          <button onClick={() => { draggedRef.current ? (draggedRef.current = false) : onSelect(); }} draggable={false} className="min-w-0 flex-1 text-left">
             <p className="truncate text-sm text-fg">{task.text}</p>
             <p className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-fg-faint">
               {ago && <span>{t("last {when}", { when: ago })}</span>}
