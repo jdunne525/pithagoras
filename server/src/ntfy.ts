@@ -144,11 +144,12 @@ interface SessionRow {
   title: string;
   status: string;
   created_at: string;
+  updated_at: string;
 }
 
 /** Every session and its current status, oldest-changed first so finishes surface in order. */
 function sessionsByStatus(): SessionRow[] {
-  return getDb().prepare("SELECT id, title, status, created_at FROM sessions ORDER BY updated_at ASC").all() as SessionRow[];
+  return getDb().prepare("SELECT id, title, status, created_at, updated_at FROM sessions ORDER BY updated_at ASC").all() as SessionRow[];
 }
 
 /**
@@ -161,6 +162,59 @@ function sessionsByStatus(): SessionRow[] {
 function durationSeconds(createdAt: string | null | undefined): number | null {
   const start = eventTime(createdAt ?? undefined);
   return start == null ? null : Math.floor((Date.now() - start) / 1000);
+}
+
+/**
+ * How long between two instants, in brief human words — "3 min", "2 hrs 5 min",
+ * or a raw seconds count under a minute. Empty when either time is missing or
+ * they are in the wrong order, so a caller can drop the field rather than show
+ * nonsense. Times come back already parsed by `eventTime`, both UTC.
+ */
+function humanDuration(startMs: number | undefined, endMs: number | undefined): string {
+  if (startMs == null || endMs == null || endMs <= startMs) return "";
+  let secs = Math.floor((endMs - startMs) / 1000);
+  const hrs = Math.floor(secs / 3600);
+  secs -= hrs * 3600;
+  const mins = Math.floor(secs / 60);
+  secs -= mins * 60;
+  if (hrs > 0) return `${hrs} hr${hrs === 1 ? "" : "s"}${mins > 0 ? ` ${mins} min` : ""}`.trim();
+  if (mins > 0) return `${mins} min${mins === 1 ? "" : "s"}`;
+  return `${secs}s`;
+}
+
+/** A one-line "Took …" field for how a session ran, from start to its end. */
+function tookField(createdAt: string | null | undefined, updatedAt: string | null | undefined): string {
+  const d = humanDuration(eventTime(createdAt ?? undefined), eventTime(updatedAt ?? undefined));
+  return d ? `Took ${d}` : "";
+}
+
+/**
+ * The agent's final answer for a session: the text of its last assistant
+ * message, with any thinking excluded — that is the part a person would have
+ * missed, not the model's private reasoning. Undefined when there was no such
+ * answer (the run was stopped, or only ran tools), so the caller can fall back
+ * to a plain status word instead. Read from stored events, since by the time a
+ * chat is finished the live stream is long gone.
+ */
+function finalResponse(sessionId: string): string | undefined {
+  const row = getDb().prepare(
+    "SELECT payload FROM events WHERE session_id = ? AND type = 'message_end'"
+      + " AND json_extract(payload, '$.message.role') = 'assistant' ORDER BY seq DESC LIMIT 1",
+  ).get(sessionId) as { payload: string } | undefined;
+  if (!row) return undefined;
+  let p: unknown;
+  try {
+    p = JSON.parse(row.payload);
+  } catch {
+    return undefined;
+  }
+  const content = (p as { message?: { content?: { type?: string; text?: string }[] } })?.message?.content;
+  if (!Array.isArray(content)) return undefined;
+  const text = content
+    .filter((c) => c && c.type === "text")
+    .map((c) => c.text ?? "")
+    .join("");
+  return text.trim();
 }
 
 /**
@@ -216,6 +270,35 @@ async function tick(): Promise<void> {
   await scanPendingQuestions(config);
 }
 
+interface FinishedNotification {
+  title: string;
+  message: string;
+}
+
+/**
+ * Build the "a chat finished" alert. The header is the project's name in bold;
+ * beneath it a short "Took …" of how long the session ran, then the agent's own
+ * final answer — its thinking left out, since that is what the person missed,
+ * not the model's reasoning — takes the place of a plain "finished". When the
+ * run left no answer to show (it was stopped, or only ran tools), the status
+ * word stands in so the alert still says something true.
+ */
+function finishedNotification(
+  label: string,
+  status: string,
+  createdAt: string | null | undefined,
+  updatedAt: string | null | undefined,
+  sessionId: string,
+): FinishedNotification {
+  const header = `**${asciiOnly(label)}**`;
+  const lines = [header];
+  const took = tookField(createdAt, updatedAt);
+  if (took) lines.push(took);
+  const response = finalResponse(sessionId);
+  lines.push("", response || (status === "error" ? "finished with an error." : "finished."));
+  return { title: asciiOnly(label), message: lines.join("\n") };
+}
+
 /** A chat that was running when last checked is now idle or an error — announce it. */
 async function scanFinished(config: NtfyConfig): Promise<void> {
   // Reconcile any session we are resuming a compaction-interrupted turn for:
@@ -236,9 +319,8 @@ async function scanFinished(config: NtfyConfig): Promise<void> {
       const seconds = durationSeconds(row.created_at);
       if (seconds != null && seconds < config.minResponseSeconds) continue;
       const label = row.title.trim() || "a chat";
-      const message =
-        row.status === "error" ? `${label} finished with an error.` : `${label} finished.`;
-      await sendNtfy(row.status === "error" ? "Chat finished with an error" : "Chat finished", message);
+      const { title, message } = finishedNotification(label, row.status, row.created_at, row.updated_at, row.id);
+      await sendNtfy(title, message);
       notifiedSessions.add(row.id);
     } else if (row.status === "running") {
       // Track it again: an alert may have been missed while disabled.

@@ -66,8 +66,42 @@ test("a completed conversation is announced, whatever the machine timezone", asy
 
   const hit = received.find((r) => /finishtopic/.test(r.topic));
   assert.ok(hit, "a finished chat should trigger a push notification");
-  assert.equal(hit.title, "Chat finished");
-  assert.match(hit.body, /The Finish Chat/);
+  // The header is now the project's own name, not a fixed "Chat finished".
+  assert.equal(hit.title, "The Finish Chat");
+  // The title leads the body in bold, followed by a plain status word.
+  assert.match(hit.body, /\*\*The Finish Chat\*\*/);
+  assert.match(hit.body, /finished\.?$/);
+});
+
+test("the agent's final answer replaces finished, with how long it took", async () => {
+  received.length = 0;
+  saveNtfyConfig({ enabled: true, topic: "answertopic", minResponseSeconds: 0 });
+  ntfy.startNtfyNotifications(150);
+
+  // Started five minutes ago, now quiet, with a real assistant answer on file
+  // alongside some thinking that must not leak into the alert.
+  db.prepare(
+    "INSERT INTO sessions (id, title, status, workspace, created_at) VALUES ('answer-me','The Answer Chat','running','/tmp', datetime('now','-5 minutes')) ON CONFLICT(id) DO UPDATE SET status=excluded.status",
+  ).run();
+  db.prepare(
+    "INSERT INTO events (session_id, type, payload, created_at) VALUES ('answer-me','message_end', ?, datetime('now'))",
+  ).run(JSON.stringify({ message: { role: "assistant", stopReason: "done", content: [
+    { type: "thinking", thinking: "this is my private reasoning" },
+    { type: "text", text: "All done — the report is saved." },
+  ] } }));
+
+  await sleep(400);
+  db.prepare("UPDATE sessions SET status='idle', updated_at=datetime('now') WHERE id='answer-me'").run();
+  await sleep(800);
+  ntfy.stopNtfyNotifications();
+
+  const hit = received.find((r) => /answertopic/.test(r.topic));
+  assert.ok(hit, "a finished chat should trigger a push notification");
+  assert.equal(hit.title, "The Answer Chat");
+  assert.match(hit.body, /\*\*The Answer Chat\*\*/);
+  assert.match(hit.body, /Took .*min/i);
+  assert.match(hit.body, /the report is saved/);
+  assert.doesNotMatch(hit.body, /private reasoning/, "thinking must be left out of the alert");
 });
 
 test("a reply faster than the threshold is not announced", async () => {

@@ -1,4 +1,4 @@
-import { LuMenu, LuX } from "react-icons/lu";
+import { LuListChecks, LuMenu, LuX } from "react-icons/lu";
 import { appendLiveEvent, resetLiveEvents } from "./live-events";
 import { fillFrom } from "./editor-fills";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -549,7 +549,15 @@ function Shell({
             would only repeat its title; in voice mode that header is gone. */}
         <header className="app-mobile-bar flex shrink-0 items-center gap-3 border-b border-line px-3 py-2 md:hidden">
           <button type="button" aria-label={t("Open navigation")} aria-expanded={mobileNav} aria-controls="mobile-navigation" onClick={() => setMobileNav(true)} className="rounded-lg p-2 text-fg hover:bg-fg/10"><LuMenu size={20}/></button>
-          <span className="truncate text-sm text-fg">{active?.title || "Pithagoras"}</span>
+          {view === "tasks" ? (
+            <span className="flex min-w-0 items-center gap-1 truncate text-sm text-fg">
+              <LuListChecks className="h-4 w-4 shrink-0 text-accent" />
+              <span className="truncate">{t("Tasks")}</span>
+              <span className="truncate text-fg-faint">· {taskProject?.name ?? projectId ?? t("your project")}</span>
+            </span>
+          ) : (
+            <span className="truncate text-sm text-fg">{active?.title || "Pithagoras"}</span>
+          )}
         </header>
         {error && <div className="bg-danger/10 px-4 py-2 text-sm text-danger">{error}</div>}
         {/* Not for the first miss: a server restarting, or a wifi that blinked,

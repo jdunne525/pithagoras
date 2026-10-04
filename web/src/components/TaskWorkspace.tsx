@@ -189,6 +189,15 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
   const [preview, setPreview] = useState<MockTask | null>(null);
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState("");
+  // Ids of Task rows whose rename input is open. Raised from each row so the
+  // parent can hide the activity view while any task is being edited (see below).
+  const [editingRows, setEditingRows] = useState<Set<string>>(new Set());
+  const notifyEdit = (id: string, open: boolean) =>
+    setEditingRows((prev) => {
+      const next = new Set(prev);
+      if (open) next.add(id); else next.delete(id);
+      return next;
+    });
   const [dragId, setDragId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Whether this project's server-owned autonomous queue loop is running.
@@ -231,6 +240,10 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
 
   const running = rows.some((x) => x.status === "running");
   const selected = useMemo(() => rows.find((x) => x.id === selectedId) ?? null, [rows, selectedId]);
+  // A task row is being renamed, or a new one is being written. On a phone the
+  // virtual keyboard leaves very little room, so while either is open we drop
+  // the whole activity view below (see its guard) to give the edit area all the
+  // vertical space available, with nothing obstructing it.
 
   // --- Phase 3: the bottom panel drives a real autonomous run. Each Task has
   // several attempts; this tracks them and renders the active one from its own
@@ -457,10 +470,11 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-canvas">
-      {/* The task list takes what is left of the space above the conversation,
-            rather than a fixed sliver, so a longer queue grows instead of
-            leaving dead space beneath it. */}
-      <div className="flex min-h-0 flex-1 flex-col border-b border-line">
+      {/* The task list sits above the conversation. Section A is a flex item
+            (so it never overlaps the title row below) yet capped to roughly
+            three tasks: the list scrolls internally instead of stretching to
+            fill the page, and the conversation below keeps its room. */}
+      <div className="flex min-h-0 flex-1 flex-col border-b border-line max-h-[15rem]">
         {/* The header row carries everything at a glance: the breadcrumb on the left,
             the queue control and the add action pushed to the right. On narrow screens
             the two sides wrap instead of overlapping the project name. */}
@@ -584,6 +598,7 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
                   onRemove={() => remove(task)}
                   awaitingAck={awaiting(task.id)}
                   onAcknowledge={() => acknowledge(task.id)}
+                  onEditStateChange={(open) => notifyEdit(task.id, open)}
                 />
               ))}
             </ul>
@@ -592,7 +607,10 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
       </div>
 
       {/* The conversation sits below the list, taking only the space it needs.
-            The list above grows to use the rest. */}
+            The list above grows to use the rest. While a task is being created
+            or edited, though, drop this whole view (header and transcript both)
+            so the edit area keeps every pixel left on a small screen. */}
+      {!adding && editingRows.size === 0 ? (
       <div className="flex shrink-0 min-h-0 flex-col">
         {!selected ? (
           <EmptyState />
@@ -653,6 +671,7 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
           </>
         )}
       </div>
+      ) : null}
 
       {preview && <SessionPreview task={preview} onClose={() => setPreview(null)} />}
     </div>
@@ -731,6 +750,7 @@ function TaskRow({
   onRemove,
   awaitingAck,
   onAcknowledge,
+  onEditStateChange,
 }: {
   task: MockTask;
   selected: boolean;
@@ -750,6 +770,9 @@ function TaskRow({
       active view waiting to be acknowledged (Phase 8). */
   awaitingAck: boolean;
   onAcknowledge?: () => void;
+  /** Called when the rename input opens or closes, so the parent can hide the
+      activity view while a task is being edited on a small screen. */
+  onEditStateChange?: (open: boolean) => void;
 }) {
   // Rename is local to the row: opening an input replaces the title, Enter saves
   // it server-side, Escape or leaving cancels. The prompt's first line already
@@ -757,6 +780,9 @@ function TaskRow({
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(task.text);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    onEditStateChange?.(editing);
+  }, [editing]);
   useEffect(() => {
     if (editing) {
       setValue(task.text);
