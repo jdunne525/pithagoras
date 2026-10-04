@@ -167,15 +167,57 @@ export const abortLiveRun = (taskId: string): void => {
   void sessions.abort(run.sessionId).catch(() => {});
 };
 
+/** How often the fallback re-checks a run's session while it is still going.
+ *  One tick is enough to notice a stop that the live stream never reported, and
+ *  far from frequent enough to matter for the normal, event-driven path. */
+const STOP_DETECTION_GAP_MS = 2000;
+
 /**
- * Once a run has marked its session running, a later non-running status is the
- * run reaching its own end. Completion detection then judges the outcome
- * (complete-or-failed) exactly once, and this removes its own listener, so a
- * stop (which clears the run first) never races it into a second settling.
+ * Detect the moment a run reaches its own end and settle it, so completion
+ * detection can judge the outcome (complete-or-failed) exactly once. A failed
+ * attempt is then retried by the queue loop with a brand-new session/context,
+ * and a stop — which clears the run first — never races the settle into a
+ * second one.
+ *
+ * Detection rides on two independent signals so that missing either one cannot
+ * strand the run forever (leaving the Task stuck showing working over a status
+ * nothing observed). The fast path is the live `portal_status` transition:
+ * once the run has been confirmed working, any later non-running status settles
+ * it at once. The fallback reads the session's persisted status instead — the
+ * very thing the view renders as working — so a dropped or missed transition
+ * still settles the run and lets the queue move on. Confirming the run has
+ * started also rides on persistence as well as the live event, and a fresh
+ * attempt works in a brand-new session whose initial idle status must never be
+ * mistaken for a stop, so the fallback only settles once it has first seen the
+ * session persist as running.
  */
 function trackEnd(run: TaskRun): void {
-  let seenRunning = false;
-  const handler = (row: { type: string; payload: string }) => {
+  // Confirmed working: the run has been seen transitioning to running, whether
+  // by the live event or by the persisted status. Before this, any non-running
+  // status (notably the fresh session's starting idle) is ignored. run.ended is
+  // deliberately left to finishSettled: see settle().
+  let confirmedRunning = false;
+  let settled = false;
+  let watchTimer: NodeJS.Timeout | undefined;
+
+  const settle = (): void => {
+    if (settled) return;
+    settled = true;
+    sessions.off(`session:${run.sessionId}`, handler);
+    if (watchTimer) clearTimeout(watchTimer);
+    // finishSettled owns run.ended (setting it here, synchronously, is what puts
+    // the Task out of the permanent "running" state and stops the queue loop)
+    // and judges complete-or-failed exactly once — including reading for the
+    // completion promise. Setting run.ended beforehand would trip its guard and
+    // skip that check, leaving a finished Task stuck working, so it must not be
+    // set here. A failed attempt is retried by the queue loop with a fresh
+    // session/context.
+    finishSettled(run);
+  };
+
+  // Fast path: the live portal_status transition. A transition away from
+  // running, once the run is confirmed working, is the run ending on its own.
+  const handler = (row: { type: string; payload: string }): void => {
     if (run.ended) return;
     let status: string | undefined;
     try {
@@ -185,16 +227,31 @@ function trackEnd(run: TaskRun): void {
     }
     if (!status) return;
     if (status === "running") {
-      seenRunning = true;
+      confirmedRunning = true;
       return;
     }
-    if (seenRunning) {
-      run.ended = true;
-      sessions.off(`session:${run.sessionId}`, handler);
-      finishSettled(run);
-    }
+    if (confirmedRunning) settle();
   };
   sessions.on(`session:${run.sessionId}`, handler);
+
+  // Fallback: read the session's persisted status — what the view actually
+  // renders as working — so a missed live transition cannot strand the run. It
+  // also confirms the run has started from persistence itself, so losing the
+  // live "running" event alone cannot strand it either. Only after the session
+  // has first persisted as running does a later non-running status settle it,
+  // so the fresh session's starting idle never counts as an immediate stop.
+  watchTimer = setInterval(() => {
+    if (run.ended) {
+      clearTimeout(watchTimer);
+      return;
+    }
+    const status = db.getSession(run.sessionId)?.status;
+    if (status === "running") {
+      confirmedRunning = true;
+    } else if (confirmedRunning) {
+      settle();
+    }
+  }, STOP_DETECTION_GAP_MS).unref();
 }
 
 /** Judge a run that reached its own end (Phase 4/5): the completion marker
