@@ -56,6 +56,10 @@ test("buildTaskPrompt wraps the task in the full CodeLoop framing", () => {
   assert.match(p, /review all code changes in detail/);
   assert.match(p, /<PROMISE>THIS TASK IS DONE<\/PROMISE>/);
   assert.match(p, /## Completion Requirement/);
+  // The marker is presented as verbatim code so models keep the tags instead of
+  // treating <PROMISE>...</PROMISE> as HTML markup and dropping it.
+  assert.match(p, /```[\s\S]*<PROMISE>THIS TASK IS DONE<\/PROMISE>[\s\S]*```/);
+  assert.match(p, /LITERAL text/);
   // Default attempt warning is surfaced.
   assert.match(p, /up to 5 attempts/);
 });

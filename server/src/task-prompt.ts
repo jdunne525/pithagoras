@@ -1,4 +1,5 @@
 import type { TaskRow } from "./db.js";
+import { COMPLETION_PROMISE } from "./task-completion.js";
 
 /**
  * Prompt construction (Phase 4).
@@ -55,11 +56,23 @@ export function buildTaskPrompt(
     `they accomplish the stated goal and do not break any other functionality. ` +
     `Revise the code if needed.`;
 
+  // NOTE: The completion marker is shown inside a fenced code block and is
+  // explicitly called out as LITERAL text. Angle-bracket tokens like
+  // <PROMISE>...</PROMISE> read as HTML/markup to most models, which then drop
+  // the tags and emit only "THIS TASK IS DONE" — which fails the strict
+  // standalone-line detection in task-completion.ts. Presenting it as verbatim
+  // code (and telling the model the tags are literal) makes Pithagoras behave
+  // like codeloop, where the marker reliably keeps its tags.
   prompt +=
     `\n\n## Completion Requirement\n\nWhen you believe all criteria for this ` +
     `task have been fully met, you MUST output the following string exactly as ` +
-    `written on its own line:\n\n<PROMISE>THIS TASK IS DONE</PROMISE>\n\n` +
-    `The task will only be marked complete when that exact string appears in the ` +
+    `written, on its own line, inside a fenced code block:\n\n` +
+    '```\n' +
+    COMPLETION_PROMISE +
+    '\n```\n\n' +
+    `The \`<PROMISE>\` and \`</PROMISE>\` tags are LITERAL text — copy them exactly, ` +
+    `do not treat them as formatting or HTML, and do not remove them. The task is ` +
+    `only marked complete when that exact string, including the tags, appears in the ` +
     `assistant's output. If the string is not found after up to ${maxAttempts} ` +
     `attempts, the task will be marked as failed.`;
 
