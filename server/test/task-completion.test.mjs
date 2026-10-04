@@ -48,6 +48,51 @@ test("not-on-its-own-line variants do NOT count", () => {
   assert.equal(completion.emitsCompletionPromise(""), false);
 });
 
+test("a model that drops the angle brackets still completes", () => {
+  // The documented failure: models read <PROMISE> as HTML and emit only the
+  // phrase. As long as it stands alone on its own line, it counts.
+  assert.equal(
+    completion.emitsCompletionPromise("THIS TASK IS DONE"),
+    true
+  );
+  assert.equal(
+    completion.emitsCompletionPromise("Here is the summary.\n\nTHIS TASK IS DONE\n\nDone."),
+    true
+  );
+});
+
+test("mangled but literal tags still complete", () => {
+  // Models sometimes wrap the tags in HTML comments or entity-encode the
+  // angle brackets before emitting.
+  assert.equal(
+    completion.emitsCompletionPromise("<!--PROMISE-->THIS TASK IS DONE<!--/PROMISE-->"),
+    true
+  );
+  assert.equal(
+    completion.emitsCompletionPromise("&lt;PROMISE&gt;THIS TASK IS DONE&lt;/PROMISE&gt;"),
+    true
+  );
+});
+
+test("a bare phrase that is not on its own line does NOT count", () => {
+  // Tolerating dropped tags must not open the door to inline mentions again.
+  assert.equal(
+    completion.emitsCompletionPromise("The plan is: THIS TASK IS DONE later."),
+    false
+  );
+  assert.equal(
+    completion.emitsCompletionPromise("done, THIS TASK IS DONE now?"),
+    false
+  );
+});
+
+test("lowercasing the phrase does NOT count", () => {
+  assert.equal(
+    completion.emitsCompletionPromise("this task is done"),
+    false
+  );
+});
+
 test("buildTaskPrompt wraps the task in the full CodeLoop framing", () => {
   const p = prompt.buildTaskPrompt({ id: "t1", title: "Fix the login bug", description: "Users cannot sign in." });
   assert.match(p, /You are Pithagoras, an AI assistant helping execute task development\./);

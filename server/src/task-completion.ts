@@ -13,25 +13,59 @@ import { eventsSince } from "./db.js";
 /** The exact string a Task must emit on its own line to be complete. */
 export const COMPLETION_PROMISE = "<PROMISE>THIS TASK IS DONE</PROMISE>";
 
-// The promise only counts when it stands alone on its own line — optionally
-// wrapped in a single pair of backticks or a code fence, with optional trailing
-// punctuation. Anything else, including a mention inside prose (a model
-// refusing to emit it), must NOT count: otherwise an instruction to fail would
-// be marked complete simply because the token appeared.
-const PROMISE_LINE = /^<PROMISE>THIS TASK IS DONE<\/PROMISE>[.;:]*$/u;
+// The phrase a Task must emit. Case matters: a model that lowercases it has
+// not produced the marker we ask for, so the phrase is matched exactly below.
+const PROMISE_PHRASE = "THIS TASK IS DONE";
+// The tag name, allowed in any case so <PROMISE>, <promise>, <Promise> all
+// count while the surrounding phrase stays case-sensitive.
+const PROMISE_TAG = "[pP][rR][oO][mM][iI][sS][eE]";
 
-/** True if the text emits the completion promise standing alone on one line. */
+// A single pair of angle-bracket tags around the phrase, where the tag names
+// and brackets are matched loosely. Models reliably read <PROMISE> as HTML and
+// drop the tags, mangle them into <!-- --> comments, or HTML-entity-encode
+// them (&lt;) before emitting. Stray non-letter characters around the wrap
+// (fences, whitespace) are tolerated; a neighbouring letter is not, so the
+// wrap cannot hide inside a larger token.
+const TAG_WRAP = new RegExp(
+  `^[^a-zA-Z]*<[^>]*${PROMISE_TAG}>\\s*${PROMISE_PHRASE}\\s*<\\/?[^>]*${PROMISE_TAG}>[^a-zA-Z]*$`
+);
+
+// The phrase standing alone, with no tags at all — what a model emits when it
+// drops the angle brackets entirely (its most common failure). Still requires
+// the phrase on its own line, so it cannot be confused with an inline mention.
+const BARE_PHRASE = new RegExp(`^${PROMISE_PHRASE}[.;:]*$`);
+
+/** True if the text emits the completion promise standing alone on one line.
+ *
+ * The sole discriminator between a real completion and a false one is the
+ * standalone-line property. The marker only counts when the phrase stands on
+ * its own line — optionally wrapped in (possibly mangled or absent) tags, and
+ * optionally followed by trailing punctuation. A mention inside prose, which
+ * shares the phrase but never its own line, must NOT count: otherwise an
+ * instruction to fail would be marked complete simply because the token
+ * appeared. Loosening the tag matching therefore stays safe — it can only ever
+ * accept more genuinely-on-their-own-line phrases, never inline ones. */
 export function emitsCompletionPromise(text: string): boolean {
   if (!text) return false;
   return text
     .split(/\r?\n/)
     .some((raw) => {
-      const line = raw
+      let line = raw
         .trim()
         .replace(/^(`+|~~~)/, "")
         .replace(/(`+|~~~)$/, "")
         .trim();
-      return PROMISE_LINE.test(line);
+      // Normalise the two ways markup gets corrupted before it reaches here:
+      // HTML comments models sometimes wrap tags in, and entity encoding of the
+      // angle brackets themselves.
+      line = line
+        .replace(/&amp;/g, "&")
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/<!--[^]*?-->/g, "");
+      return TAG_WRAP.test(line) || BARE_PHRASE.test(line);
     });
 }
 
