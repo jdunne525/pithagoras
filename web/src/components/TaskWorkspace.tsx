@@ -433,9 +433,11 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
     try {
       const updated = await api.completeTask(projectName, id);
       setRows((prev) => prev.map((x) => (x.id === id ? mapTask(updated) : x)));
-      // A completed Task is finished by definition, so it leaves the Actions tab
-      // for Completed right away. Acknowledgment is not a user-facing concern:
-      // completion is the only state that matters.
+      // Marking complete is an explicit, hands-on action, so it counts as
+      // acknowledging (§18): the Task has been dealt with directly, and it leaves
+      // the Actions tab for Completed right away — matching what this handler's
+      // comment promises, unlike a queue-finished Task which stays until seen.
+      acknowledge(id);
       notifyActivity();
     } catch {
       setError("Could not mark the task complete.");
