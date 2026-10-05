@@ -658,17 +658,17 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
         </div>
       </div>
 
-      {/* The conversation sits below the list, taking only the space it needs,
-            but capped so a long history (a session with many attempts) can
-            scroll inside this box instead of growing past it and overlapping the
-            list above. The cap keeps this panel in the same fixed area at the
-            foot of the workspace no matter how much a task has done — whether it
-            is showing the normal activity or a completed task's "View session".
-            While a task is being created or edited, though, drop this whole view
-            (header and transcript both) so the edit area keeps every pixel left
-            on a small screen. */}
+      {/* The conversation sits below the list and fills whatever vertical room
+            is left between the list above and the Reply bar below, so the
+            Reply bar stays pinned to the foot of the workspace rather than
+            floating mid-screen with a gap underneath it. The transcript inside
+            scrolls on its own, so a long history (many attempts) never pushes
+            the Reply bar off the bottom — whether it shows normal activity or a
+            completed task's "View session". While a task is being created or
+            edited, though, drop this whole view (header and transcript both)
+            so the edit area keeps every pixel left on a small screen. */}
       {!adding && editingRows.size === 0 ? (
-      <div className="flex min-h-0 shrink-0 max-h-[16rem] flex-col">
+      <div className="flex min-h-0 flex-1 shrink-0 flex-col">
         {!selected ? (
           <EmptyState />
         ) : (
