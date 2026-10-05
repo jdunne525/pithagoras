@@ -10,7 +10,7 @@ import { Streamdown } from "streamdown";
 import { useSessionEvents } from "../use-session-events";
 import { useFollowBottom } from "../use-follow-bottom";
 import { TaskTranscript } from "./TaskTranscript";
-import { LuArrowUp, LuCheck, LuChevronLeft, LuChevronRight, LuFileText, LuGripVertical, LuListChecks, LuPen, LuPlay, LuPlus, LuRotateCcw, LuTrash2, LuX } from "react-icons/lu";
+import { LuArrowUp, LuCheck, LuChevronLeft, LuChevronRight, LuFileText, LuGripVertical, LuListChecks, LuPen, LuPlay, LuPlus, LuRotateCcw, LuSquare, LuTrash2, LuX } from "react-icons/lu";
 
 /**
  * A task in the workspace is not a session: it has no events, so what a task
@@ -690,35 +690,37 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
               />
             </div>
 
-            {/* The conversation fills what is left of the page. It renders one
-                attempt's real transcript, streamed from its session. */}
-            {loadingAttempts ? (
-              <div className="flex flex-1 items-center justify-center py-16">
-                <span className="text-fg-muted">{t("Loading history…")}</span>
-              </div>
-            ) : viewedTask ? (
-              // The session view renders inline in this bottom panel, in the same
-              // area the activity normally uses, instead of a centered dialog that
-              // would overlap the whole workspace. Nothing else about the layout
-              // changes — the header row above stays put regardless of state.
-              <div className="flex min-h-0 flex-1 flex-col">
-                <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-2">
-                  <LuFileText className="h-4 w-4 shrink-0 text-accent" aria-hidden />
-                  <p className="min-w-0 flex-1 truncate text-sm text-fg">{t("Session")}</p>
-                  <button
-                    type="button"
-                    onClick={() => setViewingMockId(null)}
-                    className="rounded-lg p-1.5 text-fg-subtle transition hover:bg-fg/10 hover:text-fg"
-                    aria-label={t("Back to activity")}
-                    title={t("Back to activity")}
-                  >
-                    <LuX className="h-4 w-4" />
-                  </button>
+            {/* The conversation fills what is left of the page, pinned just
+                above the Reply bar below. It renders one attempt's real
+                transcript, streamed from its session. Its bottom sits flush
+                against the Reply bar whichever view is showing. */}
+            <div className="flex min-h-0 flex-1 flex-col">
+              {loadingAttempts ? (
+                <div className="flex flex-1 items-center justify-center py-16">
+                  <span className="text-fg-muted">{t("Loading history…")}</span>
                 </div>
-                <Conversation messages={viewedTask.msgs ?? seedMessages(viewedTask)} running={viewedTask.status === "running"} />
-              </div>
-            ) : (
-              <>
+              ) : viewedTask ? (
+                // The session view renders inline in this bottom panel, in the
+                // same area the activity normally uses, instead of a centered
+                // dialog that would overlap the whole workspace. Its bottom sits
+                // pinned just above the Reply bar.
+                <div className="flex min-h-0 flex-1 flex-col">
+                  <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-2">
+                    <LuFileText className="h-4 w-4 shrink-0 text-accent" aria-hidden />
+                    <p className="min-w-0 flex-1 truncate text-sm text-fg">{t("Session")}</p>
+                    <button
+                      type="button"
+                      onClick={() => setViewingMockId(null)}
+                      className="rounded-lg p-1.5 text-fg-subtle transition hover:bg-fg/10 hover:text-fg"
+                      aria-label={t("Back to activity")}
+                      title={t("Back to activity")}
+                    >
+                      <LuX className="h-4 w-4" />
+                    </button>
+                  </div>
+                  <Conversation messages={viewedTask.msgs ?? seedMessages(viewedTask)} running={viewedTask.status === "running"} />
+                </div>
+              ) : (
                 <div {...transcriptScroller.attach} onScroll={transcriptScroller.onScroll} onWheel={transcriptScroller.onWheel} className="min-h-0 flex-1 overflow-y-auto">
                   {activeSessionId && !(composerOpen && isMobile) ? (
                     <TaskTranscript sessionId={activeSessionId} events={events} running={sessionRunning} />
@@ -732,19 +734,27 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
                     </div>
                   )}
                 </div>
+              )}
+            </div>
 
-                {activeSessionId && selected.status === "running" && (
-                  <ResumeComposer
-                    open={composerOpen}
-                    value={resumeText}
-                    onChange={setResumeText}
-                    onSend={sendResume}
-                    onClose={() => { setComposerOpen(false); setResumeText(""); }}
-                    canSend={resumeText.trim().length > 0}
-                    onOpen={() => setComposerOpen(true)}
-                  />
-                )}
-              </>
+            {/* The Reply bar is pinned to the bottom of the view, wherever a
+                session exists — not only while it runs, as before. It opens a
+                note to send into the session and continue the run; the stop
+                icon to its right halts it, using the same square as the chat
+                page. The history above settles onto it rather than filling the
+                whole panel. */}
+            {activeSessionId && (
+              <ResumeComposer
+                open={composerOpen}
+                value={resumeText}
+                onChange={setResumeText}
+                onSend={sendResume}
+                onClose={() => { setComposerOpen(false); setResumeText(""); }}
+                canSend={resumeText.trim().length > 0}
+                onOpen={() => setComposerOpen(true)}
+                running={selected.status === "running"}
+                onStop={stop}
+              />
             )}
           </>
         )}
@@ -1177,6 +1187,8 @@ function ResumeComposer({
   onClose,
   canSend,
   onOpen,
+  running,
+  onStop,
 }: {
   open: boolean;
   value: string;
@@ -1185,17 +1197,35 @@ function ResumeComposer({
   onClose: () => void;
   canSend: boolean;
   onOpen: () => void;
+  /** Whether the session is currently running, which is when the stop is meaningful. */
+  running: boolean;
+  onStop: () => void;
 }) {
   const box = useRef<HTMLTextAreaElement>(null);
   if (!open) {
+    // Pinned to the foot of the view. The label says "Reply"; the stop square
+    // to its right halts the run — the same icon and style as the chat page.
+    // It is inert unless a run is actually going, mirroring the header's own
+    // stop, but stays visible so the control is where it is expected.
     return (
-      <div className="border-t border-line bg-surface py-2.5">
-        <div className="mx-auto w-full max-w-3xl px-3">
+      <div className="border-t border-line bg-surface">
+        <div className="mx-auto flex w-full max-w-3xl items-center gap-2 px-3 py-2.5">
           <button
+            type="button"
             onClick={onOpen}
-            className="w-full rounded-xl border border-line bg-raised/60 px-3 py-2 text-sm text-fg transition hover:bg-fg/5"
+            className="flex-1 text-left rounded-xl border border-line bg-raised/60 px-3 py-2 text-sm text-fg transition hover:bg-fg/5"
           >
-            {t("Continue this session")}
+            {t("Reply")}
+          </button>
+          <button
+            type="button"
+            onClick={onStop}
+            disabled={!running}
+            aria-label={t("Stop generation")}
+            title={t("Stop generation (Esc)")}
+            className={`prompt-action prompt-stop ${running ? "" : "pointer-events-none opacity-40"}`}
+          >
+            <LuSquare aria-hidden className="h-4 w-4" fill="currentColor" />
           </button>
         </div>
       </div>
