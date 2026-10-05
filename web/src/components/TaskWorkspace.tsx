@@ -4,7 +4,7 @@ import { StatusDot, type TaskStatus } from "./StatusDot";
 import { ThinkingBlock } from "./ChatActivity";
 import { confirmDialog } from "./ConfirmDialog";
 import { isEnter } from "../shortcuts";
-import { formatRelative, t } from "../i18n";
+import { t } from "../i18n";
 import { api, type Task, type TaskAttempt } from "../api";
 import { Streamdown } from "streamdown";
 import { useSessionEvents } from "../use-session-events";
@@ -148,6 +148,19 @@ const mapTask = (row: Task): MockTask => ({
 });
 /** Server stores UTC as "YYYY-MM-DD HH:MM:SS"; parse it as that, not local. */
 const normDate = (s: string): string => s.replace(" ", "T");
+
+/** Compact accumulated runtime for the task row: space is tight on mobile, so
+    show minutes and seconds (`3m 42s`) rather than the fuller `formatElapsed`
+    form. Under a minute it drops to whole seconds so a just-started run still
+    ticks visibly. */
+const formatShortElapsed = (totalSeconds: number): string => {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  if (s < 60) return `${s}s`;
+  const mins = Math.floor(s / 60);
+  if (mins < 60) return `${mins}m ${s % 60}s`;
+  const hours = Math.floor(mins / 60);
+  return `${hours}h ${Math.floor(mins % 60)}m`;
+};
 
 const TABS = ["actions", "completed"] as const;
 type Tab = (typeof TABS)[number];
@@ -510,7 +523,6 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
     tab === "actions"
       ? rows.filter((x) => x.status !== "completed")
       : rows.filter((x) => x.status === "completed");
-  const ago = (iso?: string) => (iso ? formatRelative((Date.now() - new Date(iso).getTime()) / 60000, "minute") : null);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-canvas">
@@ -627,7 +639,6 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
                   task={task}
                   selected={selectedId === task.id}
                   dragging={dragId === task.id}
-                  ago={ago(lastOf(task))}
                   // Selecting a task only opens it: never move between tabs just because a
                   // row was picked, or clicking a finished task in Completed would jump home.
                   onSelect={() => {
@@ -808,7 +819,6 @@ function TaskRow({
   task,
   selected,
   dragging,
-  ago,
   onSelect,
   onMove,
   onDragStart,
@@ -824,7 +834,6 @@ function TaskRow({
   task: MockTask;
   selected: boolean;
   dragging: boolean;
-  ago: string | null;
   onSelect: () => void;
   onMove: (toId: string) => void;
   onDragStart: () => void;
@@ -868,6 +877,24 @@ function TaskRow({
     setValue(task.text);
     setEditing(false);
   };
+
+  // While the task runs, tick once a second so the row's accumulated runtime
+  // stays live; otherwise leave the clock untouched. A re-render alone would
+  // not update the ticking time, so this drives it.
+  const [clock, setClock] = useState(0);
+  useEffect(() => {
+    if (task.status !== "running") return;
+    const id = setInterval(() => setClock((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, [task.status]);
+
+  // Accumulated execution time since the task started, shown only while running.
+  // Kept off the status line for finished tasks, where no runtime applies.
+  const elapsedText = useMemo(() => {
+    if (task.status !== "running" || !task.startedAt) return "";
+    const start = new Date(task.startedAt).getTime();
+    return formatShortElapsed(Math.max(0, Math.floor((Date.now() - start) / 1000)));
+  }, [task.status, task.startedAt, clock]);
 
   // ---- Touch reorder -------------------------------------------------------
   // On a phone the native `draggable` above never fires, so we follow the finger
@@ -1009,10 +1036,15 @@ function TaskRow({
           />
         ) : (
           <button onClick={() => { draggedRef.current ? (draggedRef.current = false) : onSelect(); }} draggable={false} className="min-w-0 flex-1 text-left">
-            <p className="truncate text-sm text-fg">{task.text}</p>
-            <p className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-fg-faint">
-              {ago && <span>{t("last {when}", { when: ago })}</span>}
+            {/* First row: just the prompt, never wrapped and clipped horizontally if
+                it is longer than the field. */}
+            <p className="min-w-0 truncate text-sm text-fg">{task.text}</p>
+            {/* Second row: a single line of status, plus the accumulated runtime
+                only while running. A single truncate keeps the whole line from
+                spilling past the field's edge on narrow screens. */}
+            <p className="min-w-0 mt-0.5 flex items-center gap-x-2 truncate text-[11px] text-fg-faint">
               {task.status === "running" && <span className="working-text">{t("Working")}</span>}
+              {elapsedText && <span className="tabular-nums">{elapsedText}</span>}
               {task.status === "failed" && task.attempts < task.maxAttempts && <span>{t("Failed — run again")}</span>}
               {task.status === "stopped" && <span>{t("Stopped")}</span>}
               {task.status === "pending" && <span>{t("Waiting to start")}</span>}
@@ -1095,10 +1127,6 @@ function Conversation({ messages, running }: { messages: MockMsg[][]; running: b
       </div>
     </div>
   );
-}
-
-function lastOf(task: MockTask) {
-  return task.completedAt ?? task.failedAt ?? task.startedAt;
 }
 
 function AttemptDivider({ n }: { n: number }) {
