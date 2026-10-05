@@ -309,7 +309,7 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
     return () => {
       cancelled = true;
     };
-  }, [projectName, selected]);
+  }, [projectName, selected?.id]);
 
   // When a run stops streaming, the backend has settled the attempt (a natural
   // end becomes failed; a stop becomes stopped) and reset the Task. Reconcile
