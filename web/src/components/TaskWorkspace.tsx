@@ -38,6 +38,9 @@ interface MockMsg {
 interface MockTask {
   id: string;
   text: string;
+  /** The full task description (the actual content). Shown when editing; the
+      list shows `text`, which holds the title. */
+  desc: string;
   status: TaskStatus;
   attempts: number;
   maxAttempts: number;
@@ -132,12 +135,13 @@ const seedMessages = (task: MockTask): MockMsg[][] => {
 };
 
 /** A real Task row from the backend, mapped into the shape the queue needs.
-    `text` here holds the title; the bottom panel still renders mock history,
-    because execution is a later phase. Unbounded attempts map to Infinity so
-    the "no attempts left" checks simply never fire. */
+    `text` here holds the title; `desc` the full description. The bottom panel
+    still renders mock history, because execution is a later phase. Unbounded
+    attempts map to Infinity so the "no attempts left" checks simply never fire. */
 const mapTask = (row: Task): MockTask => ({
   id: row.id,
   text: row.title,
+  desc: row.description,
   status: row.status,
   attempts: row.attempts,
   maxAttempts: row.max_attempts ?? Infinity,
@@ -191,6 +195,12 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
   const isMobile = useIsMobile();
   const [rows, setRows] = useState<MockTask[]>([]);
   const [tab, setTab] = useState<Tab>("actions");
+  // Client-side view concern (§18): which completed Tasks have been acknowledged
+  // and are therefore eligible to leave the active "Actions" view. A Task that
+  // has just completed stays visible here until acknowledged, so completion is
+  // actually seen before it moves into history. Nothing is persisted — this is
+  // purely what the active list shows, not a stored field.
+  const [acknowledged, setAcknowledged] = useState<Set<string>>(new Set());
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [resumeText, setResumeText] = useState("");
   const [composerOpen, setComposerOpen] = useState(false);
@@ -222,6 +232,7 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
   useEffect(() => {
     let cancelled = false;
     setRows([]);
+    setAcknowledged(new Set());
     setError(null);
     api.listTasks(projectName)
       .then((tasks) => {
@@ -489,12 +500,18 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
   // (from -> to) pair and skip identical repeats until the next distinct move.
   const lastMoveRef = useRef<null | string>(null);
 
-  const rename = useCallback(async (id: string, title: string) => {
-    const text = title.trim();
+  // Edit a task's content. The edit box writes the full description (what the
+  // agent actually works on), not just the name. No title is sent: like creating
+  // a task, the server re-names it from the first line of the new description,
+  // clipped the same way. The returned row gives back that fresh name to show.
+  const rename = useCallback(async (id: string, description: string) => {
+    const text = description.trim();
     if (!text) return;
     try {
-      await api.editTask(projectName, id, { title: text });
-      setRows((prev) => prev.map((x) => (x.id === id ? { ...x, text } : x)));
+      const updated = await api.editTask(projectName, id, { description: text });
+      setRows((prev) =>
+        prev.map((x) => (x.id === id ? { ...x, text: updated.title, desc: updated.description } : x)),
+      );
     } catch {
       setError("Could not save the change.");
     }
@@ -516,12 +533,42 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
   // sending does nothing until it is wired up.
 
 
-  // One list filtered by the open tab: Actions shows every Task that is not
-  // completed; Completed shows every finished Task. Completion is terminal, so
-  // a Task moves straight from one tab to the other with no intermediate state.
+  // Acknowledge a completed Task so it can leave the active view (§18). This is
+  // only a client-side view concern — no API call, no stored field.
+  const acknowledge = useCallback((id: string) => {
+    setAcknowledged((prev) => {
+      if (prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
+  }, []);
+
+  // Walking into Completed marks every completed Task acknowledged at once (§18),
+  // so they all become eligible to leave the active view on the next pass.
+  const acknowledgeAllCompleted = useCallback(() => {
+    setAcknowledged((prev) => {
+      let changed = false;
+      const next = new Set(prev);
+      for (const x of rows) if (x.status === "completed") { next.add(x.id); changed = true; }
+      return changed ? next : prev;
+    });
+  }, [rows]);
+
+  // One list filtered by the open tab. Completed shows every finished Task,
+  // regardless of acknowledgment. Actions shows every non-completed Task plus
+  // any completed one not yet acknowledged — a just-finished Task stays put here
+  // so its completion is actually seen before it moves into history. An
+  // acknowledged Task still renders while it is the one being viewed or selected,
+  // so picking it does not yank its row out mid-view; it drops away once the user
+  // leaves it (a fresh active-view pass never brings it back).
   const actions =
     tab === "actions"
-      ? rows.filter((x) => x.status !== "completed")
+      ? rows.filter((x) => {
+          if (x.status !== "completed") return true;
+          if (!acknowledged.has(x.id)) return true; // recently completed, unacked
+          return x.id === selectedId || x.id === viewingMockId; // shown while viewed
+        })
       : rows.filter((x) => x.status === "completed");
 
   return (
@@ -580,11 +627,18 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
         <div className="flex items-center px-3 pb-2">
           <div className="flex border-b border-line">
             {TABS.map((label) => {
-              const n = label === "actions" ? rows.filter((x) => x.status !== "completed").length : rows.filter((x) => x.status === "completed").length;
+              // Count what each tab actually shows: Actions includes the
+              // recently completed-but-unacked tasks, Completed lists them all.
+              const n = label === "actions" ? actions.length : rows.filter((x) => x.status === "completed").length;
               return (
                 <button
                   key={label}
-                  onClick={() => setTab(label)}
+                  onClick={() => {
+                    // Entering Completed acknowledges every completed Task at once
+                    // (§18), so they all become eligible to leave the active view.
+                    if (label === "completed") acknowledgeAllCompleted();
+                    setTab(label);
+                  }}
                   aria-current={tab === label}
                   className={`flex items-center gap-1.5 border-b -mb-px pb-2 px-3 text-sm font-medium transition ${
                     tab === label
@@ -644,6 +698,10 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
                   onSelect={() => {
                     setSelectedId(task.id);
                     setComposerOpen(false);
+                    // Viewing a just-completed Task acknowledges it (§18): it is now
+                    // eligible to leave the active view. It stays visible while still
+                    // selected, then drops away on the next pass.
+                    if (task.status === "completed") acknowledge(task.id);
                     // Picking another task leaves any inline session view, since
                     // that view belongs to the task it was opened for.
                     if (viewingMockId && viewingMockId !== task.id) setViewingMockId(null);
@@ -654,6 +712,9 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
                   onOpenSession={() => {
                     setSelectedId(task.id);
                     setComposerOpen(false);
+                    // Opening the session of a completed Task counts as viewing it,
+                    // so it is acknowledged (§18) and can leave the active view.
+                    acknowledge(task.id);
                     setViewingMockId(task.id);
                   }}
                   onStart={() => task.status === "running" ? stop() : start(task.id)}
@@ -848,25 +909,26 @@ function TaskRow({
       activity view while a task is being edited on a small screen. */
   onEditStateChange?: (open: boolean) => void;
 }) {
-  // Rename is local to the row: opening an input replaces the title, Enter saves
-  // it server-side, Escape or leaving cancels. The prompt's first line already
-  // named the task, so renaming is how you make that name your own.
+  // Editing is local to the row: opening an input replaces the title with the
+  // full description, Ctrl/Cmd+Enter (or blur) saves it server-side, Escape or
+  // leaving cancels. The saved description re-names the task from its first line
+  // (see rename), so the name keeps matching the content.
   const [editing, setEditing] = useState(false);
-  const [value, setValue] = useState(task.text);
+  const [value, setValue] = useState(task.desc);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
     onEditStateChange?.(editing);
   }, [editing]);
   useEffect(() => {
     if (editing) {
-      setValue(task.text);
+      setValue(task.desc);
       const id = setTimeout(() => {
         inputRef.current?.focus();
         inputRef.current?.select();
       }, 0);
       return () => clearTimeout(id);
     }
-  }, [editing, task.text]);
+  }, [editing, task.desc]);
 
   const commit = () => {
     const text = value.trim();
@@ -874,7 +936,7 @@ function TaskRow({
     if (text && onRename) onRename(text);
   };
   const cancel = () => {
-    setValue(task.text);
+    setValue(task.desc);
     setEditing(false);
   };
 
@@ -1031,7 +1093,7 @@ function TaskRow({
             onChange={(e) => setValue(e.target.value)}
             onKeyDown={(e) => { if (isEnter(e) && (e.ctrlKey || e.metaKey)) { e.preventDefault(); commit(); } else if (e.key === "Escape") { e.preventDefault(); cancel(); } }}
             onBlur={commit}
-            aria-label={t("Rename task")}
+            aria-label={t("Edit task")}
             className="w-full rounded-md border border-line bg-surface px-2 py-1 text-sm leading-relaxed text-fg outline-none focus:border-accent"
           />
         ) : (
@@ -1048,20 +1110,16 @@ function TaskRow({
               {task.status === "failed" && task.attempts < task.maxAttempts && <span>{t("Failed — run again")}</span>}
               {task.status === "stopped" && <span>{t("Stopped")}</span>}
               {task.status === "pending" && <span>{t("Waiting to start")}</span>}
-              {task.attempts >= task.maxAttempts && <span className="text-warn">{t("No attempts left")}</span>}
+              {task.status === "completed" && <span>{t("Completed")}</span>}
+              {task.status !== "completed" && task.attempts >= task.maxAttempts && <span className="text-warn">{t("No attempts left")}</span>}
             </p>
           </button>
         )}
       </div>
       <div className="flex shrink-0 items-center gap-1 opacity-0 transition focus-within:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100">
         <RunControls task={task} onStart={onStart} onRerun={onRerun} />
-        {task.status === "completed" && task.attempts > 0 && (
-          <ActionBtn title={t("View session")} onClick={onOpenSession} aria-label={t("View session")}>
-            <LuFileText className="h-3.5 w-3.5" />
-          </ActionBtn>
-        )}
         {onRename && !editing && (
-          <ActionBtn title={t("Rename task")} onClick={() => setEditing(true)} aria-label={t("Rename task")}>
+          <ActionBtn title={t("Edit task")} onClick={() => setEditing(true)} aria-label={t("Edit task")}>
             <LuPen className="h-3.5 w-3.5" />
           </ActionBtn>
         )}

@@ -172,6 +172,27 @@ test("a task is named from its prompt when no title is given", () => {
   );
 });
 
+test("editing only the description re-names the task from its first line, clipped", () => {
+  const project = ws();
+  const task = tasks.createTask({ workspace: project, title: "Old name", description: "First line of the work\ndetails below" });
+  assert.equal(task.title, "Old name");
+  // Sending just a description updates the content and re-derives the name,
+  // like creation does — no explicit title means "name it from the prompt".
+  const edited = tasks.editTask(task.id, { description: "A brand new job\nmore notes" });
+  assert.equal(edited.description, "A brand new job\nmore notes");
+  assert.equal(edited.title, "A brand new job", "the title follows the new first line");
+  // A long first line clips exactly as a chat title does.
+  const long = tasks.editTask(task.id, { description: "y".repeat(80) }).title;
+  assert.equal(long, "y".repeat(47) + "…");
+  // An explicit title still wins over the derived one.
+  const chosen = tasks.editTask(task.id, { title: "Chosen", description: "ignored body" });
+  assert.equal(chosen.title, "Chosen");
+  // A first line that cannot be named leaves the old title rather than dropping the edit.
+  const unnamed = tasks.editTask(task.id, { description: "/clear this up" });
+  assert.equal(unnamed.title, "Chosen");
+  assert.equal(unnamed.description, "/clear this up");
+});
+
 test("a task title clips from the prompt the same way a chat title does", () => {
   const long = "x".repeat(80);
   assert.equal(tasks.createTask({ workspace: ws(), description: long }).title, "x".repeat(47) + "…");

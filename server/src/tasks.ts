@@ -88,7 +88,17 @@ export const createTask = (input: CreateTaskInput): db.TaskRow => {
 export const editTask = (id: string, patch: EditTaskInput): db.TaskRow | undefined => {
   const task = getTask(id);
   const fields: db.UpdatableTaskFields = {};
-  if (patch.title !== undefined) fields.title = validateTitle(patch.title);
+  if (patch.title !== undefined) {
+    fields.title = validateTitle(patch.title);
+  } else if (patch.description !== undefined) {
+    // Editing the description without a chosen title re-names the task from its
+    // first line, exactly like creation does (`resolveTitle` / `titleFrom`), so
+    // the name keeps matching the content and is clipped the same way. When the
+    // new first line cannot be named (e.g. it starts with "/"), leave the old
+    // title untouched rather than dropping the edit.
+    const title = resolveTitle({ description: patch.description });
+    if (title) fields.title = title;
+  }
   if (patch.description !== undefined) fields.description = patch.description;
   // No per-Task max attempts to edit (Phase 5): the budget is server-wide.
   return db.updateTaskFields(id, fields);
