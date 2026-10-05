@@ -6,11 +6,12 @@ import { confirmDialog } from "./ConfirmDialog";
 import { isEnter } from "../shortcuts";
 import { t } from "../i18n";
 import { api, type Task, type TaskAttempt } from "../api";
+import { local } from "../safe-storage";
 import { Streamdown } from "streamdown";
 import { useSessionEvents } from "../use-session-events";
 import { useFollowBottom } from "../use-follow-bottom";
 import { TaskTranscript } from "./TaskTranscript";
-import { LuArrowUp, LuCheck, LuChevronLeft, LuChevronRight, LuFileText, LuGripVertical, LuListChecks, LuPen, LuPlay, LuPlus, LuRotateCcw, LuSquare, LuTrash2, LuX } from "react-icons/lu";
+import { LuArrowUp, LuCheck, LuChevronLeft, LuChevronRight, LuFileText, LuGripVertical, LuListChecks, LuPen, LuPlay, LuPlus, LuRepeat, LuRotateCcw, LuSquare, LuTrash2, LuX } from "react-icons/lu";
 
 /**
  * A task in the workspace is not a session: it has no events, so what a task
@@ -211,7 +212,20 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
   // the rest of the UI.
   const [viewingMockId, setViewingMockId] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
+  // The task description typed into “New task” but not submitted. Kept in
+  // storage (see below) so leaving the page — to another project, a session,
+  // anywhere — and coming back does not drop what was half written, the way it
+  // would if this were only component state.
+  const draftKey = useMemo(() => `pithagoras.task-draft.${projectName}`, [projectName]);
   const [draft, setDraft] = useState("");
+  // On entering a project, restore what was left for it; remember every change
+  // so a reload or a wander away keeps it. An empty draft is forgotten, not
+  // stored as blank.
+  useEffect(() => { setDraft(local.get(draftKey) ?? ""); }, [projectName, draftKey]);
+  useEffect(() => {
+    if (draft) local.set(draftKey, draft);
+    else local.remove(draftKey);
+  }, [draft, draftKey]);
   // Ids of Task rows whose rename input is open. Raised from each row so the
   // parent can hide the activity view while any task is being edited (see below).
   const [editingRows, setEditingRows] = useState<Set<string>>(new Set());
@@ -474,6 +488,20 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
     setDraft("");
   }, [projectName]);
 
+  // Follow up (as CodeLoop does on its tasks page): open the same “New task”
+  // dialog used to create one, but pre-fill the box with the chosen task so a
+  // related task can be sent at once. The original prompt sits under a header
+  // marking this a follow-up, using the same format CodeLoop uses, so the user
+  // can edit it before creating. Nothing runs until they submit.
+  const startFollowUp = useCallback((task: MockTask) => {
+    const base = (task.desc || task.text).trim();
+    if (!base) return;
+    setSelectedId(task.id);
+    setTab("actions");
+    setDraft(`Follow-up to the previous task:\n\n${base}`);
+    setAdding(true);
+  }, []);
+
   // Move one task before another, then persist the new order to the server, which
   // owns the queue. This really reorders — unlike the mock, which would not move.
   const moveTask = useCallback(async (fromId: string, toId: string) => {
@@ -721,6 +749,7 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
                   onRerun={() => rerun(task.id)}
                   onComplete={() => markComplete(task.id)}
                   onRename={(title) => rename(task.id, title)}
+                  onFollowUp={() => startFollowUp(task)}
                   onRemove={() => remove(task)}
                   onEditStateChange={(open) => notifyEdit(task.id, open)}
                 />
@@ -889,6 +918,7 @@ function TaskRow({
   onRerun,
   onComplete,
   onRename,
+  onFollowUp,
   onRemove,
   onEditStateChange,
 }: {
@@ -904,6 +934,8 @@ function TaskRow({
   onRerun?: () => void;
   onComplete?: () => void;
   onRename?: (title: string) => void;
+  /** Open the “New task” dialog pre-filled as a follow-up to this task. */
+  onFollowUp?: () => void;
   onRemove: () => void;
   /** Called when the rename input opens or closes, so the parent can hide the
       activity view while a task is being edited on a small screen. */
@@ -1117,6 +1149,11 @@ function TaskRow({
         )}
       </div>
       <div className="flex shrink-0 items-center gap-1 opacity-0 transition focus-within:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100">
+        {onFollowUp && (
+          <ActionBtn title={t("Follow up")} onClick={onFollowUp} aria-label={t("Follow up")}>
+            <LuRepeat className="h-3.5 w-3.5" />
+          </ActionBtn>
+        )}
         <RunControls task={task} onStart={onStart} onRerun={onRerun} />
         {onRename && !editing && (
           <ActionBtn title={t("Edit task")} onClick={() => setEditing(true)} aria-label={t("Edit task")}>

@@ -1626,6 +1626,7 @@ const de: Locale = {
     "ready to continue.": "bereit zum Weitermachen.",
     "Continuing": "Es geht weiter",
     "Continue": "Weitermachen",
+    "Follow up": "Follow-up",
     "Giving up the {operation}": "{operation} wird abgebrochen",
     "Abort": "Abbrechen",
     // components/git/History.tsx
