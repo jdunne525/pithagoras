@@ -1152,7 +1152,7 @@ function TaskRow({
       onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; }}
       onDrop={(e) => { e.preventDefault(); const from = e.dataTransfer.getData("text/plain"); if (from && from !== task.id) onMove(from); }}
       onDragEnd={onDragEnd}
-      className={`group flex items-center gap-2 rounded-xl border px-2.5 py-1.5 transition ${dragging ? "opacity-50" : ""} ${selected ? "border-accent/60 bg-accent/5" : "border-line bg-raised/40"}`}
+      className={`group flex items-end gap-2 rounded-xl border px-2.5 py-1.5 transition ${dragging ? "opacity-50" : ""} ${selected ? "border-accent/60 bg-accent/5" : "border-line bg-raised/40"}`}
     >
       <button
         type="button"
@@ -1176,7 +1176,10 @@ function TaskRow({
             className="w-full rounded-md border border-line bg-surface px-2 py-1 text-sm leading-relaxed text-fg outline-none focus:border-accent"
           />
         ) : (
-          <button onClick={() => { draggedRef.current ? (draggedRef.current = false) : onSelect(); }} draggable={false} className="min-w-0 flex-1 text-left">
+          <button onClick={() => { draggedRef.current ? (draggedRef.current = false) : onSelect(); }} draggable={false} className="min-w-0 w-full flex flex-col justify-center text-left">
+            {/* A flex column wrapper fills the field width so it can clip its children
+                instead of sizing to the long prompt text, which would spill past
+                the frame edge on narrow screens. */}
             {/* First row: just the prompt, never wrapped and clipped horizontally if
                 it is longer than the field. */}
             <p className="min-w-0 truncate text-sm text-fg">{task.text}</p>
