@@ -132,11 +132,6 @@ export interface PromptOptions {
   images?: Attached[];
   /** Mid-run, go into the run that is going instead of waiting for it to end. */
   steer?: boolean;
-  /**
-   * Skip the single-active hold: an internal prompt — a compaction's resume —
-   * is for the active session itself, so it is never the one held back.
-   */
-  bypassSingleActive?: boolean;
 }
 
 /** A message sent into a run, until pi takes it in: see SessionManager.waiting. */
@@ -314,31 +309,42 @@ class SessionManager extends EventEmitter {
   private singleActiveQueue: { sessionId: string; message: string; options?: PromptOptions }[] = [];
 
   /**
-   * Whether any session is still busy — running, compacting, or mid-turn in a
-   * compaction that will resume — so the single-active setting knows one is
-   * already holding the room. Only free when none of these hold.
+   * Sessions that have passed the single-active gate but whose run has not yet
+   * landed in `inRun` — the moment pi starts, `agent_start` moves them out of
+   * here and into `inRun`. This closes the gap two fresh prompts could otherwise
+   * slip through: both read "room free" between the gate check and the first
+   * await that starts pi, so both begin. While a session is claimed it counts as
+   * active, so only one can ever be between the gate and `inRun` at once.
+   */
+  private singleActiveClaiming = new Set<string>();
+
+  /**
+   * Whether any session is still busy — running, compacting, mid-turn in a
+   * compaction that will resume, or claimed at the gate but not yet started —
+   * so the single-active setting knows one is already holding the room. Only
+   * free when none of these hold.
    */
   private isActive(sessionId: string): boolean {
     return (
       this.inRun.has(sessionId) ||
       this.compacting.has(sessionId) ||
-      this.compactionInterruptedRun.has(sessionId)
+      this.compactionInterruptedRun.has(sessionId) ||
+      this.singleActiveClaiming.has(sessionId)
     );
   }
 
   /**
-   * The interactive session holding the room, under the single-active setting:
-   * a busy chat other than the one asked for, else nowhere. Autonomous runs —
-   * Tasks, routines — neither wait nor hold; they run on their own schedule and
-   * must not lock out a person's chat. Re-queuing a request aimed at the busy
-   * one would loop, so the target is skipped.
+   * Whatever is holding the room, under the single-active setting: any active
+   * session other than the one asked for, else nowhere. Only one thing of any
+   * kind may touch the engine, so this counts every kind — an interactive chat,
+   * an autonomous Task, a routine — none gets a pass. Re-queuing a request
+   * aimed at the busy one would loop, so the target is skipped.
    */
   private blockedBy(sessionId: string): string | null {
     for (const id of this.live.keys()) {
       if (id === sessionId) continue;
       if (!this.isActive(id)) continue;
-      const kind = getSession(id)?.kind;
-      if (kind === "agent") return id;
+      return id;
     }
     return null;
   }
@@ -753,6 +759,9 @@ class SessionManager extends EventEmitter {
       const live = this.live.get(sessionId);
       if (!live || this.stopping.has(live.client)) return;
       void this.prompt(sessionId, "Compaction detected, resume where you left off if needed.").catch((e) => {
+        // Held behind another room-holder under the single-active setting: the
+        // queue starts it once the room frees, so this is not a failure.
+        if (e instanceof PromptQueuedForSingleActive) return;
         console.error(`[portal] could not resume a compaction-interrupted turn: ${e.message}`);
       });
     });
@@ -1167,6 +1176,11 @@ class SessionManager extends EventEmitter {
       // routine, a message that arrived through a channel.
       if (msg.type === "agent_start") {
         this.runsStarted.set(sessionId, (this.runsStarted.get(sessionId) ?? 0) + 1);
+        // We claimed the room before pi started; from here on the run itself
+        // (`inRun`) is what holds it, so drop the claim — keeping it would make
+        // this session stay "active" forever under the single-active setting,
+        // and the queue would never drain again.
+        this.singleActiveClaiming.delete(sessionId);
         this.inRun.add(sessionId);
         this.failuresSaid.delete(sessionId);
         this.mark(sessionId, "running");
@@ -1178,6 +1192,10 @@ class SessionManager extends EventEmitter {
       // the Stop button disappear halfway through.
       if (msg.type === "agent_settled") {
         this.inRun.delete(sessionId);
+        // Any claim this session still held — a message queued into the run
+        // going added one — ends with the run; drop it here too, or it would
+        // keep the session "active" forever and the queue would never drain.
+        this.singleActiveClaiming.delete(sessionId);
         this.settleWaiting(sessionId);
         if (!this.failed.delete(sessionId)) this.mark(sessionId, "idle");
         // A run ends here — no retry, no compaction, no auto-resume left to
@@ -1270,19 +1288,32 @@ class SessionManager extends EventEmitter {
    */
   async prompt(sessionId: string, message: string, options?: PromptOptions, insideEdit = false): Promise<void> {
     // Under the single-active setting one session holds the room and every
-    // other waits its turn. A message for the active session itself still goes
-    // in — pi queues it into the run going — so only a different session is
-    // held back. An edit or an internal prompt keeps its own ordering and is
-    // never queued here.
+    // other waits its turn. Nothing bypasses this — no kind of run gets a
+    // pass — so two things can never both reach the engine. A message for the
+    // active session itself still goes in — pi queues it into the run going —
+    // so only a different session is held back. An edit keeps its own ordering
+    // and is never queued here (it rewrites the conversation pi reads), and a
+    // prompt for the session that already holds the room is not held back by
+    // it — only by some *other* session, see blockedBy().
+    //
+    // The check above and the claim below run one after the other with no
+    // await between them, so two prompts for two different sessions can never
+    // both read the room as free and then each claim it. The check is
+    // synchronous; the claim is, too. Only after that do we yield.
     if (
       !insideEdit &&
-      !options?.bypassSingleActive &&
       singleActiveSessionEnabled() &&
       this.blockedBy(sessionId)
     ) {
       this.singleActiveQueue.push({ sessionId, message, options });
       throw new PromptQueuedForSingleActive();
     }
+    // The room is free, and we are about to start a fresh run of our own. Claim
+    // it now, synchronously, so no other prompt can slip in beside us before pi
+    // starts. The claim passes to `inRun` when pi starts (the agent_start
+    // handler), and is dropped here if the run never got far enough to bring pi
+    // up — see below — so a failed start never locks the room for good.
+    if (!insideEdit && singleActiveSessionEnabled()) this.singleActiveClaiming.add(sessionId);
     // Callers ask first, where there is someone to tell; this is so that one
     // which did not is refused too, before the session is marked as anything.
     const refused = options?.images?.length ? await picturesRefused(message) : undefined;
@@ -1296,6 +1327,12 @@ class SessionManager extends EventEmitter {
       const left = (this.prompting.get(sessionId) ?? 1) - 1;
       if (left) this.prompting.set(sessionId, left);
       else this.prompting.delete(sessionId);
+      // If the run did not get as far as starting pi, there is nothing left to
+      // lift the claim later, so lift it now: a failed start must not leave the
+      // room locked for good.
+      if (!insideEdit && singleActiveSessionEnabled() && !this.live.has(sessionId) && !this.inRun.has(sessionId)) {
+        this.singleActiveClaiming.delete(sessionId);
+      }
     }
   }
 
@@ -2161,7 +2198,15 @@ class SessionManager extends EventEmitter {
       // nothing is waiting on it yet. The throw below is what reaches the
       // caller; left unhandled, this one took the whole portal down with it.
       finished.catch(() => {});
-      await this.prompt(sessionId, prepared.message);
+      // Held because another session holds the room under the single-active
+      // setting: nothing here starts the run — the message was only queued,
+      // and the queue starts it the moment the room frees. So let it go and
+      // wait for the run that the queue will begin, as if this had been sent.
+      try {
+        await this.prompt(sessionId, prepared.message);
+      } catch (e) {
+        if (!(e instanceof PromptQueuedForSingleActive)) throw e;
+      }
       prepared.onAccepted?.();
       await finished;
       // Already relayed piece by piece; handing it back would post it twice.
@@ -2424,8 +2469,10 @@ class SessionManager extends EventEmitter {
       await this.settleCompaction(sessionId);
       updateSession(sessionId, { status: "idle" });
       this.record(sessionId, "portal_status", { status: "idle", aborted: true });
-      // Stopped for good now — no run, no compaction, no resume left — so the
-      // single-active room may pass to the next request waiting its turn.
+      // A claim left over from before the abort (a message queued into the run
+      // going) dies with it here, so the session is not counted active any
+      // longer. Stopped for good now — no run, no compaction, no resume left —
+      // so the single-active room may pass to the next request waiting its turn.
       if (singleActiveSessionEnabled()) void this.processQueue();
     } finally {
       stopped();
@@ -2497,6 +2544,9 @@ class SessionManager extends EventEmitter {
     this.extensionUi.delete(sessionId);
     this.failuresSaid.delete(sessionId);
     this.inRun.delete(sessionId);
+    // The pi behind this session is gone, so any gate claim it held is done;
+    // leave it, and the session reads as active forever and the queue stalls.
+    this.singleActiveClaiming.delete(sessionId);
     this.calls.delete(sessionId);
     this.fresh.delete(sessionId);
     this.piQueue.delete(sessionId);

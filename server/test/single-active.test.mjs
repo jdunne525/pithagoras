@@ -89,6 +89,7 @@ test("a second chat waits behind an active one and starts when it stops", async 
     sessions.inRun.clear();
     sessions.compacting.clear();
     sessions.compactionInterruptedRun.clear();
+    sessions.singleActiveClaiming.clear();
   }
 });
 
@@ -116,22 +117,30 @@ test("compaction keeps the room held until the compaction unwinds", async () => 
     sessions.inRun.clear();
     sessions.compacting.clear();
     sessions.compactionInterruptedRun.clear();
+    sessions.singleActiveClaiming.clear();
   }
 });
 
-test("an autonomous run neither blocks a chat nor waits itself", async () => {
+test("a chat is held behind an autonomous run", async () => {
   setSingleActiveSession(true);
   const real = stubEnsure();
   try {
-    // A Task in flight: active, but not an interactive chat.
+    // A Task in flight: active, and under the single-active setting it now
+    // holds the room just like a chat — nothing else reaches the engine.
     makeSession("T", "task", "running");
     sessions.inRun.add("T");
     makeSession("U", "agent", "idle");
 
-    await sessions.prompt("U", "go"); // not blocked by an autonomous run
+    await assert.rejects(sessions.prompt("U", "hi"), PromptQueuedForSingleActive);
     await flush();
-    assert.equal(sessions.singleActiveQueue.length, 0, "a chat is not held behind a Task");
-    assert.deepEqual(started, ["U"], "the chat goes on its own way");
+    assert.equal(sessions.singleActiveQueue.length, 1, "the chat waits behind the Task");
+    assert.deepEqual(started, [], "nothing starts while the Task runs");
+
+    sessions.inRun.delete("T");
+    sessions.mark("T", "idle");
+    await sessions.processQueue();
+    await flush();
+    assert.deepEqual(started, ["U"], "the chat starts once the Task has stopped");
   } finally {
     restoreEnsure(real);
     started.length = 0;
@@ -139,6 +148,79 @@ test("an autonomous run neither blocks a chat nor waits itself", async () => {
     sessions.inRun.clear();
     sessions.compacting.clear();
     sessions.compactionInterruptedRun.clear();
+    sessions.singleActiveClaiming.clear();
+    sessions.singleActiveClaiming.clear();
+  }
+});
+
+test("a second autonomous run waits behind the first", async () => {
+  setSingleActiveSession(true);
+  const real = stubEnsure();
+  try {
+    // Two Tasks at once must not both reach the engine either.
+    makeSession("T1", "task", "running");
+    sessions.inRun.add("T1");
+    makeSession("T2", "task", "idle");
+
+    await assert.rejects(sessions.prompt("T2", "go"), PromptQueuedForSingleActive);
+    await flush();
+    assert.equal(sessions.singleActiveQueue.length, 1, "the second Task waits");
+    assert.deepEqual(started, [], "only one Task runs at a time");
+
+    sessions.inRun.delete("T1");
+    sessions.mark("T1", "idle");
+    await sessions.processQueue();
+    await flush();
+    assert.deepEqual(started, ["T2"], "the second Task starts once the first stops");
+  } finally {
+    restoreEnsure(real);
+    started.length = 0;
+    sessions.singleActiveQueue = [];
+    sessions.inRun.clear();
+    sessions.compacting.clear();
+    sessions.compactionInterruptedRun.clear();
+    sessions.singleActiveClaiming.clear();
+    sessions.singleActiveClaiming.clear();
+  }
+});
+
+test("a claim left over from a finished run does not keep the room held", async () => {
+  setSingleActiveSession(true);
+  const real = stubEnsure();
+  try {
+    // A chat running, plus a follow-up queued into that run going: prompt()
+    // adds a second gate claim mid-run, which inRun also holds.
+    makeSession("F1", "agent", "running");
+    sessions.inRun.add("F1");
+    sessions.singleActiveClaiming.add("F1");
+    assert.equal(sessions.isActive("F1"), true, "active while the run goes");
+
+    makeSession("G1", "agent", "idle");
+    await assert.rejects(sessions.prompt("G1", "go"), PromptQueuedForSingleActive, "held while F1 runs");
+
+    // The run ends. The leftover claim must die with it, or F1 reads as active
+    // forever and G1 waits on nothing. Forgetting the pi is what stops it.
+    sessions.forgetPi("F1");
+    assert.equal(sessions.isActive("F1"), false, "free once the run and its claim are gone");
+
+    assert.ok(!sessions.singleActiveClaiming.has("F1"), "F1's stale claim was dropped when the run ended");
+
+    await sessions.processQueue();
+    await flush();
+    assert.deepEqual(started, ["G1"], "G1 runs now that the room is really free");
+    // G1's own in-flight claim remains here because the stubbed ensureClient
+    // never emits agent_start to lift it; in production it clears then. What
+    // the fix guarantees is that the *finished* session leaves no claim behind.
+    assert.ok(!sessions.singleActiveClaiming.has("F1"), "the finished session leaves nothing to stall the queue");
+  } finally {
+    restoreEnsure(real);
+    started.length = 0;
+    sessions.singleActiveQueue = [];
+    sessions.inRun.clear();
+    sessions.compacting.clear();
+    sessions.compactionInterruptedRun.clear();
+    sessions.singleActiveClaiming.clear();
+    sessions.singleActiveClaiming.clear();
   }
 });
 
@@ -159,6 +241,7 @@ test("the gate is off when the setting is not set", async () => {
     sessions.inRun.clear();
     sessions.compacting.clear();
     sessions.compactionInterruptedRun.clear();
+    sessions.singleActiveClaiming.clear();
   }
 });
 
@@ -180,5 +263,6 @@ test("a message for the active session itself still goes in, not queued", async 
     sessions.inRun.clear();
     sessions.compacting.clear();
     sessions.compactionInterruptedRun.clear();
+    sessions.singleActiveClaiming.clear();
   }
 });

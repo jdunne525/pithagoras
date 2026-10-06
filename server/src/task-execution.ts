@@ -1,5 +1,5 @@
 import { nanoid } from "nanoid";
-import { sessions, EXECUTOR_KIND } from "./session-manager.js";
+import { sessions, EXECUTOR_KIND, PromptQueuedForSingleActive } from "./session-manager.js";
 import * as db from "./db.js";
 import * as tasks from "./tasks.js";
 import { buildTaskPrompt, DEFAULT_MAX_ATTEMPTS } from "./task-prompt.js";
@@ -118,12 +118,12 @@ export const startTask = (taskId: string): { task: db.TaskRow; attempt: db.TaskA
   void sessions.prompt(
     sessionId,
     buildTaskPrompt(task, { maxAttempts: DEFAULT_MAX_ATTEMPTS, projectInstructions }),
-    // A Task's autonomous run is not a chat a person is watching, so it does
-    // not join the single-active queue behind a running session; it runs on its
-    // own schedule instead.
-    { bypassSingleActive: true },
   )
     .catch((e: unknown) => {
+      // Held because something else holds the room under the single-active
+      // setting: the request was queued, and will start when the room frees,
+      // so this is not a failure and must not settle the attempt.
+      if (e instanceof PromptQueuedForSingleActive) return;
       // The run could not even begin: settle it honestly rather than leave it
       // hanging running forever.
       finishSettled(run);
