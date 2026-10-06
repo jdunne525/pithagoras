@@ -279,6 +279,17 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
   const running = rows.some((x) => x.status === "running");
   const selected = useMemo(() => rows.find((x) => x.id === selectedId) ?? null, [rows, selectedId]);
   const viewedTask = useMemo(() => rows.find((x) => x.id === viewingMockId) ?? null, [rows, viewingMockId]);
+  // The "View session" messages are seeded once per task and kept, rather than
+  // rebuilt on every render. Rebuilding each render would hand the conversation
+  // scroller a fresh array every paint, making its follow-the-bottom effect run
+  // on re-render instead of only when the content actually changes — the way
+  // the main chat follows on a real change in content length. Caching keeps the
+  // scroll behaviour honest and stops every message from re-mounting.
+  const viewMsgs = useMemo(() => {
+    if (!viewedTask) return [];
+    if (!viewedTask.msgs) viewedTask.msgs = seedMessages(viewedTask);
+    return viewedTask.msgs;
+  }, [viewedTask]);
   // A task row is being renamed, or a new one is being written. On a phone the
   // virtual keyboard leaves very little room, so while either is open we drop
   // the whole activity view below (see its guard) to give the edit area all the
@@ -821,10 +832,10 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
                       <LuX className="h-4 w-4" />
                     </button>
                   </div>
-                  <Conversation messages={viewedTask.msgs ?? seedMessages(viewedTask)} running={viewedTask.status === "running"} />
+                  <Conversation messages={viewMsgs} running={viewedTask.status === "running"} />
                 </div>
               ) : (
-                <div {...transcriptScroller.attach} onScroll={transcriptScroller.onScroll} onWheel={transcriptScroller.onWheel} className="min-h-0 flex-1 overflow-y-auto">
+                <div {...transcriptScroller.attach} onScroll={transcriptScroller.onScroll} onWheel={transcriptScroller.onWheel} onPointerDown={transcriptScroller.hold} onKeyDown={transcriptScroller.hold} className="min-h-0 flex-1 overflow-y-auto">
                   {activeSessionId && !(composerOpen && isMobile) ? (
                     <TaskTranscript sessionId={activeSessionId} events={events} running={sessionRunning} />
                   ) : composerOpen && isMobile ? (
@@ -1206,7 +1217,7 @@ function Conversation({ messages, running }: { messages: MockMsg[][]; running: b
     scroller.follow();
   }, [messages]);
   return (
-    <div {...scroller.attach} onScroll={scroller.onScroll} className="flex-1 overflow-y-auto px-3 py-3">
+    <div {...scroller.attach} onScroll={scroller.onScroll} onWheel={scroller.onWheel} onPointerDown={scroller.hold} onKeyDown={scroller.hold} className="flex-1 overflow-y-auto px-3 py-3">
       <div className="mx-auto w-full max-w-3xl space-y-3">
         {messages.length === 0 ? (
           <p className="py-10 text-center text-sm text-fg-subtle">{t("Not started yet.")}</p>
