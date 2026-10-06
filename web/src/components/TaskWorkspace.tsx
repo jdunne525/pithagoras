@@ -11,7 +11,7 @@ import { Streamdown } from "streamdown";
 import { useSessionEvents } from "../use-session-events";
 import { useFollowBottom } from "../use-follow-bottom";
 import { TaskTranscript } from "./TaskTranscript";
-import { LuArrowUp, LuCheck, LuChevronLeft, LuChevronRight, LuFileText, LuFolderOpen, LuGitBranch, LuGripVertical, LuListChecks, LuPen, LuPlay, LuPlus, LuRepeat, LuRotateCcw, LuSettings, LuSquare, LuTrash2, LuX } from "react-icons/lu";
+import { LuArrowUp, LuCheck, LuChevronLeft, LuChevronRight, LuFileText, LuFolderOpen, LuGitBranch, LuGripVertical, LuListChecks, LuPen, LuPlay, LuPlus, LuReply, LuRotateCcw, LuSettings, LuSquare, LuTrash2, LuX } from "react-icons/lu";
 
 /**
  * A task in the workspace is not a session: it has no events, so what a task
@@ -1202,7 +1202,7 @@ function TaskRow({
       <div className="flex shrink-0 items-center gap-1 opacity-0 transition focus-within:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100">
         {onFollowUp && (
           <ActionBtn title={t("Follow up")} onClick={onFollowUp} aria-label={t("Follow up")}>
-            <LuRepeat className="h-3.5 w-3.5" />
+            <LuReply className="h-3.5 w-3.5" />
           </ActionBtn>
         )}
         <RunControls task={task} onStart={onStart} onRerun={onRerun} />
