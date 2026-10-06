@@ -30,6 +30,7 @@ export const SETTINGS_INDEX: SettingEntry[] = [
   { tab: "general", section: msg("For new chats"), title: msg("Effort"), words: "thinking reasoning level effort denken nachdenken" },
   { tab: "general", section: msg("Context"), title: msg("Context window"), words: "tokens ctx context window size length kontext fenster" },
   { tab: "general", section: msg("Context"), title: msg("Kept when compacting"), words: "compaction compact keep recent summary kompaktieren zusammenfassung" },
+  { tab: "general", section: msg("One chat at a time"), title: msg("Only one active session"), words: "active single one chat concurrent simultaneously only session eins gleichzeitig" },
   { tab: "general", section: msg("Routine reports"), title: msg("Routine reports"), words: "routine schedule cron report destination channel bericht" },
   { tab: "tools", title: msg("Default tools"), words: "tools enable disable default on off werkzeuge" },
   { tab: "skills", title: msg("Skills"), words: "skill procedure import repository fähigkeiten" },
