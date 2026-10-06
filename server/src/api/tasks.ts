@@ -168,9 +168,10 @@ export function tasksRouter(): Router {
   });
 
   // Queue loop: drive this project's Tasks through the durable queue. Starting
-  // launches the loop (one agent at a time across all projects); stopping unwinds
-  // the current attempt and clears the loop. A failed Task cannot be bypassed, so
-  // the loop stalls on it until the user intervenes.
+  // launches the loop (one agent at a time across all projects); stopping clears
+  // the loop and stops queueing further items, but leaves any attempt already in
+  // flight running to completion. A failed Task cannot be bypassed, so the loop
+  // stalls on it until the user intervenes.
   router.post("/projects/:name/queue/start", (req, res) => {
     try {
       startLoop(projectPath(req.params.name));

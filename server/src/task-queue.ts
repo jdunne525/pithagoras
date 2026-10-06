@@ -1,5 +1,5 @@
 import { getSetting, putSetting, listTasksByWorkspace, settingValuesWithPrefix } from "./db.js";
-import { startTask, stopTask, hasLiveTaskRun, isRunning } from "./task-execution.js";
+import { startTask, hasLiveTaskRun } from "./task-execution.js";
 import * as tasks from "./tasks.js";
 
 /**
@@ -99,9 +99,11 @@ export function startLoop(workspace: string): void {
 }
 
 /**
- * Stop the queue loop for a project: clear the timer, drop the in-memory loop,
- * and unwind any attempt it launched. Persisting not-running means a restart
- * will not resume the loop on its own.
+ * Stop the queue loop for a project: clear the timer and drop the in-memory
+ * loop so no further items are queued. Unlike an individual task stop, this
+ * leaves any attempt this loop already launched running to completion —
+ * stopping the queue must not interrupt work that is already in flight.
+ * Persisting not-running means a restart will not resume the loop on its own.
  */
 export function stopLoop(workspace: string): void {
   const holder = loops.get(workspace);
@@ -110,11 +112,6 @@ export function stopLoop(workspace: string): void {
     if (holder.timer) clearTimeout(holder.timer);
   }
 
-  const state = loadLoopState(workspace);
-  // Ask the execution module to abort the attempt it launched, if any.
-  if (state.currentTask && tasks.getTask(state.currentTask)) {
-    if (isRunning(state.currentTask)) stopTask(state.currentTask);
-  }
   saveLoopState(workspace, { running: false, currentTask: null });
 }
 
