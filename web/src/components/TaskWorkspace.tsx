@@ -193,12 +193,6 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
   const isMobile = useIsMobile();
   const [rows, setRows] = useState<MockTask[]>([]);
   const [tab, setTab] = useState<Tab>("actions");
-  // Client-side view concern (§18): which completed Tasks have been acknowledged
-  // and are therefore eligible to leave the active "Actions" view. A Task that
-  // has just completed stays visible here until acknowledged, so completion is
-  // actually seen before it moves into history. Nothing is persisted — this is
-  // purely what the active list shows, not a stored field.
-  const [acknowledged, setAcknowledged] = useState<Set<string>>(new Set());
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [resumeText, setResumeText] = useState("");
   const [composerOpen, setComposerOpen] = useState(false);
@@ -243,7 +237,6 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
   useEffect(() => {
     let cancelled = false;
     setRows([]);
-    setAcknowledged(new Set());
     setError(null);
     api.listTasks(projectName)
       .then((tasks) => {
@@ -443,16 +436,12 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
   // Mark a task complete no matter what state it is in now — pending, running,
   // failed, stopped or already done. This is “finished by hand”, so it does not
   // start or rerun anything and leaves prior attempts as history. A task that
-  // was not yet completed simply leaves the Actions tab for the Completed one.
+  // was not yet completed simply leaves the Actions tab for the Completed one,
+  // because the Pending view only ever lists non-completed Tasks.
   const markComplete = async (id: string) => {
     try {
       const updated = await api.completeTask(projectName, id);
       setRows((prev) => prev.map((x) => (x.id === id ? mapTask(updated) : x)));
-      // Marking complete is an explicit, hands-on action, so it counts as
-      // acknowledging (§18): the Task has been dealt with directly, and it leaves
-      // the Actions tab for Completed right away — matching what this handler's
-      // comment promises, unlike a queue-finished Task which stays until seen.
-      acknowledge(id);
       notifyActivity();
     } catch {
       setError("Could not mark the task complete.");
@@ -588,54 +577,20 @@ ${base}
   // sending does nothing until it is wired up.
 
 
-  // Acknowledge a completed Task so it can leave the active view (§18). This is
-  // only a client-side view concern — no API call, no stored field.
-  const acknowledge = useCallback((id: string) => {
-    setAcknowledged((prev) => {
-      if (prev.has(id)) return prev;
-      const next = new Set(prev);
-      next.add(id);
-      return next;
-    });
-  }, []);
-
-  // Walking into Completed marks every completed Task acknowledged at once (§18),
-  // so they all become eligible to leave the active view on the next pass.
-  const acknowledgeAllCompleted = useCallback(() => {
-    setAcknowledged((prev) => {
-      let changed = false;
-      const next = new Set(prev);
-      for (const x of rows) if (x.status === "completed") { next.add(x.id); changed = true; }
-      return changed ? next : prev;
-    });
-  }, [rows]);
-
-  // One list filtered by the open tab. Completed shows every finished Task,
-  // regardless of acknowledgment. Actions shows every non-completed Task plus
-  // any completed one not yet acknowledged — a just-finished Task stays put here
-  // so its completion is actually seen before it moves into history. An
-  // acknowledged Task still renders while it is the one being viewed or selected,
-  // so picking it does not yank its row out mid-view; it drops away once the user
-  // leaves it (a fresh active-view pass never brings it back).
+  // One list filtered by the open tab. The Pending ("Actions") tab shows every
+  // non-completed Task; Completed shows every finished one. Pending is defined
+  // purely by status — matching how the server counts pending tasks for the
+  // sidebar badge — so it never lingers with completed Tasks: navigating away
+  // and back cannot resurrect them, and nothing stays stuck once it is done.
   const actions =
     tab === "actions"
-      ? rows.filter((x) => {
-          if (x.status !== "completed") return true;
-          if (!acknowledged.has(x.id)) return true; // recently completed, unacked
-          return x.id === selectedId || x.id === viewingMockId; // shown while viewed
-        })
+      ? rows.filter((x) => x.status !== "completed")
       : rows.filter((x) => x.status === "completed");
 
   // Badge counts for each tab, computed independently of the open tab so they
-  // stay correct no matter where the user is. Pending lists every non-completed
-  // Task plus a completed one still waiting to be acknowledged; Completed lists
-  // every finished Task. Acknowledged, finished Tasks are never counted as
-  // pending — counting off the per-tab `actions` list below would instead show
-  // the completed total (and fold acknowledged Tasks in) whenever the Completed
-  // tab was open.
-  const pendingCount = rows.filter(
-    (x) => x.status !== "completed" || !acknowledged.has(x.id),
-  ).length;
+  // stay correct no matter where the user is. Pending lists every
+  // non-completed Task; Completed lists every finished Task.
+  const pendingCount = rows.filter((x) => x.status !== "completed").length;
   const completedCount = rows.filter((x) => x.status === "completed").length;
 
   return (
@@ -729,18 +684,13 @@ ${base}
           <div className="flex border-b border-line">
             {TABS.map((label) => {
               // Count what each tab shows, independent of the open tab so the
-              // badges never drift: Pending includes the recently
-              // completed-but-unacked tasks, Completed lists them all.
+              // badges never drift: Pending lists non-completed Tasks,
+              // Completed lists every finished one.
               const n = label === "actions" ? pendingCount : completedCount;
               return (
                 <button
                   key={label}
-                  onClick={() => {
-                    // Entering Completed acknowledges every completed Task at once
-                    // (§18), so they all become eligible to leave the active view.
-                    if (label === "completed") acknowledgeAllCompleted();
-                    setTab(label);
-                  }}
+                  onClick={() => setTab(label)}
                   aria-current={tab === label}
                   className={`flex items-center gap-1.5 border-b -mb-px pb-2 px-3 text-sm font-medium transition ${
                     tab === label
@@ -800,10 +750,6 @@ ${base}
                   onSelect={() => {
                     setSelectedId(task.id);
                     setComposerOpen(false);
-                    // Viewing a just-completed Task acknowledges it (§18): it is now
-                    // eligible to leave the active view. It stays visible while still
-                    // selected, then drops away on the next pass.
-                    if (task.status === "completed") acknowledge(task.id);
                     // Picking another task leaves any inline session view, since
                     // that view belongs to the task it was opened for.
                     if (viewingMockId && viewingMockId !== task.id) setViewingMockId(null);
@@ -814,9 +760,6 @@ ${base}
                   onOpenSession={() => {
                     setSelectedId(task.id);
                     setComposerOpen(false);
-                    // Opening the session of a completed Task counts as viewing it,
-                    // so it is acknowledged (§18) and can leave the active view.
-                    acknowledge(task.id);
                     setViewingMockId(task.id);
                   }}
                   onStart={() => task.status === "running" ? stop() : start(task.id)}
