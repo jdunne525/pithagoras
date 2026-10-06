@@ -11,7 +11,7 @@ import { Streamdown } from "streamdown";
 import { useSessionEvents } from "../use-session-events";
 import { useFollowBottom } from "../use-follow-bottom";
 import { TaskTranscript } from "./TaskTranscript";
-import { LuArrowUp, LuCheck, LuChevronLeft, LuChevronRight, LuFileText, LuGripVertical, LuListChecks, LuPen, LuPlay, LuPlus, LuRepeat, LuRotateCcw, LuSquare, LuTrash2, LuX } from "react-icons/lu";
+import { LuArrowUp, LuCheck, LuChevronLeft, LuChevronRight, LuFileText, LuFolderOpen, LuGitBranch, LuGripVertical, LuListChecks, LuPen, LuPlay, LuPlus, LuRepeat, LuRotateCcw, LuSettings, LuSquare, LuTrash2, LuX } from "react-icons/lu";
 
 /**
  * A task in the workspace is not a session: it has no events, so what a task
@@ -663,6 +663,40 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
             >
               <LuPlus className="h-3.5 w-3.5" />
               {t("New task")}
+            </button>
+          </div>
+          {/* Folder and git mirror the two the chat shows at the top of its
+              header; settings opens the project, like the projects page does.
+              All three live on this project, so they reach it through its folder.
+              Execution is a later phase, so these point at the project itself
+              rather than an open files/git pane. */}
+          <div className="flex shrink-0 items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => navigate(`/sessions?folder=${encodeURIComponent(`project:${projectName}`)}`)}
+              className="panel-toggle relative rounded-lg border px-2 py-1 text-xs text-fg-muted transition hover:bg-fg/5 hover:text-fg [&>svg]:h-3.5 [&>svg]:w-3.5"
+              title={t("Browse the files in this project's folder")}
+              aria-label={t("Browse the files in this project's folder")}
+            >
+              <LuFolderOpen />
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate(`/sessions?folder=${encodeURIComponent(`project:${projectName}`)}`)}
+              className="panel-toggle relative rounded-lg border px-2 py-1 text-xs text-fg-muted transition hover:bg-fg/5 hover:text-fg [&>svg]:h-3.5 [&>svg]:w-3.5"
+              title={t("What changed, commits and branches — for this project's repository")}
+              aria-label={t("What changed, commits and branches — for this project's repository")}
+            >
+              <LuGitBranch />
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate("/projects")}
+              className="panel-toggle relative rounded-lg border px-2 py-1 text-xs text-fg-muted transition hover:bg-fg/5 hover:text-fg [&>svg]:h-3.5 [&>svg]:w-3.5"
+              title={t("Project settings")}
+              aria-label={t("Project settings")}
+            >
+              <LuSettings />
             </button>
           </div>
         </div>
