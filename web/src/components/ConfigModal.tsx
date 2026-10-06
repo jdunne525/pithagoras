@@ -841,6 +841,9 @@ function GeneralPanel({ onError, onProviders }: { onError: (e: string) => void; 
   const [ctxNote, setCtxNote] = useState<(() => string) | null>(null);
   /** The window's field, which what is saved elsewhere does not overwrite while it is being typed in. */
   const ctxField = useRef<HTMLInputElement>(null);
+  // One chat at a time. Read fresh from what was loaded; the server keeps its
+  // value in a different setting than the three above.
+  const [singleActive, setSingleActive] = useState<boolean>(r?.settings.singleActiveSession ?? false);
 
   /**
    * Each change is saved as it is made: there is no form to forget to submit.
@@ -872,6 +875,7 @@ function GeneralPanel({ onError, onProviders }: { onError: (e: string) => void; 
     if (!r) return;
     if (!saver.busy) setStored(r.stored);
     setKeepRecent(r.compaction.keepRecentTokens);
+    setSingleActive(r.settings.singleActiveSession);
     setCtxSaved(r.contextDefault);
     if (document.activeElement !== ctxField.current) {
       setCtxText(r.contextDefault ? String(r.contextDefault) : "");
@@ -879,6 +883,17 @@ function GeneralPanel({ onError, onProviders }: { onError: (e: string) => void; 
   }, [r]);
 
   const load = () => settings.reload();
+
+  /** On, off, on its own — kept apart from the defaults so it saves without them. */
+  const saveSingleActive = async (on: boolean) => {
+    try {
+      const res = await api.saveSettings({ singleActiveSession: on });
+      setSingleActive(res.settings.singleActiveSession);
+      void load();
+    } catch (e) {
+      onError((e as Error).message);
+    }
+  };
 
   /**
    * Saved on release, on its own.
@@ -1048,6 +1063,20 @@ function GeneralPanel({ onError, onProviders }: { onError: (e: string) => void; 
             <span className="inline-flex items-center gap-1"><LuBrain className="h-3 w-3" /> {t("thinks — effort applies")}</span>
             <button type="button" onClick={onProviders} className="ml-auto text-accent hover:underline">{t("Providers ›")}</button>
           </p>
+        </div>
+      </Section>
+
+      <Section
+        title={t("One chat at a time")}
+        hint={t("A second chat waits its turn until the first has fully stopped — compaction included, not just counted.")}
+      >
+        <div className="flex items-center justify-between gap-3 rounded-xl border border-line bg-raised/40 p-3">
+          <div className="text-sm">{t("Only one active session")}</div>
+          <Switch
+            on={singleActive}
+            onChange={(on) => void saveSingleActive(on)}
+            label={t("Only one active session")}
+          />
         </div>
       </Section>
 

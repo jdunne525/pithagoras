@@ -118,6 +118,10 @@ export const startTask = (taskId: string): { task: db.TaskRow; attempt: db.TaskA
   void sessions.prompt(
     sessionId,
     buildTaskPrompt(task, { maxAttempts: DEFAULT_MAX_ATTEMPTS, projectInstructions }),
+    // A Task's autonomous run is not a chat a person is watching, so it does
+    // not join the single-active queue behind a running session; it runs on its
+    // own schedule instead.
+    { bypassSingleActive: true },
   )
     .catch((e: unknown) => {
       // The run could not even begin: settle it honestly rather than leave it

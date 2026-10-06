@@ -34,7 +34,7 @@ import {
   writeAgentFile,
   type WizardInput,
 } from "./agent-setup.js";
-import { sessions, CommandFailed, EXECUTOR_KIND, IMAGE_ROOT } from "./session-manager.js";
+import { sessions, CommandFailed, EXECUTOR_KIND, IMAGE_ROOT, PromptQueuedForSingleActive } from "./session-manager.js";
 import { reconcileInterruptedTasks, recoverQueuedLoopsAfterRestart } from "./task-recovery.js";
 import { abortLiveRun } from "./task-execution.js";
 import { readNtfyConfig, saveNtfyConfig, startNtfyNotifications, stopNtfyNotifications } from "./ntfy.js";
@@ -108,6 +108,7 @@ import {
   setContextLimit,
   setDefaultContextLimit,
   setSettings,
+  setSingleActiveSession,
 } from "./db.js";
 
 const WORKSPACE_ROOT = workspaceRoot();
@@ -199,6 +200,11 @@ app.put("/api/settings", async (req, res) => {
   if (typeof provider === "string") patch.provider = provider.trim();
   if (typeof model === "string") patch.model = model.trim();
   if (typeof thinkingLevel === "string") patch.thinkingLevel = thinkingLevel.trim();
+  // On its own: one active session at a time. Stored in the portal's database,
+  // read fresh by the session manager, so a flip takes effect without a restart.
+  if (typeof req.body?.singleActiveSession === "boolean") {
+    setSingleActiveSession(req.body.singleActiveSession);
+  }
   // Checked before anything is written. Rejecting half way through left the
   // provider changed on a request that answered 400, which is a worse outcome
   // than either accepting or refusing the lot. Rejected rather than clamped
@@ -247,6 +253,7 @@ app.put("/api/settings", async (req, res) => {
   res.json({
     settings,
     compaction,
+    singleActiveSession: settings.singleActiveSession,
     refreshed,
     note:
       tokens !== undefined
@@ -724,6 +731,10 @@ app.post("/api/sessions/:id/prompt", promptJson, async (req, res) => {
     // An error here as well was the same words in a banner, and the command
     // put back in the box.
     if (e instanceof CommandFailed) return res.json({ ok: true, failed: e.message });
+    // Held because one session is already active under the single-active
+    // setting: nothing was sent, so the composer is told it is waiting its
+    // turn rather than that it failed.
+    if (e instanceof PromptQueuedForSingleActive) return res.json({ ok: true, queued: true });
     res.status(500).json({ error: (e as Error).message });
   }
 });

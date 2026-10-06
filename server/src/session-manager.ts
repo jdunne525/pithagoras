@@ -56,6 +56,7 @@ import {
   browserAllowlist,
   routineGuards,
   updateSession,
+  singleActiveSessionEnabled,
   type EventRow,
   sessionSubagentModel,
 } from "./db.js";
@@ -131,6 +132,11 @@ export interface PromptOptions {
   images?: Attached[];
   /** Mid-run, go into the run that is going instead of waiting for it to end. */
   steer?: boolean;
+  /**
+   * Skip the single-active hold: an internal prompt — a compaction's resume —
+   * is for the active session itself, so it is never the one held back.
+   */
+  bypassSingleActive?: boolean;
 }
 
 /** A message sent into a run, until pi takes it in: see SessionManager.waiting. */
@@ -297,6 +303,69 @@ class SessionManager extends EventEmitter {
   constructor() {
     super();
     this.setMaxListeners(0);
+  }
+
+  /**
+   * Requests to initiate or send a message, held back because one session is
+   * already active under the single-active setting. Each waits for the run it
+   * is behind to stop for good — compaction and its auto-resume included — then
+   * the next is released, one at a time. See prompt() and processQueue().
+   */
+  private singleActiveQueue: { sessionId: string; message: string; options?: PromptOptions }[] = [];
+
+  /**
+   * Whether any session is still busy — running, compacting, or mid-turn in a
+   * compaction that will resume — so the single-active setting knows one is
+   * already holding the room. Only free when none of these hold.
+   */
+  private isActive(sessionId: string): boolean {
+    return (
+      this.inRun.has(sessionId) ||
+      this.compacting.has(sessionId) ||
+      this.compactionInterruptedRun.has(sessionId)
+    );
+  }
+
+  /**
+   * The interactive session holding the room, under the single-active setting:
+   * a busy chat other than the one asked for, else nowhere. Autonomous runs —
+   * Tasks, routines — neither wait nor hold; they run on their own schedule and
+   * must not lock out a person's chat. Re-queuing a request aimed at the busy
+   * one would loop, so the target is skipped.
+   */
+  private blockedBy(sessionId: string): string | null {
+    for (const id of this.live.keys()) {
+      if (id === sessionId) continue;
+      if (!this.isActive(id)) continue;
+      const kind = getSession(id)?.kind;
+      if (kind === "agent") return id;
+    }
+    return null;
+  }
+
+  /**
+   * Release the next held request, if the room is free. One at a time:
+   * starting one makes it the active session, so the rest wait for it to stop,
+   * exactly as they waited for the last. Stays put while the requested session
+   * is itself still busy, or another holds the room — going ahead there would
+   * start two at once, which is what the setting exists to prevent.
+   */
+  private async processQueue(): Promise<void> {
+    while (this.singleActiveQueue.length) {
+      if (!singleActiveSessionEnabled()) {
+        this.singleActiveQueue = [];
+        return;
+      }
+      const next = this.singleActiveQueue[0];
+      if (next && (this.isActive(next.sessionId) || this.blockedBy(next.sessionId))) return;
+      this.singleActiveQueue.shift();
+      void this.prompt(next.sessionId, next.message, next.options).catch((e) => {
+        // Re-blocked before it could go: still queued, nothing lost.
+        if (e instanceof PromptQueuedForSingleActive) return;
+        console.error(`[portal] a queued single-active message failed: ${String(e)}`);
+      });
+      return;
+    }
   }
 
   /**
@@ -663,6 +732,9 @@ class SessionManager extends EventEmitter {
       this.cancelPending.delete(sessionId);
       // No agent run, so no agent_settled arrives to clear it.
       this.mark(sessionId, "idle");
+      // The session has fully stopped compacting, so under the single-active
+      // setting it may hand the room to the next request, if it was holding it.
+      if (singleActiveSessionEnabled()) void this.processQueue();
     }
   }
 
@@ -1108,6 +1180,10 @@ class SessionManager extends EventEmitter {
         this.inRun.delete(sessionId);
         this.settleWaiting(sessionId);
         if (!this.failed.delete(sessionId)) this.mark(sessionId, "idle");
+        // A run ends here — no retry, no compaction, no auto-resume left to
+        // land — so under the single-active setting the room may pass to the
+        // next request waiting its turn.
+        if (singleActiveSessionEnabled()) void this.processQueue();
       }
       // A compaction caught mid-turn — a run was still going when it began —
       // leaves the turn unfinished: pi either resumes it itself (overflow,
@@ -1149,6 +1225,9 @@ class SessionManager extends EventEmitter {
         updateSession(sessionId, { status: "error", last_error: message });
         this.record(sessionId, "portal_status", { status: "error", error: message });
       }
+      // A crashed run is over whether or not it said so, so under the
+      // single-active setting the room it left may pass to the next waiter.
+      if (singleActiveSessionEnabled()) void this.processQueue();
       executor.cleanup?.(sessionId).catch(() => {});
     });
 
@@ -1190,6 +1269,20 @@ class SessionManager extends EventEmitter {
    * nothing to show for them otherwise.
    */
   async prompt(sessionId: string, message: string, options?: PromptOptions, insideEdit = false): Promise<void> {
+    // Under the single-active setting one session holds the room and every
+    // other waits its turn. A message for the active session itself still goes
+    // in — pi queues it into the run going — so only a different session is
+    // held back. An edit or an internal prompt keeps its own ordering and is
+    // never queued here.
+    if (
+      !insideEdit &&
+      !options?.bypassSingleActive &&
+      singleActiveSessionEnabled() &&
+      this.blockedBy(sessionId)
+    ) {
+      this.singleActiveQueue.push({ sessionId, message, options });
+      throw new PromptQueuedForSingleActive();
+    }
     // Callers ask first, where there is someone to tell; this is so that one
     // which did not is refused too, before the session is marked as anything.
     const refused = options?.images?.length ? await picturesRefused(message) : undefined;
@@ -2331,6 +2424,9 @@ class SessionManager extends EventEmitter {
       await this.settleCompaction(sessionId);
       updateSession(sessionId, { status: "idle" });
       this.record(sessionId, "portal_status", { status: "idle", aborted: true });
+      // Stopped for good now — no run, no compaction, no resume left — so the
+      // single-active room may pass to the next request waiting its turn.
+      if (singleActiveSessionEnabled()) void this.processQueue();
     } finally {
       stopped();
       if (this.sending.get(sessionId) === tail) this.sending.delete(sessionId);
@@ -2453,6 +2549,19 @@ class SessionManager extends EventEmitter {
 
   async shutdown(): Promise<void> {
     await Promise.all([...this.live.keys()].map((id) => this.stop(id)));
+  }
+}
+
+/**
+ * Thrown by prompt() when only one session may be active at a time and another
+ * already is. The request is not refused — it is held in the queue and sent the
+ * moment the active one stops. Sent so the API can answer "queued" instead of
+ * failing, rather than hanging the request open until the other run ends.
+ */
+export class PromptQueuedForSingleActive extends Error {
+  constructor() {
+    super("Only one session can be active at a time; this message is waiting its turn.");
+    this.name = "PromptQueuedForSingleActive";
   }
 }
 

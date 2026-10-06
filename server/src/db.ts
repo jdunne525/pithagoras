@@ -1194,6 +1194,8 @@ export interface GlobalSettings {
   provider: string;
   model: string;
   thinkingLevel: string;
+  /** Only one session active at a time: further requests wait their turn. */
+  singleActiveSession: boolean;
 }
 
 /**
@@ -1209,6 +1211,7 @@ const SETTING_DEFAULTS = (): GlobalSettings => ({
   model: process.env.PI_MODEL || piSetting("defaultModel") || "",
   thinkingLevel:
     process.env.PI_THINKING_LEVEL || piSetting("defaultThinkingLevel") || "medium",
+  singleActiveSession: false,
 });
 
 /** One setting the portal keeps, read on its own rather than with the whole table. */
@@ -1246,7 +1249,31 @@ export function getSettings(): GlobalSettings {
     provider: stored.provider || defaults.provider,
     model: stored.model || defaults.model,
     thinkingLevel: stored.thinkingLevel || defaults.thinkingLevel,
+    singleActiveSession: singleActiveSessionEnabled(),
   };
+}
+
+/**
+ * Whether only one session may be active at a time. Stored as a string in the
+ * settings table — "true" or absent — read fresh each call so a change takes
+ * effect without a restart.
+ */
+export function singleActiveSessionEnabled(): boolean {
+  return getSetting("singleActiveSession") === "true";
+}
+
+/**
+ * Turn the single-active setting on or off, stored the same way reading expects:
+ * "true" when on, cleared when off. The write is atomic, so a reader never sees
+ * half a value.
+ */
+export function setSingleActiveSession(on: boolean): void {
+  const upsert = getDb().prepare(
+    "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+  );
+  const clear = getDb().prepare("DELETE FROM settings WHERE key = ?");
+  if (on) upsert.run("singleActiveSession", "true");
+  else clear.run("singleActiveSession");
 }
 
 /**

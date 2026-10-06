@@ -1072,6 +1072,8 @@ export interface GlobalSettings {
   provider: string;
   model: string;
   thinkingLevel: string;
+  /** When true, only one session may be active at a time — others wait their turn. */
+  singleActiveSession: boolean;
 }
 
 export interface PiCommand {
