@@ -11,7 +11,7 @@ import { Streamdown } from "streamdown";
 import { useSessionEvents } from "../use-session-events";
 import { useFollowBottom } from "../use-follow-bottom";
 import { TaskTranscript } from "./TaskTranscript";
-import { LuArrowUp, LuCheck, LuChevronLeft, LuChevronRight, LuFileText, LuFolderOpen, LuGitBranch, LuGripVertical, LuListChecks, LuPen, LuPlay, LuPlus, LuReply, LuRotateCcw, LuSettings, LuSquare, LuTrash2, LuX } from "react-icons/lu";
+import { LuArrowUp, LuCheck, LuChevronLeft, LuChevronRight, LuFileText, LuFolderOpen, LuGitBranch, LuGripVertical, LuListChecks, LuPen, LuPlus, LuReply, LuRotateCcw, LuSettings, LuSquare, LuTrash2, LuX } from "react-icons/lu";
 
 /**
  * A task in the workspace is not a session: it has no events, so what a task
@@ -917,27 +917,23 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
   );
 }
 
-/** The Run and Rerun controls, shared by a task row and the session header, so
-    both show the same buttons for the same states (Phase 5).
+/** The Rerun control, shown alongside the Stop button in the session header,
+    so both places present the same buttons for the same states.
 
-    * Run starts this Task immediately, bypassing the queue: it inherently resets
-      a failed/stopped/completed Task before running a fresh attempt.
     * Rerun only resets a Task to pending without starting it, so it can be
-      reordered and Run later. Neither touches an existing attempt's history.
-    * Resume is Phase 6; keep these two distinct from it. */
+      reordered and run later via the project's Start queue button. It does not
+      touch an existing attempt's history.
+
+    There is intentionally no play/run (triangle) button here: Tasks are started
+    by running the project's autonomous queue, never by a per-task triangle. */
 function RunControls({ task, onStart, onRerun, onComplete }: { task: MockTask; onStart: () => void; onRerun?: () => void; onComplete?: () => void }) {
   const atMax = task.attempts >= task.maxAttempts;
-  const canRun = task.status !== "running" && !atMax && task.status !== "completed";
   const canRerun = !!onRerun && ["failed", "stopped", "completed"].includes(task.status) && task.attempts > 0;
   return (
     <div className="inline-flex items-center gap-0.5">
       {task.status === "running" ? (
         <ActionBtn title={t("Stop")} onClick={onStart} aria-label={t("Stop")}>
           <span className="h-3 w-3 rounded-sm bg-current" />
-        </ActionBtn>
-      ) : canRun ? (
-        <ActionBtn title={t(task.status === "pending" ? "Run" : "Run again")} onClick={onStart} aria-label={t(task.status === "pending" ? "Run" : "Run again")}>
-          <LuPlay className="h-3.5 w-3.5" />
         </ActionBtn>
       ) : null}
       {canRerun ? (
@@ -1205,6 +1201,7 @@ function TaskRow({
             <LuReply className="h-3.5 w-3.5" />
           </ActionBtn>
         )}
+        {/* No play/run button here: tasks are started by running the project's queue, not by a per-task triangle. */}
         <RunControls task={task} onStart={onStart} onRerun={onRerun} />
         {onRename && !editing && (
           <ActionBtn title={t("Edit task")} onClick={() => setEditing(true)} aria-label={t("Edit task")}>
