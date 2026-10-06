@@ -664,13 +664,13 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
               <LuPlus className="h-3.5 w-3.5" />
               {t("New task")}
             </button>
-          </div>
-          {/* Folder and git mirror the two the chat shows at the top of its
-              header; settings opens the project, like the projects page does.
-              All three live on this project, so they reach it through its folder.
-              Execution is a later phase, so these point at the project itself
-              rather than an open files/git pane. */}
-          <div className="flex shrink-0 items-center gap-1.5">
+            {/* Folder and git mirror the two the chat shows at the top of its
+                header; settings opens the project, like the projects page does.
+                They sit with the queue controls on the right of the title row,
+                not on their own line. None has its own pane on this page yet, so
+                both the folder and the branch lead into the project itself, where
+                its files and repository are opened from a session there; settings
+                goes to the project page. */}
             <button
               type="button"
               onClick={() => navigate(`/sessions?folder=${encodeURIComponent(`project:${projectName}`)}`)}
