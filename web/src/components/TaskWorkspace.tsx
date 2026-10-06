@@ -48,9 +48,6 @@ interface MockTask {
   startedAt?: string;
   failedAt?: string;
   completedAt?: string;
-  /** One array of messages per attempt that actually ran. Seeded lazily, kept
-      once a task is open so anything typed to resume stays put. */
-  msgs?: MockMsg[][];
 }
 
 let nextId = 100;
@@ -280,15 +277,22 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
   const selected = useMemo(() => rows.find((x) => x.id === selectedId) ?? null, [rows, selectedId]);
   const viewedTask = useMemo(() => rows.find((x) => x.id === viewingMockId) ?? null, [rows, viewingMockId]);
   // The "View session" messages are seeded once per task and kept, rather than
-  // rebuilt on every render. Rebuilding each render would hand the conversation
-  // scroller a fresh array every paint, making its follow-the-bottom effect run
-  // on re-render instead of only when the content actually changes — the way
-  // the main chat follows on a real change in content length. Caching keeps the
-  // scroll behaviour honest and stops every message from re-mounting.
+  // rebuilt whenever the project list refreshes. They are cached by task id in a
+  // ref, because the list is refreshed continuously while the queue runs, and
+  // each refresh builds a fresh set of Task objects. Rebuilding would hand the
+  // conversation scroller a new array (with new message ids) on every refresh,
+  // making its follow-the-bottom effect re-run and every message re-mount —
+  // which fights the auto-scroll. Keeping one stable array per task, the way the
+  // main chat keeps its transcript stable, lets the scroller follow only when the
+  // content really changes and never churns the messages out from under it.
+  const viewMsgCache = useRef<Map<string, MockMsg[][]>>(new Map());
   const viewMsgs = useMemo(() => {
     if (!viewedTask) return [];
-    if (!viewedTask.msgs) viewedTask.msgs = seedMessages(viewedTask);
-    return viewedTask.msgs;
+    const existing = viewMsgCache.current.get(viewedTask.id);
+    if (existing) return existing;
+    const msgs = seedMessages(viewedTask);
+    viewMsgCache.current.set(viewedTask.id, msgs);
+    return msgs;
   }, [viewedTask]);
   // A task row is being renamed, or a new one is being written. On a phone the
   // virtual keyboard leaves very little room, so while either is open we drop
