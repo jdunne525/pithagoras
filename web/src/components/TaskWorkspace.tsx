@@ -507,15 +507,25 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
 
   // Follow up (as CodeLoop does on its tasks page): open the same “New task”
   // dialog used to create one, but pre-fill the box with the chosen task so a
-  // related task can be sent at once. The original prompt sits under a header
-  // marking this a follow-up, using the same format CodeLoop uses, so the user
-  // can edit it before creating. Nothing runs until they submit.
+  // related task can be sent at once. The original prompt is wrapped in the
+  // exact heading + body CodeLoop uses for a follow-up, so the user can edit it
+  // before creating. Nothing runs until they submit.
   const startFollowUp = useCallback((task: MockTask) => {
     const base = (task.desc || task.text).trim();
     if (!base) return;
     setSelectedId(task.id);
     setTab("actions");
-    setDraft(`Follow-up to the previous task:\n\n${base}`);
+    setDraft(`
+
+---
+
+This is a follow-up to a task recently worked on. Please consult the git history to get context of the changes made.
+
+=== Original Prompt ===
+${base}
+
+---
+`);
     setAdding(true);
   }, []);
 
