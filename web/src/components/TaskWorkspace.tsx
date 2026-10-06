@@ -626,6 +626,18 @@ ${base}
         })
       : rows.filter((x) => x.status === "completed");
 
+  // Badge counts for each tab, computed independently of the open tab so they
+  // stay correct no matter where the user is. Pending lists every non-completed
+  // Task plus a completed one still waiting to be acknowledged; Completed lists
+  // every finished Task. Acknowledged, finished Tasks are never counted as
+  // pending — counting off the per-tab `actions` list below would instead show
+  // the completed total (and fold acknowledged Tasks in) whenever the Completed
+  // tab was open.
+  const pendingCount = rows.filter(
+    (x) => x.status !== "completed" || !acknowledged.has(x.id),
+  ).length;
+  const completedCount = rows.filter((x) => x.status === "completed").length;
+
   return (
     <div className="flex h-full min-h-0 flex-col bg-canvas">
       {/* The task list sits above the conversation. Section A is a flex item
@@ -716,9 +728,10 @@ ${base}
         <div className="flex items-center px-3 pb-2">
           <div className="flex border-b border-line">
             {TABS.map((label) => {
-              // Count what each tab actually shows: Actions includes the
-              // recently completed-but-unacked tasks, Completed lists them all.
-              const n = label === "actions" ? actions.length : rows.filter((x) => x.status === "completed").length;
+              // Count what each tab shows, independent of the open tab so the
+              // badges never drift: Pending includes the recently
+              // completed-but-unacked tasks, Completed lists them all.
+              const n = label === "actions" ? pendingCount : completedCount;
               return (
                 <button
                   key={label}
