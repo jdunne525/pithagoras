@@ -323,8 +323,25 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
     transcriptScroller.follow();
   }, [events, activeSessionId]);
 
+  // The Task whose attempts are currently loaded, tracked separately from
+  // `selected` because the queue poller rebuilds `rows` (and thus `selected`) on
+  // every tick without changing which Task is open. Comparing against this lets
+  // us tell a genuine task switch apart from a stale re-render.
+  const loadedTaskRef = useRef<string | null>(null);
   useEffect(() => {
     if (!projectName || !selected) return;
+    // Switching to a different Task must not hold onto the previous Task's
+    // attempts for the beat before this Task's own attempts finish loading —
+    // otherwise `activeAttempt` still resolves to the old attempt (the memo's
+    // `.at(-1)` fallback keeps an old session live and its SSE stream
+    // continues), which shows another Task's history: exactly the “wrong /
+    // last session” symptom. Drop both synchronously so the panel settles into
+    // loading, then fetch the new Task's attempts below.
+    if (loadedTaskRef.current !== selected.id) {
+      setActiveAttemptId(null);
+      setAttempts([]);
+    }
+    loadedTaskRef.current = selected.id;
     let cancelled = false;
     setLoadingAttempts(true);
     api.getTaskAttempts(projectName, selected.id)
