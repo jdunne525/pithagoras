@@ -535,24 +535,33 @@ ${base}
     setAdding(true);
   }, []);
 
-  // Move one task before another, then persist the new order to the server, which
-  // owns the queue. This really reorders — unlike the mock, which would not move.
-  const moveTask = useCallback(async (fromId: string, toId: string) => {
-    if (fromId === toId) return;
-    const key = `${fromId}->${toId}`;
-    if (key === lastMoveRef.current) return;
-    lastMoveRef.current = key;
-    setRows((prev) => {
-      const arr = [...prev];
-      const from = arr.findIndex((x) => x.id === fromId);
-      const to = arr.findIndex((x) => x.id === toId);
-      if (from < 0 || to < 0) return prev;
-      const [moved] = arr.splice(from, 1);
-      arr.splice(to >= 0 ? to : arr.length, 0, moved);
-      void api.setTaskOrder(projectName, arr.map((x) => x.id));
-      return arr;
-    });
-  }, [projectName]);
+  // Reorder one task relative to an anchor, then persist the new order to the
+  // server, which owns the queue. `position` decides whether the dragged task
+  // lands just before or just after the anchor. Computing the index fresh from
+  // the array without the dragged row keeps both sides correct no matter which
+  // direction the drag went — this is the one primitive both the native desktop
+  // drop and the hand-rolled touch drag call, so they always agree.
+  const moveTask = useCallback(
+    (draggedId: string, anchorId: string | null, position: "before" | "after") => {
+      if (!anchorId || anchorId === draggedId) return;
+      const key = `${draggedId}|${anchorId}|${position}`;
+      if (key === lastMoveRef.current) return;
+      lastMoveRef.current = key;
+      setRows((prev) => {
+        const without = prev.filter((x) => x.id !== draggedId);
+        const anchorIdx = without.findIndex((x) => x.id === anchorId);
+        if (anchorIdx < 0) return prev;
+        const insertAt = position === "before" ? anchorIdx : anchorIdx + 1;
+        const next: MockTask[] = [...without];
+        // Move the dragged row into place. It was removed above, so rebuild it
+        // fresh at the target slot without touching any existing task object.
+        next.splice(Math.min(insertAt, next.length), 0, { ...without[anchorIdx], id: draggedId });
+        void api.setTaskOrder(projectName, next.map((x) => x.id));
+        return next;
+      });
+    },
+    [projectName]
+  );
 
   // Guard against redundant repeats. On touch, one continuous finger drag emits
   // many pointermove events before the row leaves its slot. Without a guard the
@@ -740,9 +749,9 @@ ${base}
                     // that view belongs to the task it was opened for.
                     if (viewingMockId && viewingMockId !== task.id) setViewingMockId(null);
                   }}
-                  onMove={(toId) => moveTask(task.id, toId)}
-                  onDragStart={() => setDragId(task.id)}
-                  onDragEnd={() => setDragId(null)}
+                  onMove={moveTask}
+                  onDragStart={() => { setDragId(task.id); lastMoveRef.current = null; }}
+                  onDragEnd={() => { setDragId(null); lastMoveRef.current = null; }}
                   onOpenSession={() => {
                     setSelectedId(task.id);
                     setComposerOpen(false);
@@ -925,7 +934,7 @@ function TaskRow({
   selected: boolean;
   dragging: boolean;
   onSelect: () => void;
-  onMove: (toId: string) => void;
+  onMove: (draggedId: string, anchorId: string | null, position: "before" | "after") => void;
   onDragStart: () => void;
   onDragEnd: () => void;
   onOpenSession: () => void;
@@ -1067,10 +1076,10 @@ function TaskRow({
       const mid = rect.top + rect.height / 2;
       if (idx > 0 && ev.clientY < mid - 10) {
         const prevId = kids[idx - 1].getAttribute("data-task-id");
-        if (prevId && prevId !== task.id) onMove(prevId);
+        if (prevId && prevId !== task.id) onMove(task.id, prevId, "before");
       } else if (idx < kids.length - 1 && ev.clientY > mid + 10) {
         const nextId = kids[idx + 1].getAttribute("data-task-id");
-        if (nextId && nextId !== task.id) onMove(nextId);
+        if (nextId && nextId !== task.id) onMove(task.id, nextId, "after");
       }
     };
 
@@ -1102,7 +1111,15 @@ function TaskRow({
       onPointerDown={beginDragGesture}
       onDragStart={(e) => { onDragStart(); e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", task.id); }}
       onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; }}
-      onDrop={(e) => { e.preventDefault(); const from = e.dataTransfer.getData("text/plain"); if (from && from !== task.id) onMove(from); }}
+      onDrop={(e) => {
+        e.preventDefault();
+        const from = e.dataTransfer.getData("text/plain");
+        if (!from || from === task.id) return;
+        // Drop on the lower half of the row -> land after it; otherwise before.
+        const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+        const below = e.clientY >= rect.top + rect.height / 2;
+        onMove(from, task.id, below ? "after" : "before");
+      }}
       onDragEnd={onDragEnd}
       className={`group flex items-end gap-2 rounded-xl border px-2.5 py-1.5 transition ${dragging ? "opacity-50" : ""} ${selected ? "border-accent/60 bg-accent/5" : "border-line bg-raised/40"}`}
     >
