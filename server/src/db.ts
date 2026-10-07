@@ -101,6 +101,17 @@ export interface TaskRow {
   updated_at: string;
 }
 
+/** A command-line script owned by one Project: a named command runnable from the Scripts page. */
+export interface ScriptRow {
+  id: string;
+  /** Resolved absolute path of the project folder this Script runs in. */
+  workspace: string;
+  name: string;
+  command: string;
+  created_at: string;
+  updated_at: string;
+}
+
 /** One attempt of a Task: a pointer to the agent session it ran in (until it runs). */
 export interface TaskAttemptRow {
   id: string;
@@ -286,6 +297,22 @@ export function getDb(): Database.Database {
     -- an existing tasks table by the migration, so on an upgrade this table
     -- has no position column yet at this point and indexing it would fail --
     -- which took the server down until the migration had run.
+
+    -- A command-line script owned by one Project: a named command the user can
+    -- run from the Scripts page. It does not run autonomously — running it is
+    -- always a click — so it needs only its name and the command itself.
+    -- Names here are plain text: they live inside a JS template literal, so real
+    -- backticks would end the string by mistake.
+    CREATE TABLE IF NOT EXISTS scripts (
+      id TEXT PRIMARY KEY,
+      workspace TEXT NOT NULL,
+      name TEXT NOT NULL DEFAULT '',
+      command TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    -- Looked up by project, and looked up by id when running or deleting.
+    CREATE INDEX IF NOT EXISTS idx_scripts_workspace ON scripts(workspace);
 
     -- Each run of a Task. One row per autonomous attempt, holding the session
     -- that attempt worked in (NULL until the attempt actually starts) plus how
@@ -2069,6 +2096,50 @@ export function deleteTasksByWorkspace(workspace: string): void {
   getDb().transaction(() => {
     for (const { id } of ids) getDb().prepare("DELETE FROM task_attempts WHERE task_id = ?").run(id);
     getDb().prepare("DELETE FROM tasks WHERE workspace = ?").run(workspace);
+  })();
+}
+
+export interface NewScript {
+  id: string;
+  workspace: string;
+  name: string;
+  command: string;
+}
+
+export function createScript(row: NewScript): ScriptRow {
+  const info = getDb()
+    .prepare(
+      "INSERT INTO scripts (id, workspace, name, command, created_at, updated_at)\n       VALUES (@id, @workspace, @name, @command, datetime('now'), datetime('now'))"
+    )
+    .run({ ...row, name: row.name.trim(), command: row.command.trim() });
+  if (info.changes !== 1) throw new Error("failed to create script");
+  return getScript(row.id)!;
+}
+
+export function getScript(id: string): ScriptRow | undefined {
+  return getDb().prepare("SELECT * FROM scripts WHERE id = ?").get(id) as ScriptRow | undefined;
+}
+
+/** Every Script of a Project, in creation order. */
+export function listScriptsByWorkspace(workspace: string): ScriptRow[] {
+  return getDb()
+    .prepare("SELECT * FROM scripts WHERE workspace = ? ORDER BY created_at ASC, id ASC")
+    .all(workspace) as ScriptRow[];
+}
+
+export function deleteScript(id: string): void {
+  getDb().prepare("DELETE FROM scripts WHERE id = ?").run(id);
+}
+
+/** Drop every Script of a Project, in one transaction. Used when a Project is
+ *  deleted so its Scripts do not linger against a folder that is gone. */
+export function deleteScriptsByWorkspace(workspace: string): void {
+  const ids = getDb()
+    .prepare("SELECT id FROM scripts WHERE workspace = ?")
+    .all(workspace) as { id: string }[];
+  getDb().transaction(() => {
+    for (const { id } of ids) getDb().prepare("DELETE FROM scripts WHERE id = ?").run(id);
+    getDb().prepare("DELETE FROM scripts WHERE workspace = ?").run(workspace);
   })();
 }
 

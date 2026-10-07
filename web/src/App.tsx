@@ -15,6 +15,7 @@ import { ExtensionDialog, type UiRequest } from "./components/ExtensionDialog";
 import { SessionsPage } from "./components/SessionsPage";
 import { ProjectsPage } from "./components/ProjectsPage";
 import { TaskWorkspace } from "./components/TaskWorkspace";
+import { ScriptsPage } from "./components/ScriptsPage";
 import { AgentPage } from "./components/AgentPage";
 import { RoutinesPage } from "./components/RoutinesPage";
 import { AuditPage } from "./components/AuditPanel";
@@ -80,6 +81,9 @@ export default function App() {
       {/* A project's Tasks workspace: routed like the other pages, reached
           from that project's Tasks button. */}
       <Route path="/projects/:projectId/tasks" element={<Shell view="tasks" />} />
+      {/* A project's Scripts page: reached from that project's Scripts button, just
+          below its Tasks button. */}
+      <Route path="/projects/:projectId/scripts" element={<Shell view="scripts" />} />
       <Route path="/agent" element={<Shell view="agent" />} />
       <Route path="/routines" element={<Shell view="routines" />} />
       <Route path="/browser" element={<Shell view="browser" />} />
@@ -104,7 +108,7 @@ function Shell({
   view = "chat",
 }: {
   settings?: boolean;
-  view?: "chat" | "sessions" | "projects" | "tasks" | "agent" | "routines" | "browser" | "memory" | "audit";
+  view?: "chat" | "sessions" | "projects" | "tasks" | "scripts" | "agent" | "routines" | "browser" | "memory" | "audit";
 }) {
   const { sessionId, tab, projectId } = useParams<{ sessionId?: string; tab?: string; projectId?: string }>();
   const navigate = useNavigate();
@@ -511,7 +515,7 @@ function Shell({
         sessions={sessions}
         executor={executor}
         activeId={sessionId ?? null}
-        view={view === "tasks" ? "projects" : view}
+        view={view === "tasks" || view === "scripts" ? "projects" : view}
         hasBrowser={hasBrowser}
         hasMemory={hasMemory}
         places={places}
@@ -522,6 +526,11 @@ function Shell({
           setMobileNav(false);
           setTaskProject({ id: name, name });
           navigate(`/projects/${encodeURIComponent(name)}/tasks`);
+        }}
+        onOpenScripts={(name) => {
+          setMobileNav(false);
+          setTaskProject({ id: name, name });
+          navigate(`/projects/${encodeURIComponent(name)}/scripts`);
         }}
         onSelect={(id) => { setMobileNav(false); navigate(`/s/${id}`); }}
         onNewChat={startChat}
@@ -630,6 +639,11 @@ function Shell({
             projectName={taskProject?.name ?? projectId ?? t("your project")}
             onBack={() => navigate("/projects")}
             onTaskActivity={() => refreshPending(taskProject?.name ?? projectId ?? "")}
+          />
+        ) : view === "scripts" ? (
+          <ScriptsPage
+            projectName={taskProject?.name ?? projectId ?? t("your project")}
+            onBack={() => navigate("/projects")}
           />
         ) : view === "projects" ? (
           <ProjectsPage

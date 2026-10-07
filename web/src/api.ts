@@ -174,6 +174,17 @@ export interface Task {
   position: number;
 }
 
+/** A command-line script owned by one Project: a name and the command to run
+ *  in the project folder. Runnable from the Scripts page, not autonomously. */
+export interface Script {
+  id: string;
+  workspace: string;
+  name: string;
+  command: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface CompactionSettings {
   enabled: boolean;
   /** The floor a compaction cannot go below — kept verbatim, never summarised. */
@@ -440,6 +451,27 @@ export const api = {
     }),
   deleteTask: (project: string, id: string) =>
     json<{ ok: true }>(`/api/projects/${encodeURIComponent(project)}/tasks/${id}`, { method: "DELETE" }),
+  // --- Scripts: a project's named commands, run on demand from the Scripts page.
+  listScripts: (project: string) =>
+    json<Script[]>(`/api/projects/${encodeURIComponent(project)}/scripts`),
+  createScript: (project: string, name: string, command: string) =>
+    json<Script>(`/api/projects/${encodeURIComponent(project)}/scripts`, {
+      method: "POST",
+      body: JSON.stringify({ name, command }),
+    }),
+  deleteScript: (project: string, id: string) =>
+    json<{ ok: true }>(`/api/projects/${encodeURIComponent(project)}/scripts/${id}`, { method: "DELETE" }),
+  /** Start running one script in its project folder, unblocked: returns the run id. */
+  startScriptRun: (project: string, id: string) =>
+    json<{ ok: true; runId: string }>(`/api/projects/${encodeURIComponent(project)}/scripts/${id}/run`, {
+      method: "POST",
+    }),
+  /** Stop a running script. */
+  stopScriptRun: (project: string, id: string, runId: string) =>
+    json<{ ok: true; stopped: boolean }>(
+      `/api/projects/${encodeURIComponent(project)}/scripts/${id}/run/${runId}/stop`,
+      { method: "POST" }
+    ),
   prompt: (id: string, message: string, options?: PromptOptions) =>
     json<{ ok: true }>(`/api/sessions/${id}/prompt`, {
       method: "POST",

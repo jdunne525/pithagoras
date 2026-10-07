@@ -22,6 +22,7 @@ import {
   listSessions,
   updateSession,
   deleteTasksByWorkspace,
+  deleteScriptsByWorkspace,
   listTasksByWorkspace,
 } from "./db.js";
 import { checkWorkspace, isWithin, workspaceRoot } from "./workspaces.js";
@@ -46,6 +47,7 @@ import { packagesRouter } from "./api/packages.js";
 import { extensionsRouter } from "./api/extensions.js";
 import { channelsRouter } from "./api/channels.js";
 import { tasksRouter } from "./api/tasks.js";
+import { scriptsRouter } from "./api/scripts.js";
 import { routinesIn, routinesRouter, switchOffRoutines } from "./api/routines.js";
 import { filesRouter } from "./api/files.js";
 import { gitRouter } from "./api/git.js";
@@ -514,6 +516,7 @@ app.delete("/api/projects/:name", async (req, res) => {
       // orphaned, like the other project deletions.
       for (const task of listTasksByWorkspace(project.path)) abortLiveRun(task.id);
       deleteTasksByWorkspace(project.path);
+      deleteScriptsByWorkspace(project.path);
       deleteProjectFolder(WORKSPACE_ROOT, project.name);
       const switchedOff = switchOffRoutines([...routines, ...late]);
       getDb().transaction(() => {
@@ -1255,6 +1258,7 @@ app.use("/api", featuresRouter());
 app.use("/api", memoryRouter());
 app.use("/api", channelsRouter());
 app.use("/api", tasksRouter());
+app.use("/api", scriptsRouter());
 app.use("/api", routinesRouter());
 app.use("/api", skillsRouter());
 app.use("/api", filesRouter());

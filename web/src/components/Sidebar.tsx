@@ -22,6 +22,7 @@ import {
   LuShield,
   LuTrash2,
   LuListChecks,
+  LuPlay,
 } from "react-icons/lu";
 import type { Session } from "../api";
 import { local } from "../safe-storage";
@@ -55,6 +56,7 @@ export function Sidebar({
   onNavigate,
   onOpenFolder,
   onOpenTasks,
+  onOpenScripts,
 }: {
   forceExpanded?: boolean;
   sessions: Session[];
@@ -80,6 +82,8 @@ export function Sidebar({
   onOpenFolder: (key: string) => void;
   /** Open the tasks workspace for a project, named by its folder name. */
   onOpenTasks?: (name: string) => void;
+  /** Open the scripts page for a project, named by its folder name. */
+  onOpenScripts?: (name: string) => void;
   /** Pending-task count per project, owned by the parent so it stays current. */
   pendingByProject?: Record<string, number>;
 }) {
@@ -296,6 +300,19 @@ export function Sidebar({
                             {pendingByProject?.[f.name] ?? 0}
                           </span>
                         )}
+                      </button>
+                    )}
+                    {/* Second entry of each project's chats: open its scripts page. */}
+                    {f.kind === "project" && onOpenScripts && (
+                      <button
+                        type="button"
+                        onClick={() => onOpenScripts(f.name)}
+                        aria-label={t("Open scripts for {name}", { name: f.name })}
+                        title={t("Open scripts for {name}", { name: f.name })}
+                        className="flex w-full items-center gap-2 rounded-lg px-2 py-1 text-left text-sm text-fg-muted hover:bg-fg/5 hover:text-fg"
+                      >
+                        <LuPlay className="h-3.5 w-3.5 shrink-0 text-fg-faint" />
+                        {t("Scripts")}
                       </button>
                     )}
                     {chats.length === 0 && (
