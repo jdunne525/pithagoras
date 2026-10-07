@@ -491,6 +491,19 @@ class SessionManager extends EventEmitter {
     return this.live.has(sessionId) || this.starting.has(sessionId);
   }
 
+  /**
+   * True when a compaction caught this session's turn mid-run, so the session
+   * reads idle only between the aborted turn and the resume that follows — a
+   * gap that is not a real end. The task-completion watcher (trackEnd) must not
+   * settle a run on such an idle, or it would drop the run from its registry
+   * while the session still works and let the queue loop launch a second session
+   * for the same Task. This is the single source of truth for that question,
+   * mirroring how ntfy suppresses the same idle from a "chat finished" alert.
+   */
+  isCompacting(sessionId: string): boolean {
+    return this.compactionInterruptedRun.has(sessionId);
+  }
+
   /** Stream updates in memory; persist completed messages and lifecycle metadata. */
   private record(sessionId: string, type: string, payload: unknown): EventRow | undefined {
     if (EPHEMERAL_EVENTS.has(type)) {

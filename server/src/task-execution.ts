@@ -204,6 +204,15 @@ function trackEnd(run: TaskRun): void {
   let settled = false;
   let watchTimer: NodeJS.Timeout | undefined;
 
+  // A compaction that caught this run mid-turn leaves the turn unfinished: the
+  // session reads idle only for the gap between the aborted turn and the resume
+  // that follows, which is not a real end. While that may be happening we must
+  // never settle — doing so drops the run from the registry while the session
+  // still works, so the queue loop would launch a second session for the same
+  // Task ("the same task running twice"). We instead keep waiting for the
+  // resumed turn's own natural end, which fires settle exactly once afterwards.
+  const possiblyCompacting = (): boolean => sessions.isCompacting(run.sessionId);
+
   const settle = (): void => {
     if (settled) return;
     settled = true;
@@ -234,7 +243,7 @@ function trackEnd(run: TaskRun): void {
       confirmedRunning = true;
       return;
     }
-    if (confirmedRunning) settle();
+    if (confirmedRunning && !possiblyCompacting()) settle();
   };
   sessions.on(`session:${run.sessionId}`, handler);
 
@@ -252,7 +261,7 @@ function trackEnd(run: TaskRun): void {
     const status = db.getSession(run.sessionId)?.status;
     if (status === "running") {
       confirmedRunning = true;
-    } else if (confirmedRunning) {
+    } else if (confirmedRunning && !possiblyCompacting()) {
       settle();
     }
   }, STOP_DETECTION_GAP_MS).unref();
