@@ -85,6 +85,7 @@ Write-Host "Build complete." -ForegroundColor Green
 
 # 5. Start the server via start.ps1
 Write-Host "`nStarting server via start.ps1..." -ForegroundColor Cyan
-.\start.ps1 @([ordered]@{ Dev = $Dev; OpenBrowser = $OpenBrowser })
+$startParams = [ordered]@{ Dev = $Dev; OpenBrowser = $OpenBrowser }
+.\start.ps1 @startParams
 
 Write-Host "Done." -ForegroundColor Green
