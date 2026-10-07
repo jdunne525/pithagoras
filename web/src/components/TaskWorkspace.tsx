@@ -11,7 +11,7 @@ import { Streamdown } from "streamdown";
 import { useSessionEvents } from "../use-session-events";
 import { useFollowBottom } from "../use-follow-bottom";
 import { TaskTranscript } from "./TaskTranscript";
-import { LuArrowUp, LuCheck, LuChevronLeft, LuChevronRight, LuFileText, LuFolderOpen, LuGitBranch, LuGripVertical, LuListChecks, LuPen, LuPlus, LuReply, LuRotateCcw, LuSettings, LuSquare, LuTrash2, LuX } from "react-icons/lu";
+import { LuArrowUp, LuCheck, LuChevronLeft, LuChevronRight, LuFileText, LuGripVertical, LuListChecks, LuPen, LuPlus, LuReply, LuRotateCcw, LuSquare, LuTrash2, LuX } from "react-icons/lu";
 
 /**
  * A task in the workspace is not a session: it has no events, so what a task
@@ -641,40 +641,9 @@ ${base}
               <LuPlus className="h-3.5 w-3.5" />
               {t("New task")}
             </button>
-            {/* Folder and git mirror the two the chat shows at the top of its
-                header; settings opens the project, like the projects page does.
-                They sit with the queue controls on the right of the title row,
-                not on their own line. None has its own pane on this page yet, so
-                both the folder and the branch lead into the project itself, where
-                its files and repository are opened from a session there; settings
-                goes to the project page. */}
-            <button
-              type="button"
-              onClick={() => navigate(`/sessions?folder=${encodeURIComponent(`project:${projectName}`)}`)}
-              className="panel-toggle relative rounded-lg border px-2 py-1 text-xs text-fg-muted transition hover:bg-fg/5 hover:text-fg [&>svg]:h-3.5 [&>svg]:w-3.5"
-              title={t("Browse the files in this project's folder")}
-              aria-label={t("Browse the files in this project's folder")}
-            >
-              <LuFolderOpen />
-            </button>
-            <button
-              type="button"
-              onClick={() => navigate(`/sessions?folder=${encodeURIComponent(`project:${projectName}`)}`)}
-              className="panel-toggle relative rounded-lg border px-2 py-1 text-xs text-fg-muted transition hover:bg-fg/5 hover:text-fg [&>svg]:h-3.5 [&>svg]:w-3.5"
-              title={t("What changed, commits and branches — for this project's repository")}
-              aria-label={t("What changed, commits and branches — for this project's repository")}
-            >
-              <LuGitBranch />
-            </button>
-            <button
-              type="button"
-              onClick={() => navigate("/projects")}
-              className="panel-toggle relative rounded-lg border px-2 py-1 text-xs text-fg-muted transition hover:bg-fg/5 hover:text-fg [&>svg]:h-3.5 [&>svg]:w-3.5"
-              title={t("Project settings")}
-              aria-label={t("Project settings")}
-            >
-              <LuSettings />
-            </button>
+            {/* These buttons live at the very top of the page, on the same row as
+                the hamburger menu and the word "Tasks" (see App.tsx), not here
+                beside the queue controls. Kept out of this group on purpose. */}
           </div>
         </div>
 

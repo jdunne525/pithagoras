@@ -1,4 +1,4 @@
-import { LuListChecks, LuMenu, LuX } from "react-icons/lu";
+import { LuListChecks, LuMenu, LuX, LuFolderOpen, LuGitBranch, LuSettings } from "react-icons/lu";
 import { appendLiveEvent, resetLiveEvents } from "./live-events";
 import { fillFrom } from "./editor-fills";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -550,11 +550,45 @@ function Shell({
         <header className="app-mobile-bar flex shrink-0 items-center gap-3 border-b border-line px-3 py-2 md:hidden">
           <button type="button" aria-label={t("Open navigation")} aria-expanded={mobileNav} aria-controls="mobile-navigation" onClick={() => setMobileNav(true)} className="rounded-lg p-2 text-fg hover:bg-fg/10"><LuMenu size={20}/></button>
           {view === "tasks" ? (
-            <span className="flex min-w-0 items-center gap-1 truncate text-sm text-fg">
-              <LuListChecks className="h-4 w-4 shrink-0 text-accent" />
-              <span className="truncate">{t("Tasks")}</span>
-              <span className="truncate text-fg-faint">· {taskProject?.name ?? projectId ?? t("your project")}</span>
-            </span>
+            <div className="flex min-w-0 flex-1 items-center gap-1">
+              <span className="flex min-w-0 items-center gap-1 truncate text-sm text-fg">
+                <LuListChecks className="h-4 w-4 shrink-0 text-accent" />
+                <span className="truncate">{t("Tasks")}</span>
+                <span className="truncate text-fg-faint">· {taskProject?.name ?? projectId ?? t("your project")}</span>
+              </span>
+              {/* Folder and git mirror the two the chat shows at the top of its
+                  header; settings opens the project, like the projects page does.
+                  They live up here on the same row as the hamburger menu and the
+                  word "Tasks", not down in the task list beside the stop queue and
+                  new task buttons. */}
+              <button
+                type="button"
+                onClick={() => navigate(`/sessions?folder=${encodeURIComponent(`project:${taskProject?.name ?? projectId ?? ""}`)}`)}
+                className="panel-toggle relative rounded-lg border px-2 py-1 text-xs text-fg-muted transition hover:bg-fg/5 hover:text-fg [&>svg]:h-3.5 [&>svg]:w-3.5"
+                title={t("Browse the files in this project's folder")}
+                aria-label={t("Browse the files in this project's folder")}
+              >
+                <LuFolderOpen />
+              </button>
+              <button
+                type="button"
+                onClick={() => navigate(`/sessions?folder=${encodeURIComponent(`project:${taskProject?.name ?? projectId ?? ""}`)}`)}
+                className="panel-toggle relative rounded-lg border px-2 py-1 text-xs text-fg-muted transition hover:bg-fg/5 hover:text-fg [&>svg]:h-3.5 [&>svg]:w-3.5"
+                title={t("What changed, commits and branches — for this project's repository")}
+                aria-label={t("What changed, commits and branches — for this project's repository")}
+              >
+                <LuGitBranch />
+              </button>
+              <button
+                type="button"
+                onClick={() => navigate("/projects")}
+                className="panel-toggle relative rounded-lg border px-2 py-1 text-xs text-fg-muted transition hover:bg-fg/5 hover:text-fg [&>svg]:h-3.5 [&>svg]:w-3.5"
+                title={t("Project settings")}
+                aria-label={t("Project settings")}
+              >
+                <LuSettings />
+              </button>
+            </div>
           ) : (
             <span className="truncate text-sm text-fg">{active?.title || "Pithagoras"}</span>
           )}
