@@ -157,7 +157,14 @@ export const setTaskStatus = (id: string, status: TaskStatus): db.TaskRow | unde
   const fields: db.UpdatableTaskFields = { status };
   if (status === "running" && !task.started_at) fields.started_at = utcNow();
   else if (TERMINAL.includes(status)) fields.completed_at = utcNow();
-  else fields.completed_at = null; // back to pending
+  else {
+    // Back to pending is a fresh start: clear the attempt budget so a task
+    // reset after using every run (e.g. Rerun past its ceiling) starts again
+    // with room to spare, instead of still reading “no attempts left”. Previous
+    // attempts stay as history; only the spent-count is cleared.
+    fields.attempts = 0;
+    fields.completed_at = null;
+  }
   return db.updateTaskFields(id, fields);
 };
 

@@ -79,7 +79,7 @@ test("rerun resets a task to pending without starting it (Phase 5)", () => {
   const reset = tasks.rerunTask(task.id);
   assert.equal(reset.status, "pending", "Rerun returns it to the queue");
   assert.equal(reset.completed_at, null, "the terminal marker is cleared");
-  assert.equal(reset.attempts, 1, "Rerun does not start a new attempt");
+  assert.equal(reset.attempts, 0, "the spent budget is cleared for a fresh run");
   assert.equal(db.lastAttemptNumber(task.id), 1, "no fresh attempt row is opened");
 });
 
