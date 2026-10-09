@@ -328,25 +328,27 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
   // every tick without changing which Task is open. Comparing against this lets
   // us tell a genuine task switch apart from a stale re-render.
   const loadedTaskRef = useRef<string | null>(null);
+  // Monotonic counter for in-flight attempt loads. Every switch bumps it, and a
+  // fetched result only applies while its sequence still matches the current
+  // value. Without this, out-of-order or late responses from a previously
+  // selected Task could overwrite the view after it has already settled onto
+  // the new one — leaving another Task's session showing, i.e. the “wrong /
+  // last session” symptom. The synchronous reset above clears the panel into
+  // loading; this guard guarantees nothing stale ever re-populates it.
+  const loadSeqRef = useRef(0);
   useEffect(() => {
     if (!projectName || !selected) return;
-    // Switching to a different Task must not hold onto the previous Task's
-    // attempts for the beat before this Task's own attempts finish loading —
-    // otherwise `activeAttempt` still resolves to the old attempt (the memo's
-    // `.at(-1)` fallback keeps an old session live and its SSE stream
-    // continues), which shows another Task's history: exactly the “wrong /
-    // last session” symptom. Drop both synchronously so the panel settles into
-    // loading, then fetch the new Task's attempts below.
     if (loadedTaskRef.current !== selected.id) {
       setActiveAttemptId(null);
       setAttempts([]);
     }
     loadedTaskRef.current = selected.id;
+    const mySeq = ++loadSeqRef.current;
     let cancelled = false;
     setLoadingAttempts(true);
     api.getTaskAttempts(projectName, selected.id)
       .then((list) => {
-        if (cancelled) return;
+        if (cancelled || mySeq !== loadSeqRef.current) return;
         setAttempts(list);
         // Select the newest run so a Task with history opens on its latest attempt.
         const latest = [...list].sort((a, b) => a.attempt_number - b.attempt_number).at(-1);
