@@ -12,7 +12,7 @@ that started there. Nothing outside it can be reached.
 
 - **Browse.** Click a folder to go in, the path at the top to go back.
   Folders come first; `.git` is not listed. A link that leads out of the folder
-  is shown greyed out and cannot be opened.
+  is shown greyed out and cannot be opened. A file's size is on its row, in B, KB, MB or GB.
 - **Hide or show dotfiles.** Names that start with a dot (`.env`, `.cache`, …) are
   hidden to begin with, and a line under the list says how many. The eye icon at
   the top turns them on and off, and the choice is remembered in the browser.
@@ -37,10 +37,26 @@ that started there. Nothing outside it can be reached.
   name, Escape leaves it. It is a new name in the same folder, and never replaces
   something that is already there.
 - **Delete** a file or a folder and everything in it, after a confirmation. A
-  link is removed as the link; what it points at stays.
+  link is removed as the link; what it points at stays. For a folder the
+  confirmation first finds out whether it holds git work nothing else has —
+  uncommitted changes, commits no remote has, stashes, in a repository or a
+  clone inside it; a new folder in a part of the repository git tracks counts
+  as one change — and if so names it and asks you to **Delete anyway**, even
+  when Settings says not to ask before deleting; the server refuses without it.
+  It looks and stops where [deleting a project](/guide/projects#the-projects-tab)
+  does. A file goes as it is. `node_modules`, `.venv`, `venv`, `__pycache__`,
+  `.tox`, `.mypy_cache` and `.cache` are not looked through, but one that is a
+  repository itself, or has changes a repository around it tracks, is asked
+  about.
 
 A save is made whole: the text is written beside the file and put in place, so a
-save that fails (a full disk, say) leaves the file as it was.
+save that fails (a full disk, say) leaves the file as it was. The reason is shown
+above the editor; your text and the **Save** button stay, to copy or to try again.
+
+An edit that is not saved is kept for its chat. Switch to another chat, leave the
+page or reload it, and when Files is open again the file is as you left it, still
+marked as not saved. Only **Discard** gives it up. If the file changed in the
+meantime, you get the same choice as at a save.
 
 The agent writes here too, so a save is checked. If the file changed after you
 opened it, the save is refused and you choose between loading the new version
@@ -55,7 +71,9 @@ while you have unsaved changes, the agent's next file does not replace them.
 
 In [voice mode](/guide/voice) it opens on its own the first time the agent touches
 a file, in the same way as the browser and the terminal, and there is a folder
-button in the top right to open it yourself.
+button in the top right to open it yourself. That window is its own: it follows
+the agent from the start, and an edit that is not saved in the chat's Files stays
+with the chat until voice mode is over.
 
 ## Panels
 
@@ -75,4 +93,12 @@ sides. Each place keeps the size you gave it, whichever panels are in it. When
 panels at both sides would leave the conversation narrower than 320px, the side
 you sized last keeps its width and the other gives way first; it gets its width
 back as soon as there is room again. A panel you have never moved goes where
-all of them went before.
+all of them went before. A panel carried to another place flies there from where
+you let go of it, unless [the animations](/guide/interface#animations) are off.
+
+Sizing needs no pointer: the edge between the conversation and the panels, the
+edge between two panels and a floating window's corner are reached with `Tab`.
+An arrow key moves the edge that way by a step (`Shift` makes it four), and
+`Home` gives it its first size back; a window's corner takes `Enter` for that
+too. A list of tabs, such as the terminal's, is one stop for `Tab`; the arrow
+keys, `Home` and `End` go through it.

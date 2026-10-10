@@ -1,6 +1,8 @@
 import { bindHost, loginThrottle, portalSecurityHeaders, tlsFiles } from "./http-security.js";
 import { canvasesRouter } from "./api/canvases.js";
-import { canvasEvents, listCanvases } from "./canvases.js";
+import { interruptCanvasWrites } from "./canvases.js";
+import { eventsRouter } from "./api/events.js";
+import { serveWeb } from "./web-static.js";
 import { clampLevel } from "./pi/model-runtime.js";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
@@ -11,61 +13,100 @@ import express from "express";
 import cookieParser from "cookie-parser";
 import { nanoid } from "nanoid";
 import {
+  BROWSER_CHANNEL,
+  clearProjectTools,
+  chatModel,
+  contextLimitProblem,
   createSession,
   deleteSession,
-  eventsBefore,
-  eventsSince,
-  replayStart,
+  getContextLimit,
+  getDb,
+  getDefaultContextLimit,
   getSession,
+  getSettingDefaults,
+  getSettings,
   listAgentSessions,
+  listChatSessions,
+  listHeartbeatSessions,
   listRoutineSessions,
   listSessions,
+  projectTools,
+  projectsWithTools,
+  agentTools,
+  setAgentTools,
+  clearAgentTools,
+  routineTools,
+  setRoutineTools,
+  setRoutineBrowserSwitch,
+  seenBrowserTools,
+  toolDefaultsFor,
+  setContextLimit,
+  setDefaultContextLimit,
+  setProjectTools,
+  setSettings,
+  setToolDefaultsOff,
+  setToolGroupNames,
+  shownStoredSettings,
+  shownTools,
+  toolDefaultsOff,
+  toolGroupNames,
   updateSession,
   deleteTasksByWorkspace,
   deleteScriptsByWorkspace,
   listTasksByWorkspace,
 } from "./db.js";
-import { checkWorkspace, isWithin, workspaceRoot } from "./workspaces.js";
-import { DATA_DIR } from "./data-dir.js";
-import { agentHomePath } from "./agent-home.js";
-import { agentHome, resolveChannelSession } from "./agent.js";
+import { checkWorkspace, workspaceRoot } from "./workspaces.js";
+import { insideReal, isWithinText } from "./within.js";
+import { agentHome, agentHomePath } from "./agent-home.js";
+import { dataFolder } from "./data-dir.js";
+import { resolveChannelSession } from "./agent.js";
+import { AgentError, agentOf, agentsRoot, chatsOf, defaultAgent, deletable, deleteAgent, getAgent, listAgents, orbOf } from "./agents.js";
 import {
   agentFileStatus,
   runWizard,
   writeAgentFile,
   type WizardInput,
 } from "./agent-setup.js";
-import { sessions, CommandFailed, EXECUTOR_KIND, IMAGE_ROOT, PromptQueuedForSingleActive } from "./session-manager.js";
+import { sweepRemoved } from "./folder-removal.js";
+import { agentsRouter } from "./api/agents.js";
+import { heartbeat } from "./heartbeat.js";
+import { deleteNotesOf } from "./activity.js";
+import { EXECUTOR_KIND } from "./executor-kind.js";
+import { sessions, CommandFailed, IMAGE_ROOT, PromptQueuedForSingleActive } from "./session-manager.js";
 import { reconcileInterruptedTasks, recoverQueuedLoopsAfterRestart } from "./task-recovery.js";
 import { abortLiveRun } from "./task-execution.js";
 import { readNtfyConfig, saveNtfyConfig, startNtfyNotifications, stopNtfyNotifications } from "./ntfy.js";
 import { ImageError, MAX_IMAGE_BYTES, MAX_IMAGES, imagePath, mimeOf, parseImages, saveImages } from "./prompt-images.js";
-import { toolSource } from "./tool-policy.js";
-import { mcpServerNames } from "./api/mcp.js";
-import { authEnabled, checkPassword, isAuthed, issueCookie, requireAuth, signOut } from "./auth.js";
+import { defaultsFor, exceptionsFor, heldOffUnshown, toolEnabled, toolSource } from "./tool-policy.js";
+import { mcpRouter, mcpServerNames, onMcpWritten } from "./api/mcp.js";
+import { authEnabled, checkPassword, isAuthed, issueCookie, keptShortPassword, requireAuth, signOut } from "./auth.js";
 import { packagesRouter } from "./api/packages.js";
 import { extensionsRouter } from "./api/extensions.js";
 import { channelsRouter } from "./api/channels.js";
 import { tasksRouter } from "./api/tasks.js";
 import { scriptsRouter } from "./api/scripts.js";
-import { routinesIn, routinesRouter, switchOffRoutines } from "./api/routines.js";
+import { removeRoutines, routinesIn, routinesRouter, switchOffRoutines } from "./api/routines.js";
 import { filesRouter } from "./api/files.js";
 import { gitRouter } from "./api/git.js";
+import { holdsWork, unsavedRefusal, unsavedWork } from "./git.js";
 import { skillsRouter } from "./api/skills.js";
-import { mcpRouter } from "./api/mcp.js";
 import { featuresRouter } from "./api/features.js";
+import { imagesRouter } from "./api/images.js";
+import { forgetPicturesIn } from "./image-gallery.js";
 import { memoryRouter } from "./api/memory.js";
 import { memoryLlmRouter } from "./memory-llm.js";
 import { modelLevels, modelRuntime, providersRouter } from "./api/providers.js";
 import { peopleRouter } from "./api/people.js";
 import { voiceRouter } from "./api/voice.js";
-import { browserRouter } from "./api/browser.js";
-import { terminalRouter } from "./api/terminal.js";
-import { MARKER, clearFinished, listJobs, readOutput, stopJob } from "./background.js";
+import { adoptPortalBrowser, browserRouter, pinConnection } from "./api/browser.js";
+import { endAllTerminals, terminalRouter } from "./api/terminal.js";
+import { BACKGROUND_SUPPORTED, MARKER, clearFinished, listJobs, readOutput, stopJob, stopJobsIn } from "./background.js";
 import { attachBrowserUpgrade, mountBrowserProxy } from "./browser-proxy.js";
 import { watchBrowserFrames } from "./extensions/browser-frames.js";
 import { startLlamaProxy } from "./llama-progress.js";
-import { pinConnection } from "./api/browser.js";
+import { applyOnStart } from "./sandbox/apply.js";
+import { sandboxPolicy, sandboxSupport } from "./sandbox/policy.js";
+import { sandboxRouter } from "./api/sandbox.js";
 import { scheduleDreams } from "./extensions/understory-service.js";
 import { routineSupervisor } from "./routines/supervisor.js";
 import { channelSupervisor } from "./channels/supervisor.js";
@@ -75,10 +116,8 @@ import {
   readCompactionSettings,
   writeCompactionSettings,
 } from "./pi-settings.js";
-import { eventTime, getDb } from "./db.js";
 import { getBuiltinCommands, picturesRefused } from "./pi/builtins.js";
 import { SessionEditError } from "./pi/session-edit.js";
-import { isValidSlug, slugify } from "./slug.js";
 import {
   NEW_CHAT_TITLE,
   ProjectError,
@@ -94,38 +133,15 @@ import {
   writeProjectTaskInstructions,
 } from "./projects.js";
 import {
-  contextLimitProblem,
-  getContextLimit,
-  getDefaultContextLimit,
-  getSettingDefaults,
-  chatModel,
-  getSettings,
   getStoredSettings,
-  shownStoredSettings,
   knownTools,
-  toolGroupNames,
-  setToolGroupNames,
-  setToolDefaultsOff,
-  toolDefaultsOff,
-  setContextLimit,
-  setDefaultContextLimit,
-  setSettings,
   setSingleActiveSession,
 } from "./db.js";
 
 const WORKSPACE_ROOT = workspaceRoot();
 const PORT = Number(process.env.PORT || 4100);
-/**
- * How much of a long conversation a fresh page load replays.
- *
- * Small on purpose. Not a correctness limit — a reconnect with a cursor still
- * receives everything it missed, and older events are fetched on demand as you
- * scroll back. Replaying twenty thousand meant a refresh rendered the entire
- * history and then visibly scrolled through it.
- */
-const REPLAY_EVENTS = 1_200;
 /** Persistent place for CLIs, kept on PATH so pi and its tools can reach them. */
-const BIN_DIR = path.resolve(process.env.BIN_DIR || path.join(DATA_DIR, "bin"));
+const BIN_DIR = dataFolder("BIN_DIR", "bin");
 
 // Everything the portal starts carries this, and keeps it when it is detached:
 // it is how a background job is known to be the agent's. See background.ts.
@@ -143,10 +159,12 @@ const promptJson = express.json({ limit: `${Math.ceil((MAX_IMAGES * MAX_IMAGE_BY
 // An upload is the file itself, streamed to disk by its route, whatever type
 // the browser gave it — a .json file must not be read as a request.
 const UPLOAD_ROUTE = /^\/api\/sessions\/[^/]+\/upload$/;
+// An edit on the Images page may carry a mask, a picture: its route reads its own, after the login too.
+const IMAGE_EDIT_ROUTE = "/api/images/edit";
 const smallJson = express.json({ limit: "2mb" });
 app.use((req, res, next) => {
   // Understory's requests for a model carry whole conversations: its route reads its own.
-  if (UPLOAD_ROUTE.test(req.path) || PROMPT_ROUTE.test(req.path) || req.path.startsWith("/understory-llm/")) return next();
+  if (UPLOAD_ROUTE.test(req.path) || PROMPT_ROUTE.test(req.path) || req.path === IMAGE_EDIT_ROUTE || req.path.startsWith("/understory-llm/")) return next();
   smallJson(req, res, next);
 });
 app.use(cookieParser());
@@ -154,7 +172,9 @@ app.use(cookieParser());
 // --- auth ---
 
 app.get("/api/auth/status", (req, res) => {
-  res.json({ authRequired: authEnabled, authed: isAuthed(req) });
+  const authed = isAuthed(req);
+  // Said to a login only: to anyone else it would say which password to guess.
+  res.json({ authRequired: authEnabled, authed, ...(authed && keptShortPassword ? { shortPassword: true } : {}) });
 });
 
 app.post("/api/auth/login", loginThrottle(), (req, res) => {
@@ -316,35 +336,9 @@ app.get("/api/workspaces", (_req, res) => {
   res.json({ root: WORKSPACE_ROOT, workspaces });
 });
 
-app.post("/api/workspaces", (req, res) => {
-  const raw = req.body?.name;
-  if (typeof raw !== "string" || !raw.trim()) {
-    return res.status(400).json({ error: "name required" });
-  }
-  // "Cool Project" becomes the directory "cool-project", and that same slug
-  // becomes the session title — one name drives both.
-  const name = slugify(raw);
-  if (!isValidSlug(name)) {
-    return res.status(400).json({ error: `"${raw}" does not produce a usable folder name` });
-  }
-
-  const target = path.join(WORKSPACE_ROOT, name);
-  if (path.resolve(target) !== target || !target.startsWith(WORKSPACE_ROOT + path.sep)) {
-    return res.status(400).json({ error: "Invalid workspace name" });
-  }
-  if (existsSync(target)) return res.status(409).json({ error: `Workspace "${name}" already exists` });
-
-  try {
-    mkdirSync(target, { recursive: true });
-  } catch (e) {
-    return res.status(500).json({ error: (e as Error).message });
-  }
-  res.json({ name, path: target, isGit: false });
-});
-
 // --- projects ---
 
-const projectStatus = { invalid: 400, missing: 404, exists: 409 } as const;
+const projectStatus = { invalid: 400, missing: 404, exists: 409, conflict: 409 } as const;
 
 const projectFailure = (res: express.Response, e: unknown) => {
   if (e instanceof ProjectError) return res.status(projectStatus[e.code]).json({ error: e.message });
@@ -356,7 +350,7 @@ const projectFailure = (res: express.Response, e: unknown) => {
  * in a subfolder, and it belongs to the project all the same.
  */
 const chatsIn = (dir: string, all = listSessions()) =>
-  all.filter((s) => s.workspace === dir || s.workspace.startsWith(dir + path.sep));
+  all.filter((s) => isWithinText(dir, s.workspace));
 
 /**
  * The same, and those that reach the folder through a link too: what deleting
@@ -365,9 +359,10 @@ const chatsIn = (dir: string, all = listSessions()) =>
  */
 function workingIn<T extends { workspace: string }>(dir: string, rows: T[]): T[] {
   const seen = new Map<string, boolean>();
+  const reaches = insideReal(dir);
   return rows.filter((row) => {
     let inside = seen.get(row.workspace);
-    if (inside === undefined) seen.set(row.workspace, (inside = isWithin(dir, row.workspace)));
+    if (inside === undefined) seen.set(row.workspace, (inside = reaches(row.workspace)));
     return inside;
   });
 }
@@ -380,46 +375,86 @@ function workingIn<T extends { workspace: string }>(dir: string, rows: T[]): T[]
  */
 app.get("/api/projects", (req, res) => {
   const home = agentHomePath();
+  // Each agent's home is a folder of chats of its own, named after the agent.
+  const agents = listAgents().map((a) => ({ id: a.id, name: a.name, home: a.home }));
   try {
-    if (!existsSync(WORKSPACE_ROOT)) return res.json({ root: WORKSPACE_ROOT, home, projects: [] });
+    if (!existsSync(WORKSPACE_ROOT)) return res.json({ root: WORKSPACE_ROOT, home, agents, projects: [] });
     if (req.query.bare === "1") {
-      return res.json({ root: WORKSPACE_ROOT, home, projects: listProjects(WORKSPACE_ROOT).map((p) => ({ name: p.name, path: p.path })) });
+      return res.json({ root: WORKSPACE_ROOT, home, agents, projects: listProjects(WORKSPACE_ROOT).map((p) => ({ name: p.name, path: p.path })) });
     }
     // Read once, not once per project.
     const all = listSessions();
+    const withTools = projectsWithTools();
     const projects = listProjects(WORKSPACE_ROOT).map((p) => {
       const chats = chatsIn(p.path, all);
       return {
         ...p,
+        hasTools: withTools.has(p.name),
         sessions: chats.length,
         lastActive: chats.reduce((latest, s) => (s.updated_at > latest ? s.updated_at : latest), "") || null,
       };
     });
-    res.json({ root: WORKSPACE_ROOT, home, projects });
+    res.json({ root: WORKSPACE_ROOT, home, agents, projects });
   } catch (e) {
     projectFailure(res, e);
   }
 });
 
+/** Whether a request's list of tools to switch off is one: a list of names. */
+const isToolList = (value: unknown): value is string[] => Array.isArray(value) && value.every((name) => typeof name === "string");
+
+/**
+ * Stores what a project's chats start with, given the tools it wants off: the
+ * difference from what the layers under it leave (the portal-wide default, and
+ * an agent whose home it were in), which is all that is kept.
+ */
+function saveProjectTools(project: { name: string; path: string }, off: string[]) {
+  const below = toolDefaultsFor(project.path, null, "project");
+  return setProjectTools(project.name, layerExceptions(project.path, below, projectTools(project.name), off));
+}
+
+/**
+ * `toolsOff`, when given, is the tools the new project's chats start with off,
+ * as for PUT .../tools. It is checked before the folder is made, like the
+ * instructions, so that a refusal leaves no project behind.
+ */
 app.post("/api/projects", (req, res) => {
-  const { name, instructions } = req.body ?? {};
+  const { name, instructions, toolsOff } = req.body ?? {};
   if (typeof name !== "string" || !name.trim()) return res.status(400).json({ error: "name required" });
   if (instructions !== undefined && typeof instructions !== "string") {
     return res.status(400).json({ error: "instructions must be text" });
   }
+  if (toolsOff !== undefined) {
+    if (!isToolList(toolsOff)) return res.status(400).json({ error: "toolsOff must be a list of tool names" });
+    if (EXECUTOR_KIND === "container") return res.status(400).json(toolsUnsupported);
+  }
   try {
-    res.json(createProject(WORKSPACE_ROOT, name, instructions));
+    const project = createProject(WORKSPACE_ROOT, name, instructions);
+    // A new project says nothing about tools: whatever an earlier folder of this
+    // name left behind, such as one removed outside the portal, is not its.
+    // The folder exists by now, and it stays whatever happens to its tools: the
+    // project is made, only its tools are not. Said in the answer rather than as
+    // a failure, so that the page can tell the two apart and offer them again.
+    try {
+      clearProjectTools(project.name);
+      if (toolsOff !== undefined) saveProjectTools(project, toolsOff);
+    } catch (e) {
+      return res.json({ ...project, toolsError: (e as Error).message });
+    }
+    res.json(project);
   } catch (e) {
     projectFailure(res, e);
   }
 });
 
 /** What deleting a project would take with it, for the confirmation. */
-app.get("/api/projects/:name", (req, res) => {
+app.get("/api/projects/:name", async (req, res) => {
   try {
     const project = getProject(WORKSPACE_ROOT, req.params.name);
+    const unsaved = await unsavedWork(project.path);
     res.json({
       ...project,
+      ...(unsaved ? { unsaved } : {}),
       sessions: workingIn(project.path, listSessions()).length,
       // The ones a delete would switch off: one already off is not changed by it.
       routines: routinesIn(project.path).filter((r) => r.enabled).map((r) => r.name),
@@ -432,17 +467,18 @@ app.get("/api/projects/:name", (req, res) => {
 
 app.get("/api/projects/:name/instructions", (req, res) => {
   try {
-    res.json({ text: readInstructions(WORKSPACE_ROOT, req.params.name) });
+    res.json(readInstructions(WORKSPACE_ROOT, req.params.name));
   } catch (e) {
     projectFailure(res, e);
   }
 });
 
 app.put("/api/projects/:name/instructions", (req, res) => {
-  const text = req.body?.text;
+  const { text, mtime } = req.body ?? {};
   if (typeof text !== "string") return res.status(400).json({ error: "text required" });
+  if (mtime !== undefined && typeof mtime !== "number") return res.status(400).json({ error: "mtime must be a number" });
   try {
-    writeInstructions(WORKSPACE_ROOT, req.params.name, text);
+    writeInstructions(WORKSPACE_ROOT, req.params.name, text, mtime);
     res.json({ ok: true });
   } catch (e) {
     projectFailure(res, e);
@@ -470,8 +506,157 @@ app.put("/api/projects/:name/task-instructions", (req, res) => {
 });
 
 /**
+ * The tools a chat in this project starts with, and whether each is on: what
+ * the layers under it leave (layerTools), bent by what the project says. No pi
+ * is running for a project, so what is listed is what the portal has seen
+ * registered.
+ */
+app.get("/api/projects/:name/tools", (req, res) => {
+  try {
+    const project = getProject(WORKSPACE_ROOT, req.params.name);
+    if (EXECUTOR_KIND === "container") return res.status(400).json(toolsUnsupported);
+    res.json(layerTools(project.path, toolDefaultsFor(project.path, null, "project"), projectTools(project.name)));
+  } catch (e) {
+    projectFailure(res, e);
+  }
+});
+
+/**
+ * Say which tools chats in this project start with: what is not named is on.
+ * What is stored is the difference from the layers under it, as for a chat,
+ * so a change to the default still reaches every tool the project never
+ * disagreed about. Chats running in the project are told at once; what a chat
+ * itself switched stays as it was.
+ */
+app.put("/api/projects/:name/tools", async (req, res) => {
+  const off = req.body?.off;
+  if (!isToolList(off)) return res.status(400).json({ error: "off must be a list of tool names" });
+  try {
+    const project = getProject(WORKSPACE_ROOT, req.params.name);
+    if (EXECUTOR_KIND === "container") return res.status(400).json(toolsUnsupported);
+    const stored = saveProjectTools(project, off);
+    const applied = await sessions.applyToolDefaults(project.name);
+    res.json({ off: defaultsFor(toolDefaultsFor(project.path, null, "project"), stored), applied });
+  } catch (e) {
+    projectFailure(res, e);
+  }
+});
+
+/**
+ * A layer's tools as its page shows them: what the portal has seen registered
+ * where the layer's chats and runs work (`folder`), on or off by `below` — every
+ * layer under this one — bent by what this one says. `defaultOn` is what the
+ * layers under it say, which is what this one disagrees with. Shaped like a
+ * project's and a chat's, so the page draws them all the same way.
+ */
+function layerTools(folder: string, below: string[], exceptions: { off: string[]; on: string[] }) {
+  const servers = mcpServerNames();
+  return {
+    tools: shownTools(folder).map((tool) => ({
+      ...tool,
+      source: toolSource(tool.name, tool.source, servers),
+      enabled: toolEnabled(tool.name, below, exceptions),
+      defaultOn: !below.includes(tool.name),
+    })),
+    live: false,
+    names: toolGroupNames(),
+    off: defaultsFor(below, exceptions),
+  };
+}
+
+/** The exceptions to store for a layer, given what it wants off: as for a project. */
+function layerExceptions(folder: string, below: string[], held: { off: string[]; on: string[] }, off: string[]) {
+  const shown = shownTools(folder).map((t) => t.name);
+  const answered = [...shown, ...held.off, ...held.on];
+  return exceptionsFor(heldOffUnshown(off, shown, held), below, answered, held);
+}
+
+/**
+ * An agent's tools: its exceptions to the portal-wide default, for every chat in
+ * its home and every run it does on its own (its heartbeat, the routines that
+ * run in its home). Its chats in a project are not in its home, and follow the
+ * project.
+ */
+app.get("/api/agents/:id/tools", (req, res) => {
+  const agent = getAgent(req.params.id);
+  if (!agent) return res.status(404).json({ error: "No such agent" });
+  if (EXECUTOR_KIND === "container") return res.status(400).json(toolsUnsupported);
+  res.json(layerTools(agent.home, toolDefaultsFor(agent.home, null, "agent"), agentTools(agent.id)));
+});
+
+app.put("/api/agents/:id/tools", async (req, res) => {
+  const off = req.body?.off;
+  if (!isToolList(off)) return res.status(400).json({ error: "off must be a list of tool names" });
+  const agent = getAgent(req.params.id);
+  if (!agent) return res.status(404).json({ error: "No such agent" });
+  if (EXECUTOR_KIND === "container") return res.status(400).json(toolsUnsupported);
+  try {
+    const below = toolDefaultsFor(agent.home, null, "agent");
+    const stored = setAgentTools(agent.id, layerExceptions(agent.home, below, agentTools(agent.id), off));
+    const applied = await sessions.applyToolDefaults({ agent: agent.id });
+    res.json({ off: defaultsFor(below, stored), applied });
+  } catch (e) {
+    res.status(500).json({ error: (e as Error).message });
+  }
+});
+
+/** A routine, and where its runs happen: its project, or Home. */
+function routineFor(id: string): { slug: string; folder: string } | { slug: string; error: string } | undefined {
+  const row = getDb().prepare("SELECT slug, workspace FROM routines WHERE id = ?").get(id) as { slug: string; workspace: string | null } | undefined;
+  if (!row) return undefined;
+  // Where its runs work, found as the supervisor finds it: the layers under the routine are that place's.
+  const where = row.workspace ? checkWorkspace(row.workspace) : { path: agentHome() };
+  return "error" in where ? { slug: row.slug, error: `Its project ${row.workspace} cannot be used (${where.error}).` } : { slug: row.slug, folder: where.path };
+}
+
+/**
+ * A routine's tools: its exceptions to what its agent and project leave, for
+ * every run of it. A run's own chat can still switch a tool for itself.
+ */
+app.get("/api/routines/:id/tools", (req, res) => {
+  const routine = routineFor(req.params.id);
+  if (!routine) return res.status(404).json({ error: "Not found" });
+  if (EXECUTOR_KIND === "container") return res.status(400).json(toolsUnsupported);
+  if ("error" in routine) return res.status(409).json({ error: routine.error });
+  res.json(layerTools(routine.folder, toolDefaultsFor(routine.folder, null, "routine"), routineTools(routine.slug)));
+});
+
+app.put("/api/routines/:id/tools", async (req, res) => {
+  const off = req.body?.off;
+  if (!isToolList(off)) return res.status(400).json({ error: "off must be a list of tool names" });
+  const routine = routineFor(req.params.id);
+  if (!routine) return res.status(404).json({ error: "Not found" });
+  if (EXECUTOR_KIND === "container") return res.status(400).json(toolsUnsupported);
+  if ("error" in routine) return res.status(409).json({ error: routine.error });
+  try {
+    const below = toolDefaultsFor(routine.folder, null, "routine");
+    const browser = seenBrowserTools();
+    const wanted = layerExceptions(routine.folder, below, routineTools(routine.slug, browser), off);
+    // The browser's tools its lists do not name follow its old switch (routineTools). So what the page said of each
+    // is written down, even where the layers under it agree: left out, a browser switched on here would go back to
+    // what the switch says.
+    const shown = new Set(shownTools(routine.folder).map((t) => t.name));
+    for (const name of browser) {
+      if (!shown.has(name) || wanted.off.includes(name) || wanted.on.includes(name)) continue;
+      (off.includes(name) ? wanted.off : wanted.on).push(name);
+    }
+    const stored = setRoutineTools(routine.slug, wanted);
+    // And the switch says what a browser tool that turns up later starts with: what the browser has here now.
+    if (browser.length) setRoutineBrowserSwitch(routine.slug, browser.some((name) => toolEnabled(name, below, stored)));
+    const applied = await sessions.applyToolDefaults({ routine: routine.slug });
+    res.json({ off: defaultsFor(below, stored), applied });
+  } catch (e) {
+    res.status(500).json({ error: (e as Error).message });
+  }
+});
+
+/**
  * The project, its chats and its folder. Refused while any chat or routine run
- * in it is working.
+ * in it is working, and while its folder holds repositories — itself, submodules,
+ * clones in subfolders — with work that only the folder has — uncommitted
+ * changes, commits no remote has, stashes —
+ * unless `?discard=1` says that is meant. Folders here can be repositories the
+ * portal never made, and nothing brings one back.
  *
  * A routine that runs here keeps its sessions, the record of what it did, as
  * deleting the routine itself does. It is switched off once the folder is gone:
@@ -480,6 +665,13 @@ app.put("/api/projects/:name/task-instructions", (req, res) => {
 app.delete("/api/projects/:name", async (req, res) => {
   try {
     const project = getProject(WORKSPACE_ROOT, req.params.name);
+    // First, before the checks below: git can take seconds, and a chat or a
+    // routine may start in that time, which is what those checks are for. Not
+    // asked at all once ?discard=1 says the answer does not matter.
+    if (req.query.discard !== "1") {
+      const unsaved = await unsavedWork(project.path);
+      if (unsaved && holdsWork(unsaved)) return res.status(409).json(unsavedRefusal(unsaved));
+    }
     const chats = workingIn(project.path, listSessions());
     if (chats.some((s) => sessions.isBusy(s.id) || sessions.backgroundWork(s.id))) {
       return res.status(409).json({ error: "A chat in this project is still working. Stop it first." });
@@ -503,6 +695,8 @@ app.delete("/api/projects/:name", async (req, res) => {
       // go last, together, so that either all are removed or none.
       for (const run of runs) await sessions.discard(run.id);
       for (const chat of chats) await sessions.discard(chat.id);
+      // The jobs they started go with them: nothing would be left to list or stop them.
+      const jobsStopped = await stopJobsIn(project.path);
       // A routine can have been given this place while those were stopped. It
       // was not held, so it is looked for again, with nothing awaited from here
       // until the folder is gone.
@@ -518,17 +712,81 @@ app.delete("/api/projects/:name", async (req, res) => {
       deleteTasksByWorkspace(project.path);
       deleteScriptsByWorkspace(project.path);
       deleteProjectFolder(WORKSPACE_ROOT, project.name);
+      // The pictures of every chat that worked there, the routine runs the folder's removal leaves behind too: no file of them is left to show.
+      forgetPicturesIn(project.path);
+      clearProjectTools(project.name);
       const switchedOff = switchOffRoutines([...routines, ...late]);
       getDb().transaction(() => {
         for (const chat of chats) deleteSession(chat.id);
       })();
       for (const chat of chats) sessions.removeFiles(chat.id);
-      res.json({ ok: true, sessionsDeleted: chats.length, routinesSwitchedOff: switchedOff });
+      res.json({ ok: true, sessionsDeleted: chats.length, routinesSwitchedOff: switchedOff, jobsStopped });
     } finally {
+      // The chats that were not deleted take messages again.
+      sessions.reopen([...runs, ...chats].map((s) => s.id));
       release();
     }
   } catch (e) {
     projectFailure(res, e);
+  }
+});
+
+// --- agents ---
+
+/**
+ * The agent, its chats, and its folder if `?folder=delete` says so; kept
+ * otherwise, and taken up again by an agent made under the same name. Refused
+ * for the first agent, for one a channel talks as, and while any of its chats
+ * or a routine running as it is working. Its routines are switched off, as a
+ * deleted project's are, and keep their sessions; with `?folder=delete` they are
+ * deleted, since the folder they ran in is gone.
+ */
+app.delete("/api/agents/:id", async (req, res) => {
+  try {
+    // Checked before anything is stopped; deleteAgent checks again once they are.
+    const agent = deletable(req.params.id);
+    // Its chats and its conversations — those started on the Agent page and
+    // through channels — and the one its heartbeat looks around in.
+    const chats = workingIn(agent.home, [...listSessions(), ...listAgentSessions(), ...listHeartbeatSessions()]);
+    if (chats.some((s) => sessions.isBusy(s.id) || sessions.backgroundWork(s.id))) {
+      return res.status(409).json({ error: "A chat with this agent is still working. Stop it first." });
+    }
+    if (heartbeat.isRunning(agent.id)) {
+      return res.status(409).json({ error: "This agent is looking around right now. Wait for it to finish." });
+    }
+    const routines = routinesIn(agent.home);
+    const runs = workingIn(agent.home, listRoutineSessions().filter((s) => sessions.isLoaded(s.id)));
+    if (routines.some((r) => routineSupervisor.isRunning(r.slug)) || runs.some((s) => sessions.isBusy(s.id))) {
+      return res.status(409).json({ error: "A routine is running as this agent. Wait for it to finish, or stop it." });
+    }
+    const release = routineSupervisor.hold(routines.map((r) => r.slug));
+    try {
+      for (const run of runs) await sessions.discard(run.id);
+      for (const chat of chats) await sessions.discard(chat.id);
+      // The jobs they started go with them, in a folder that is kept as well: nothing would be left to list or stop them.
+      const jobsStopped = await stopJobsIn(agent.home);
+      deleteAgent(agent.id, { deleteFolder: req.query.folder === "delete" });
+      // What it said about tools: an agent made later under the same name starts from the default.
+      clearAgentTools(agent.id);
+      // The pictures of every chat that worked there, the routine runs the folder's removal leaves behind too: no file of them is left to show.
+      if (req.query.folder === "delete") forgetPicturesIn(agent.home);
+      deleteNotesOf(agent.id);
+      // With its folder they have nowhere left to run, and an agent made under the
+      // same name must not take them over. Kept with the folder, they stay, switched off.
+      const deleted = req.query.folder === "delete";
+      const switchedOff = deleted ? [] : switchOffRoutines(routines);
+      const removed = deleted ? removeRoutines(routines) : [];
+      getDb().transaction(() => {
+        for (const chat of chats) deleteSession(chat.id);
+      })();
+      for (const chat of chats) sessions.removeFiles(chat.id);
+      res.json({ ok: true, sessionsDeleted: chats.length, routinesSwitchedOff: switchedOff, routinesDeleted: removed, jobsStopped });
+    } finally {
+      sessions.reopen([...runs, ...chats].map((s) => s.id));
+      release();
+    }
+  } catch (e) {
+    res.status(e instanceof AgentError ? e.status : 500).json({ error: (e as Error).message });
   }
 });
 
@@ -556,7 +814,7 @@ const toApi = (s: ReturnType<typeof getSession> & {}) => ({
 });
 
 app.get("/api/sessions", (_req, res) => {
-  res.json({ sessions: listSessions().map(toApi), executor: EXECUTOR_KIND });
+  res.json({ sessions: listChatSessions().map(toApi), executor: EXECUTOR_KIND });
 });
 
 /**
@@ -564,15 +822,18 @@ app.get("/api/sessions", (_req, res) => {
  * transcript, same replay, same model handling — so the Agent tab opens them
  * with the ordinary chat view rather than a parallel implementation.
  */
-app.get("/api/agent/sessions", (_req, res) => {
+app.get("/api/agent/sessions", (req, res) => {
+  // One agent's, given `?agent=`; the first agent's otherwise.
+  const agent = typeof req.query.agent === "string" ? getAgent(req.query.agent) : defaultAgent();
+  if (!agent) return res.status(404).json({ error: "No such agent" });
   const channels = getDb()
     .prepare("SELECT id, slug, name, kind FROM channels")
     .all() as { id: string; slug: string; name: string; kind: string }[];
   const bySlug = new Map(channels.map((c) => [c.slug, c]));
 
   res.json({
-    agentHome: agentHome(),
-    sessions: listAgentSessions().map((s) => ({
+    agentHome: agent.home,
+    sessions: chatsOf(agent, listAgentSessions()).map((s) => ({
       ...toApi(s),
       // Matched on the slug, so a channel deleted and recreated under the same
       // one still owns its conversations.
@@ -598,12 +859,15 @@ app.get("/api/agent/sessions", (_req, res) => {
  */
 app.post("/api/agent/sessions", (req, res) => {
   const title = cleanTitle(req.body?.title);
+  const agentId = req.body?.agent;
+  if (agentId !== undefined && (typeof agentId !== "string" || !getAgent(agentId))) return res.status(404).json({ error: "No such agent" });
   try {
     const { session } = resolveChannelSession({
-      channelSlug: "browser",
+      channelSlug: BROWSER_CHANNEL,
       key: nanoid(8),
       title: title || `Chat ${new Date().toISOString().slice(0, 16).replace("T", " ")}`,
       executor: EXECUTOR_KIND,
+      agentId,
     });
     res.json(toApi(session));
   } catch (e) {
@@ -613,48 +877,28 @@ app.post("/api/agent/sessions", (req, res) => {
 
 // --- the agent's home directory ---
 
-app.get("/api/agent/setup", (_req, res) => {
-  res.json(agentFileStatus());
-});
-
-/** Run the wizard. Refuses to overwrite an existing MEMORY.md. */
-app.post("/api/agent/setup", (req, res) => {
-  const body = (req.body ?? {}) as WizardInput;
-  if (typeof body.agentName !== "string" || !body.agentName.trim()) {
-    return res.status(400).json({ error: "The agent needs a name" });
-  }
-  if (typeof body.userName !== "string" || !body.userName.trim()) {
-    return res.status(400).json({ error: "Who is it working for?" });
-  }
-  try {
-    runWizard(body);
-    res.json(agentFileStatus());
-  } catch (e) {
-    res.status(500).json({ error: (e as Error).message });
-  }
-});
-
-app.put("/api/agent/files/:name", (req, res) => {
-  const content = req.body?.content;
-  if (typeof content !== "string") return res.status(400).json({ error: "content required" });
-  try {
-    writeAgentFile(req.params.name, content);
-    res.json(agentFileStatus());
-  } catch (e) {
-    res.status(400).json({ error: (e as Error).message });
-  }
+/**
+ * The avatar voice mode shows for a chat (`?session=`): its agent's, and the
+ * first agent's for a chat in a project, or without one.
+ */
+app.get("/api/agent/orb", (req, res) => {
+  const session = typeof req.query.session === "string" ? getSession(req.query.session) : undefined;
+  res.json(orbOf(agentOf(session?.workspace) ?? defaultAgent()));
 });
 
 app.post("/api/sessions", (req, res) => {
-  const { workspace } = req.body ?? {};
+  const { workspace, agent: agentId } = req.body ?? {};
   const title = cleanTitle(req.body?.title);
   if (workspace !== undefined && (typeof workspace !== "string" || !workspace)) {
     return res.status(400).json({ error: "workspace must be a path" });
   }
-  // Without one, a chat starts in Home: the agent's own directory, where its
-  // SOUL.md, PrimaryUser.md and MEMORY.md are. Home is the one place outside
-  // the workspace root a chat may start.
-  const where = workspace === undefined ? { path: agentHome() } : checkWorkspace(workspace);
+  // `agent` starts it in that agent's home.
+  const agent = agentId === undefined ? undefined : typeof agentId === "string" ? getAgent(agentId) : undefined;
+  if (agentId !== undefined && !agent) return res.status(404).json({ error: "No such agent" });
+  // Without either, a chat starts in Home: the first agent's own directory,
+  // where its SOUL.md, PrimaryUser.md and MEMORY.md are. Agents' homes are the
+  // only places outside the workspace root a chat may start.
+  const where = agent ? { path: agentHome(agent.home) } : workspace === undefined ? { path: agentHome() } : checkWorkspace(workspace);
   if ("error" in where) return res.status(400).json({ error: where.error });
   const resolved = where.path;
 
@@ -692,8 +936,14 @@ app.patch("/api/sessions/:id", (req, res) => {
 app.delete("/api/sessions/:id", async (req, res) => {
   const session = getSession(req.params.id);
   if (!session) return res.status(404).json({ error: "Not found" });
-  await sessions.discard(session.id);
-  deleteSession(session.id);
+  try {
+    await sessions.discard(session.id);
+    deleteSession(session.id);
+  } catch (e) {
+    // The chat stays: it takes messages again.
+    sessions.reopen([session.id]);
+    throw e;
+  }
   sessions.removeFiles(session.id);
   res.json({ ok: true });
 });
@@ -722,7 +972,10 @@ app.post("/api/sessions/:id/prompt", promptJson, async (req, res) => {
     const images = saveImages(IMAGE_ROOT, session.id, parsed);
     // Returns as soon as pi accepts the prompt. The run continues server-side
     // regardless of what this browser does next.
-    await sessions.prompt(session.id, message, { voice: req.body?.voice === true, images, steer: req.body?.steer === true });
+    const sent = await sessions.prompt(session.id, message, { voice: req.body?.voice === true, images, steer: req.body?.steer === true });
+    // A Stop got there first: the words are back with the person, as not sent,
+    // and a chat they were the start of is not named after them.
+    if (!sent) return res.json({ ok: true, unsent: true });
     // A chat that has no name yet is named after what it starts with — once pi
     // has taken the message, so one that never got there does not keep its name.
     // Read again: a rename that came in meanwhile is not overwritten.
@@ -746,14 +999,18 @@ app.post("/api/sessions/:id/prompt", promptJson, async (req, res) => {
 
 const editStatus = { busy: 409, missing: 404, empty: 400 } as const;
 
+const editFailure = (res: express.Response, e: unknown) => {
+  if (!(e instanceof SessionEditError)) return res.status(500).json({ error: (e as Error).message });
+  res.status(editStatus[e.code as keyof typeof editStatus] ?? 422).json({ error: e.message });
+};
+
 /** Removes a message and the agent's answer to it. */
 app.delete("/api/sessions/:id/messages/:seq", async (req, res) => {
   try {
     await sessions.removeMessage(req.params.id, Number(req.params.seq), "turn");
     res.json({ ok: true });
   } catch (e) {
-    if (!(e instanceof SessionEditError)) return res.status(500).json({ error: (e as Error).message });
-    res.status(editStatus[e.code as keyof typeof editStatus] ?? 422).json({ error: e.message });
+    editFailure(res, e);
   }
 });
 
@@ -769,8 +1026,7 @@ app.post("/api/sessions/:id/messages/:seq/edit", async (req, res) => {
     await sessions.editMessage(req.params.id, Number(req.params.seq), message);
     res.json({ ok: true, status: "running" });
   } catch (e) {
-    if (!(e instanceof SessionEditError)) return res.status(500).json({ error: (e as Error).message });
-    res.status(editStatus[e.code as keyof typeof editStatus] ?? 422).json({ error: e.message });
+    editFailure(res, e);
   }
 });
 
@@ -782,21 +1038,23 @@ app.post("/api/sessions/:id/messages/:seq/version", async (req, res) => {
     await sessions.switchVersion(req.params.id, Number(req.params.seq), to);
     res.json({ ok: true });
   } catch (e) {
-    if (!(e instanceof SessionEditError)) return res.status(500).json({ error: (e as Error).message });
-    res.status(editStatus[e.code as keyof typeof editStatus] ?? 422).json({ error: e.message });
+    editFailure(res, e);
   }
 });
 
 /** A picture sent with a message, for the transcript to show. */
 app.get("/api/sessions/:id/images/:name", (req, res) => {
-  const file = imagePath(IMAGE_ROOT, req.params.id, req.params.name);
+  // A chat that is gone serves no pictures, whatever a removal that failed left behind.
+  const file = getSession(req.params.id) ? imagePath(IMAGE_ROOT, req.params.id, req.params.name) : undefined;
   if (!file) return res.status(404).json({ error: "Not found" });
   // Named by a random id and never rewritten, so it can be kept as long as a
   // browser likes. The type is the one its bytes were checked against.
   res.setHeader("Cache-Control", "private, max-age=31536000, immutable");
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.type(mimeOf(req.params.name)!);
-  res.sendFile(file);
+  // The name was checked and the file looked at above, so a dot folder further up
+  // (`~/.local/share`) is no reason for Express to treat it as hidden and answer 404.
+  res.sendFile(file, { dotfiles: "allow" });
 });
 
 /** The browser answering a dialog an extension is waiting on. */
@@ -823,24 +1081,26 @@ app.put("/api/sessions/:id/draft", (req, res) => {
 });
 
 /**
- * The tools this conversation could use, and which of them are on.
- *
- * A running session answers from pi's registry. One that is not running —
- * not started yet, or gone idle — from what the portal has seen registered,
- * marked `live: false`: what is switched there is kept for when it starts.
- */
-/**
  * A container session reaches pi over RPC, which has no tool registry to ask
  * and nothing to tell. Said plainly rather than answered with an empty list
  * and a switch that does nothing.
  */
 const TOOLS_UNSUPPORTED =
   "Tools cannot be switched with EXECUTOR=container: pi runs inside the container and the portal never sees what it registered";
+/** With a `code`, so that the page tells this answer from any other failure of the same request by it, not by the sentence. */
+const toolsUnsupported = { error: TOOLS_UNSUPPORTED, code: "tools-unsupported" };
 
+/**
+ * The tools this conversation could use, and which of them are on.
+ *
+ * A running session answers from pi's registry. One that is not running —
+ * not started yet, or gone idle — from what the portal has seen registered,
+ * marked `live: false`: what is switched there is kept for when it starts.
+ */
 app.get("/api/sessions/:id/tools", async (req, res) => {
   const session = getSession(req.params.id);
   if (!session) return res.status(404).json({ error: "Not found" });
-  if (EXECUTOR_KIND === "container") return res.status(400).json({ error: TOOLS_UNSUPPORTED });
+  if (EXECUTOR_KIND === "container") return res.status(400).json(toolsUnsupported);
   const { tools, live } = await sessions.getTools(session.id);
   const names = toolGroupNames();
   // The whole off list, not only the tools loaded right now: the page sends
@@ -853,11 +1113,9 @@ app.get("/api/sessions/:id/tools", async (req, res) => {
 app.put("/api/sessions/:id/tools", async (req, res) => {
   const session = getSession(req.params.id);
   if (!session) return res.status(404).json({ error: "Not found" });
-  if (EXECUTOR_KIND === "container") return res.status(400).json({ error: TOOLS_UNSUPPORTED });
+  if (EXECUTOR_KIND === "container") return res.status(400).json(toolsUnsupported);
   const off = req.body?.off;
-  if (!Array.isArray(off) || off.some((name) => typeof name !== "string")) {
-    return res.status(400).json({ error: "off must be a list of tool names" });
-  }
+  if (!isToolList(off)) return res.status(400).json({ error: "off must be a list of tool names" });
   res.json({ off: await sessions.setTools(session.id, off) });
 });
 
@@ -871,11 +1129,11 @@ app.put("/api/sessions/:id/tools", async (req, res) => {
 app.get("/api/tools", (_req, res) => {
   // Refused here as well as on the PUT: a list of checkboxes that draws fine
   // and answers every flip with an error is the switch that looks like it works.
-  if (EXECUTOR_KIND === "container") return res.status(400).json({ error: TOOLS_UNSUPPORTED });
+  if (EXECUTOR_KIND === "container") return res.status(400).json(toolsUnsupported);
   const off = new Set(toolDefaultsOff());
   const servers = mcpServerNames();
   res.json({
-    tools: knownTools().map((tool) => ({
+    tools: shownTools().map((tool) => ({
       ...tool,
       source: toolSource(tool.name, tool.source, servers),
       defaultOn: !off.has(tool.name),
@@ -904,11 +1162,9 @@ app.put("/api/tool-names", (req, res) => {
  * see working.
  */
 app.put("/api/tools", async (req, res) => {
-  if (EXECUTOR_KIND === "container") return res.status(400).json({ error: TOOLS_UNSUPPORTED });
+  if (EXECUTOR_KIND === "container") return res.status(400).json(toolsUnsupported);
   const off = req.body?.off;
-  if (!Array.isArray(off) || off.some((name) => typeof name !== "string")) {
-    return res.status(400).json({ error: "off must be a list of tool names" });
-  }
+  if (!isToolList(off)) return res.status(400).json({ error: "off must be a list of tool names" });
   const stored = setToolDefaultsOff(off);
   const applied = await sessions.applyToolDefaults();
   res.json({ off: stored, applied });
@@ -922,8 +1178,6 @@ app.post("/api/sessions/:id/abort", async (req, res) => {
 });
 
 // --- what runs beside the conversation: background jobs, extension status, subagents ---
-
-const BACKGROUND_SUPPORTED = EXECUTOR_KIND !== "container" && process.platform === "linux";
 
 app.get("/api/sessions/:id/background", async (req, res) => {
   const session = getSession(req.params.id);
@@ -1255,18 +1509,30 @@ app.get("/api/sessions/:id/commands", async (req, res) => {
 app.use("/api", packagesRouter());
 app.use("/api", extensionsRouter());
 app.use("/api", featuresRouter());
+app.use("/api", imagesRouter());
 app.use("/api", memoryRouter());
 app.use("/api", channelsRouter());
+app.use("/api", agentsRouter());
 app.use("/api", tasksRouter());
 app.use("/api", scriptsRouter());
-app.use("/api", routinesRouter());
+app.use(
+  "/api",
+  routinesRouter((routine) => {
+    sessions.applyToolDefaults({ routine }).catch((e) => console.error(`[portal] could not apply a routine's tools to its runs: ${(e as Error).message}`));
+  })
+);
 app.use("/api", skillsRouter());
 app.use("/api", filesRouter());
 app.use("/api", gitRouter());
+// What the configuration offers is what a running chat may use: told at once, as a default is.
+onMcpWritten(() => {
+  sessions.applyToolDefaults().catch((e) => console.error(`[portal] could not apply the MCP configuration to running chats: ${(e as Error).message}`));
+});
 app.use("/api", mcpRouter());
 app.use("/api", providersRouter());
 app.use("/api", peopleRouter());
 app.use("/api", browserRouter());
+app.use("/api", sandboxRouter(sessions));
 app.use("/api", voiceRouter());
 app.use("/api", terminalRouter());
 app.use("/api", canvasesRouter());
@@ -1275,144 +1541,7 @@ mountBrowserProxy(app);
 
 // --- event stream ---
 
-/**
- * Replay-then-tail. The client passes the last seq it saw, so reconnecting
- * after minutes or days delivers exactly what was missed and then continues
- * live — no gap, no duplicates.
- */
-/** What came before a cursor: the transcript scrolling back rather than forward. */
-app.get("/api/sessions/:id/events/before", (req, res) => {
-  const session = getSession(req.params.id);
-  if (!session) return res.status(404).json({ error: "Not found" });
-  const before = Number(req.query.before ?? 0) || 0;
-  // At least one: SQLite takes a negative LIMIT as no limit at all.
-  const limit = Math.max(1, Math.min(Math.floor(Number(req.query.limit)) || 1200, 3000));
-  const rows = eventsBefore(session.id, before, limit);
-  res.json({
-    events: rows.map((r) => ({
-      seq: r.seq,
-      type: r.type,
-      at: eventTime(r.created_at),
-      payload: JSON.parse(r.payload),
-    })),
-    // Whether asking again would return anything, so the UI knows to stop.
-    more: rows.length === limit,
-  });
-});
-
-/** How often a canvas being written is sent on its chat's stream, at most. */
-const CANVAS_EVERY_MS = 250;
-
-app.get("/api/sessions/:id/events", (req, res) => {
-  const session = getSession(req.params.id);
-  if (!session) return res.status(404).json({ error: "Not found" });
-
-  const since = Number(req.query.since ?? 0) || 0;
-
-  res.writeHead(200, {
-    "Content-Type": "text/event-stream",
-    "Cache-Control": "no-cache, no-transform",
-    Connection: "keep-alive",
-    "X-Accel-Buffering": "no",
-  });
-
-  const write = (row: { seq: number; type: string; payload: string; created_at?: string }) => {
-    res.write(`${row.seq > 0 ? `id: ${row.seq}\n` : ""}data: ${JSON.stringify({
-      seq: row.seq,
-      type: row.type,
-      // What the activity line counts from, so a refresh mid-run still knows
-      // how long the agent has been on this rather than starting from zero.
-      at: eventTime(row.created_at),
-      payload: JSON.parse(row.payload),
-    })}\n\n`);
-  };
-
-  // The chat's canvases come on the same stream, under their own name. They
-  // had a stream of their own, and two per open chat is how three tabs used up
-  // the six connections a browser allows one address: a fourth chat, and every
-  // request its page made, waited for one of them to close.
-  //
-  // The list first, not after the conversation: a long one replayed over a
-  // slow link kept the panel empty until the last of it had come.
-  const writeCanvas = (message: unknown) => res.write(`event: canvas\ndata: ${JSON.stringify(message)}\n\n`);
-  // A document being written changes many times a second, each change the
-  // whole of it, and the conversation's own events wait behind them on this
-  // one connection. So only the latest of a document's changes goes, at most
-  // every CANVAS_EVERY_MS; anything else sends what was held first, in order.
-  const held = new Map<string, unknown>();
-  let heldTimer: ReturnType<typeof setTimeout> | undefined;
-  const sendHeld = () => {
-    clearTimeout(heldTimer);
-    heldTimer = undefined;
-    for (const message of held.values()) writeCanvas(message);
-    held.clear();
-  };
-  const onCanvas = (message: { type?: string; canvas?: { id?: string } }) => {
-    if (message?.type === "update" && message.canvas?.id) {
-      held.set(message.canvas.id, message);
-      heldTimer ??= setTimeout(sendHeld, CANVAS_EVERY_MS);
-      return;
-    }
-    sendHeld();
-    writeCanvas(message);
-  };
-  canvasEvents.on(session.id, onCanvas);
-  writeCanvas({ type: "snapshot", canvases: listCanvases(session.id) });
-
-  // How often this chat's events were put back under seqs a page had read
-  // past (see bumpReloads): a page that last saw another count missed one, and
-  // loads the chat again rather than go on from its cursor.
-  res.write(`event: reloads\ndata: ${JSON.stringify({ reloads: session.reloads ?? 0 })}\n\n`);
-  // The versions of its messages, as they are now; later changes come live
-  // (portal_versions). A page does not ask for them after each change.
-  res.write(`event: versions\ndata: ${JSON.stringify({ versions: sessions.messageVersions(session.id) })}\n\n`);
-  // Replace stale in-memory deltas before durable replay, then restore the current snapshot.
-  res.write("event: live-reset\ndata: {}\n\n");
-
-  // A fresh load gets the end of the conversation, not the beginning. Replaying
-  // from zero and stopping at the batch limit is how a long session came back
-  // from a refresh showing its first few thousand events and nothing since —
-  // the transcript ended mid-turn, on whatever the cap happened to land on.
-  const cursor = since === 0 ? replayStart(session.id, REPLAY_EVENTS) : since;
-
-  // Paged to the end rather than one batch: a reconnect after a long run has
-  // more to catch up on than a single query returns, and stopping early loses
-  // exactly the part it was reconnecting for.
-  let lastSent = cursor;
-  for (;;) {
-    const batch = eventsSince(session.id, lastSent);
-    if (!batch.length) break;
-    for (const row of batch) {
-      write(row);
-      lastSent = row.seq;
-    }
-    if (batch.length < 5000) break;
-  }
-  for (const row of sessions.liveSnapshot(session.id)) write(row);
-  res.write(`event: caught-up\ndata: ${JSON.stringify({ seq: lastSent })}\n\n`);
-
-  const onEvent = (row: { seq: number; type: string; payload: string; created_at?: string }) => {
-    // Live-only events carry a negative seq: deliver them, but never let one
-    // move the replay cursor, or a reconnect would skip stored history.
-    if (row.seq < 0) {
-      write(row);
-      return;
-    }
-    // Guard against double-sending anything the replay already covered.
-    if (row.seq <= lastSent) return;
-    lastSent = row.seq;
-    write(row);
-  };
-  sessions.on(`session:${session.id}`, onEvent);
-
-  const heartbeat = setInterval(() => res.write(": ping\n\n"), 25_000);
-  req.on("close", () => {
-    clearInterval(heartbeat);
-    sessions.off(`session:${session.id}`, onEvent);
-    canvasEvents.off(session.id, onCanvas);
-    clearTimeout(heldTimer);
-  });
-});
+app.use("/api", eventsRouter());
 
 /**
  * Anything under /api that no route took. Answered in JSON, like every other
@@ -1428,11 +1557,7 @@ app.use("/api", (req, res) => {
 const webDist = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../web/dist");
 if (existsSync(webDist)) {
   app.use(portalSecurityHeaders);
-  app.use(express.static(webDist));
-  // A built file that is not there is a 404, not the page: a tab from before a
-  // deploy asking for a chunk the deploy removed would otherwise be handed
-  // HTML under a script's name, and the service worker would keep it.
-  app.get(/^(?!\/api|\/assets\/).*/, (_req, res) => res.sendFile(path.join(webDist, "index.html")));
+  serveWeb(app, webDist);
 }
 
 /**
@@ -1479,6 +1604,9 @@ const tls =
     : null;
 
 const host = bindHost(process.env.PORTAL_PASSWORD, process.env.ALLOW_OPEN);
+// Before anything can start a run: a catch-up routine marked running in the same
+// moment would be taken for one the last server left.
+const cutOff = sessions.recoverOrphans();
 const server = (tls ? createHttpsServer(tls, app) : createHttpServer(app)).listen(
   PORT,
   host,
@@ -1489,10 +1617,10 @@ const server = (tls ? createHttpsServer(tls, app) : createHttpServer(app)).liste
   console.log(`  workspaces: ${WORKSPACE_ROOT}`);
   console.log(`  auth:     ${authEnabled ? "password" : "DISABLED"}`);
 
-  // Enabled channels come up with the server, so a restart does not silently
-  // leave the agent unreachable.
   // Recurring schedules wait for their next slot; overdue one-off routines catch up.
   routineSupervisor.start();
+  // Agents with a heartbeat look around on their own, when nothing else is using the model.
+  heartbeat.start();
 
   // Push alerts fire from here, so a restart does not need a page open to keep
   // telling you when a chat finishes. Only transitions after this point are news.
@@ -1506,9 +1634,13 @@ const server = (tls ? createHttpsServer(tls, app) : createHttpServer(app)).liste
     modelRuntime().catch((e) => console.error(`[portal] pi's model catalogue could not be built: ${(e as Error).message}`));
   }
 
+  // Enabled channels come up with the server, so a restart does not silently
+  // leave the agent unreachable.
   channelSupervisor
     .sync()
     .then(() => console.log(`  channels: ${channelSupervisor.summary()}`))
+    // Once they are up: the person whose request the restart cut off is told.
+    .then(() => channelSupervisor.tellRestart(cutOff))
     .catch((e) => console.error(`[portal] channel startup failed: ${e.message}`));
   }
 );
@@ -1530,30 +1662,60 @@ watchBrowserFrames();
 startLlamaProxy(
   (sessionId, prefill) => sessions.reportPrefill(sessionId, prefill),
   (sessionId, load) => sessions.reportModelLoad(sessionId, load),
+  (sessionId, timings) => sessions.reportTimings(sessionId, timings),
 );
+sessions.startReaper();
 sessions.recoverOrphans();
 // Tasks share this moment: reconcile any left `running` by the previous server
 // back to `pending`, then restore queue-loop state per the restart-resume
 // setting. Done before any pi launches, so nothing a run could start races.
 reconcileInterruptedTasks();
 recoverQueuedLoopsAfterRestart();
-getDb().prepare("UPDATE canvases SET active_call = NULL, status = 'interrupted', agent_read_revision = revision WHERE active_call IS NOT NULL").run();
+// Folders put aside for removal that a stop cut short: see folder-removal.ts.
+sweepRemoved(WORKSPACE_ROOT);
+sweepRemoved(agentsRoot());
+interruptCanvasWrites();
 pinConnection();
+adoptPortalBrowser();
+// The sandbox's sudo rules live outside the data volume, so a new container needs them put back.
+void applyOnStart(sandboxPolicy(), sandboxSupport()).then((r) => {
+  if (sandboxPolicy().enabled) console.log(`[sandbox] ${r.ok ? "on" : "not applied"}${r.warnings.length ? `: ${r.warnings.join("; ")}` : ""}`);
+});
 // The memory tidied up at its set time, when the portal runs Understory.
 scheduleDreams();
 
-async function shutdown(signal: string) {
+/**
+ * The stop is one, however many signals ask for it: a second Ctrl-C does, and so
+ * does a package that ends its own children on SIGTERM and raises the signal
+ * again, as pi-lens does. A second run found the shells already taken out of the
+ * list, had nothing to wait for, and ended the portal before the first run's two
+ * seconds were up, with whatever the shells' jobs ignoring a hangup left running.
+ */
+let stopping: Promise<void> | undefined;
+function shutdown(signal: string): Promise<void> {
+  if (stopping) {
+    console.log(`${signal} received — already stopping`);
+    return stopping;
+  }
+  return (stopping = stop(signal));
+}
+
+async function stop(signal: string) {
   console.log(`${signal} received — stopping running sessions`);
+  // However long the rest takes, and no longer than docker waits before it kills.
+  setTimeout(() => process.exit(0), 10_000).unref();
   routineSupervisor.stop();
   stopNtfyNotifications();
+  // Alongside the rest: their shells are given a moment to wind down.
+  const shells = endAllTerminals();
   await channelSupervisor.shutdown();
   await sessions.shutdown();
+  await shells;
   server.close(() => process.exit(0));
   // Every open page holds an event stream that never ends by itself, and
   // close() waits for them — so a restart always sat out the full ten seconds
-  // below, which is as long as docker waits before it kills.
+  // of the timer above.
   server.closeAllConnections();
-  setTimeout(() => process.exit(0), 10_000).unref();
 }
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
 process.on("SIGINT", () => void shutdown("SIGINT"));

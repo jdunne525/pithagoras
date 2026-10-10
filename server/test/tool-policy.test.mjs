@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   toolEnabled,
+  defaultsFor,
   effectiveOff,
   exceptionsFor,
   browserTool,
@@ -97,6 +98,14 @@ test("the longer server name wins, so one does not claim another's tools", () =>
   assert.equal(mcpServerOf("web_search", ["browser"]), undefined);
 });
 
+test("a server with hyphens is found by the underscored name the adapter gives its tools", () => {
+  const servers = ["brave-search", "brave"];
+  assert.equal(mcpServerOf("brave_search_brave_web_search", servers), "brave-search");
+  assert.equal(mcpServerOf("brave_news", servers), "brave");
+  assert.equal(toolSource("brave_search_brave_web_search", "pi-mcp-adapter", servers), "brave-search");
+  assert.equal(browserTool("playwright_mcp_click", ["playwright-mcp"], ["playwright-mcp"]), true);
+});
+
 test("a default-off tool nobody was shown is left alone, not switched on", () => {
   // The page only ever lists what this run registered. Walking the defaults as
   // well wrote an "on" exception for every tool that was merely not loaded —
@@ -145,4 +154,23 @@ test("a browser can be called anything, given which servers are it", () => {
   assert.equal(browserTool("chrome_browser_click", ["chrome"]), false);
   // And a server that is not one of them is still not.
   assert.equal(browserTool("scratch_browser_click", ["chrome", "scratch"], ["chrome"]), false);
+});
+
+test("a project bends the default, in both directions", () => {
+  assert.deepEqual(defaultsFor(["a", "b"], { off: ["c"], on: ["a"] }), ["b", "c"]);
+});
+
+test("a project that says nothing leaves the default as it is", () => {
+  assert.deepEqual(defaultsFor(["b", "a"], none), ["a", "b"]);
+  assert.deepEqual(defaultsFor([], none), []);
+});
+
+test("a conversation holds its exceptions against what its project leaves", () => {
+  const project = defaultsFor(["a"], { off: ["b"], on: ["a"] });
+  // Nothing said in the conversation: the project's picture.
+  assert.deepEqual(effectiveOff(["a", "b", "c"], project, none), ["b"]);
+  // Its own word beats the project's, either way.
+  assert.deepEqual(effectiveOff(["a", "b", "c"], project, { off: ["a"], on: ["b"] }), ["a"]);
+  // And wanting what the project says writes nothing down.
+  assert.deepEqual(exceptionsFor(["b"], project, ["a", "b", "c"]), { off: [], on: [] });
 });

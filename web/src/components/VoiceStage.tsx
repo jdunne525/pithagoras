@@ -2,10 +2,10 @@ import { ActivityProgress } from './ActivityProgress';
 import type { Activity } from '../transcript';
 import { useWorkPanels } from "../use-work-panels";
 import { FilesPanel } from "./FilesPanel";
-import { latestFileActivity, type FileActivity } from "../file-activity";
+import { keepFileActivity, latestFileActivity, type FileActivity } from "../file-activity";
 import { VoiceToolActivity } from "./VoiceToolActivity";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type DragEvent, type MutableRefObject } from "react";
-import { buildTranscript, type Item } from "../transcript";
+import type { Item } from "../transcript";
 import { LuMic, LuMicOff, LuX, LuGlobe, LuMaximize2, LuMinimize2, LuMinus, LuTerminal, LuFileText, LuFolderOpen, LuImage, LuImagePlus, LuRotateCcw, LuSquare, LuMessageSquareText, LuSlidersHorizontal } from "react-icons/lu";
 import { VoicePictures, shownPictures } from "./VoicePictures";
 import { VoiceConversation } from "./VoiceConversation";
@@ -20,82 +20,10 @@ import { api, type PortalEvent } from "../api";
 import type { VoiceCue } from "../voice-cues";
 import type { VoicePhase } from "../hands-free";
 import { t } from "../i18n";
+import { VoiceOrb, useOrbStyle, type VoiceLevels } from "./VoiceOrb";
 
-export interface VoiceLevels { input: number; output: number }
+export type { VoiceLevels } from "./VoiceOrb";
 type OrbMode = "input" | "output" | "idle" | "muted";
-
-/** The shape follows real RMS audio levels; the slow drift only gives idle depth. */
-function VoiceOrb({ mode, levels }: { mode: OrbMode; levels: MutableRefObject<VoiceLevels> }) {
-  const canvas = useRef<HTMLCanvasElement>(null);
-  const current = useRef(mode); current.current = mode;
-  useEffect(() => {
-    const element = canvas.current!;
-    const ctx = element.getContext("2d");
-    if (!ctx) return;
-    const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const size = 600;
-    const ratio = Math.min(devicePixelRatio || 1, 2);
-    element.width = size * ratio; element.height = size * ratio;
-    ctx.scale(ratio, ratio);
-    let frame = 0, level = 0;
-    let color = [130, 188, 255];
-    const colors = { input: [83, 247, 215], output: [190, 159, 255], idle: [130, 188, 255], muted: [161, 179, 204] };
-    const render = (timestamp: number) => {
-      const mode = current.current;
-      const value = mode === "input" ? levels.current.input : mode === "output" ? levels.current.output : 0;
-      level += (value - level) * (value > level ? 0.3 : 0.09);
-      color = color.map((v, i) => v + (colors[mode][i] - v) * 0.06);
-      const rgb = color.map(Math.round).join(",");
-      const t = reduced ? 0 : timestamp * 0.00055;
-      const r = 132 + level * (reduced ? 5 : 28);
-      ctx.clearRect(0, 0, size, size);
-      ctx.save(); ctx.translate(size / 2, size / 2);
-      const halo = ctx.createRadialGradient(0, 0, r * 0.65, 0, 0, r * 1.7);
-      halo.addColorStop(0, `rgba(${rgb},${0.3 + level * 0.18})`); halo.addColorStop(1, `rgba(${rgb},0)`);
-      ctx.fillStyle = halo; ctx.fillRect(-size / 2, -size / 2, size, size);
-      for (let ring = 0; ring < 2; ring++) {
-        ctx.beginPath();
-        ctx.ellipse(0, 0, r + 20 + ring * 16 + level * 7, r + 18 + ring * 16, Math.sin(t) * 0.12, 0, Math.PI * 2);
-        ctx.strokeStyle = `rgba(${rgb},${0.2 + level * 0.15 - ring * 0.05})`; ctx.lineWidth = 1.2; ctx.stroke();
-      }
-      ctx.beginPath();
-      for (let i = 0; i <= 160; i++) {
-        const a = i / 160 * Math.PI * 2;
-        const wave = Math.sin(a * 3 + t * 1.3) * (3 + level * 7) + Math.sin(a * 5 - t * 2) * level * 10;
-        const x = Math.cos(a) * (r + wave), y = Math.sin(a) * (r + wave);
-        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-      }
-      ctx.closePath();
-      const sphere = ctx.createRadialGradient(-r * 0.32, -r * 0.45, 1, r * 0.12, r * 0.1, r * 1.32);
-      sphere.addColorStop(0, `rgba(${rgb},0.98)`); sphere.addColorStop(0.32, `rgba(${rgb},0.95)`);
-      sphere.addColorStop(0.7, `rgb(${color.map(v => Math.round(v * 0.62)).join(",")})`); sphere.addColorStop(1, `rgb(${color.map(v => Math.round(v * 0.34)).join(",")})`);
-      ctx.shadowColor = `rgba(${rgb},0.65)`; ctx.shadowBlur = 22;
-      ctx.fillStyle = sphere; ctx.fill(); ctx.shadowBlur = 0;
-      ctx.strokeStyle = `rgba(${rgb},0.8)`; ctx.lineWidth = 1.8; ctx.stroke(); ctx.save(); ctx.clip();
-      // Translucent ribbons bend across the sphere rather than flat sine bars.
-      for (let band = 0; band < 15; band++) {
-        const y = -r + band * r * 0.15;
-        const bend = Math.sin(t + band * 0.27) * 35 + level * 22;
-        ctx.beginPath(); ctx.moveTo(-r * 1.3, y);
-        ctx.bezierCurveTo(-r * 0.45, y - 60 + bend, r * 0.35, y + 65 + bend, r * 1.3, y - 20);
-        ctx.bezierCurveTo(r * 0.3, y + 85 + bend, -r * 0.4, y - 40 + bend, -r * 1.3, y + 9);
-        const ribbon = ctx.createLinearGradient(-r, -r, r, r);
-        ribbon.addColorStop(0, `rgba(231,255,255,${0.04 + band * 0.003})`);
-        ribbon.addColorStop(0.45, `rgba(${rgb},${0.24 + level * 0.12})`);
-        ribbon.addColorStop(1, "rgba(192,190,255,0.03)");
-        ctx.fillStyle = ribbon; ctx.fill();
-      }
-      const shine = ctx.createRadialGradient(-r * 0.33, -r * 0.55, 0, -r * 0.33, -r * 0.55, r * 0.85);
-      shine.addColorStop(0, "rgba(238,255,255,0.45)"); shine.addColorStop(0.35, "rgba(233,253,255,0.08)"); shine.addColorStop(1, "rgba(255,255,255,0)");
-      ctx.fillStyle = shine; ctx.fillRect(-r, -r, 2 * r, 2 * r);
-      ctx.restore(); ctx.restore();
-      frame = requestAnimationFrame(render);
-    };
-    frame = requestAnimationFrame(render);
-    return () => cancelAnimationFrame(frame);
-  }, [levels]);
-  return <canvas ref={canvas} aria-hidden="true" className="voice-orb" data-mode={mode} />;
-}
 
 /** What a window's place and size slide by (see stage.css). */
 const GEOMETRY = new Set(["left", "top", "right", "width", "height", "transform"]);
@@ -152,7 +80,7 @@ export function VoiceStage({ sessionId, folder, workPhase, canvasOpen, onCanvasM
   const [shown, setShown] = useState(false), [terminalShown, setTerminalShown] = useState(false);
   const [filesShown, setFilesShown] = useState(false), [filesUsed, setFilesUsed] = useState(false), [filesSince, setFilesSince] = useState<number | undefined>(undefined);
   const filesWindow = useRef<HTMLElement>(null), picturesWindow = useRef<HTMLElement>(null), conversationWindow = useRef<HTMLElement>(null);
-  // Pictures the agent showed with show_image. A new one opens the window on it.
+  // Pictures the agent showed with show_image or made with generate_image or edit_image. A new one opens the window on it.
   const pictures = useMemo(() => shownPictures(toolEvents), [toolEvents]);
   const picturesSeen = useRef(pictures.at(-1)?.seq ?? 0);
   const [picturesShown, setPicturesShown] = useState(false), [pictureIndex, setPictureIndex] = useState(0);
@@ -167,7 +95,8 @@ export function VoiceStage({ sessionId, folder, workPhase, canvasOpen, onCanvasM
   // the browser and terminal do, and follows it from there. A file opened from
   // a tool card is put after everything that has happened, so that the panel
   // takes it, and the agent's next file after that again.
-  const agentFile = useMemo(() => latestFileActivity(toolEvents, folder), [toolEvents, folder]);
+  const lastFile = useRef<FileActivity | null>(null);
+  const agentFile = useMemo(() => (lastFile.current = keepFileActivity(lastFile.current, latestFileActivity(toolEvents, folder))), [toolEvents, folder]);
   const [openedFile, setOpenedFile] = useState<FileActivity | null>(null);
   const fileActivity = openedFile && openedFile.seq > (agentFile?.seq ?? 0) ? openedFile : agentFile;
   const filesSeen = useRef(agentFile?.seq ?? 0);
@@ -184,9 +113,9 @@ export function VoiceStage({ sessionId, folder, workPhase, canvasOpen, onCanvasM
   const [browserError, setBrowserError] = useState('');
   const thoughtViewport = useRef<HTMLDivElement>(null);
   const thought = useMemo(() => {
-    const latest = buildTranscript(toolEvents).at(-1);
+    const latest = items.at(-1);
     return latest?.kind === 'assistant' && !latest.done && !latest.text ? latest.thinking : '';
-  }, [toolEvents]);
+  }, [items]);
   useEffect(() => {
     const el = thoughtViewport.current;
     if (!el) return;
@@ -217,6 +146,7 @@ export function VoiceStage({ sessionId, folder, workPhase, canvasOpen, onCanvasM
     picturesSeen.current = last.seq;
     setPictureIndex(pictures.length - 1); setPicturesShown(true); onCue("focus");
   }, [pictures, onCue]);
+  const openTerminal = () => { setTerminalUsed(true); setTerminalShown(true); onCue("focus"); };
   const openPictures = () => { setPictureIndex(Math.max(0, pictures.length - 1)); setPicturesShown(true); onCue("focus"); };
   /** A tool card was tapped: bring up what it was about. */
   const openCall = (call: ToolCall) => {
@@ -224,7 +154,7 @@ export function VoiceStage({ sessionId, folder, workPhase, canvasOpen, onCanvasM
       const seq = toolEvents.reduce((n, e) => Math.max(n, e.seq), fileActivity?.seq ?? 0) + 0.5;
       if (!filesUsed) { setFilesSince(seq - 1); setFilesUsed(true); }
       setOpenedFile({ seq, path: call.path, tool: "read" }); setFilesShown(true); onCue("focus");
-    } else if (call.target === "terminal") { setTerminalUsed(true); setTerminalShown(true); onCue("focus"); }
+    } else if (call.target === "terminal") openTerminal();
     else if (call.target === "browser") open();
     else if (call.target === "canvas") { if (!canvasOpen) onCanvasToggle(); }
     else if (call.target === "pictures") openPictures();
@@ -262,7 +192,7 @@ export function VoiceStage({ sessionId, folder, workPhase, canvasOpen, onCanvasM
     "voice.canvas": () => { onCanvasToggle(); },
     "voice.files": () => { if (filesShown) setFilesShown(false); else openFiles(); },
     "voice.pictures": () => { if (picturesShown) setPicturesShown(false); else if (pictures.length) openPictures(); else return false; },
-    "voice.terminal": () => { if (terminalShown) setTerminalShown(false); else { setTerminalUsed(true); setTerminalShown(true); onCue("focus"); } },
+    "voice.terminal": () => { if (terminalShown) setTerminalShown(false); else openTerminal(); },
     "voice.browser": () => { if (shown) minimize(); else if (browserAvailable || loaded) open(); else return false; },
     "voice.settings": () => { setSettings(v => !v); },
     "voice.faster": () => step(1),
@@ -279,7 +209,8 @@ export function VoiceStage({ sessionId, folder, workPhase, canvasOpen, onCanvasM
     const down = (e: KeyboardEvent) => {
       const { bindings, actions, ptt, onHold } = keys.current;
       // A dialog, or the voice settings card closing on Escape, has the key.
-      if (e.defaultPrevented || document.querySelector('[aria-modal="true"]')) return;
+      // So has the confirmation a link in a reply asks before it leaves: it is no aria-modal, and Escape there would otherwise stop the agent or end voice mode.
+      if (e.defaultPrevented || document.querySelector('[aria-modal="true"], [data-streamdown="link-safety-modal"]')) return;
       if (e.code === "Escape" && document.querySelector(".voice-settings")) return;
       // Escape gives a maximized browser its place back before it stops anything.
       if (e.code === "Escape" && keys.current.maximized && !editing(e.target)) {
@@ -316,8 +247,8 @@ export function VoiceStage({ sessionId, folder, workPhase, canvasOpen, onCanvasM
   };
   useEffect(() => {
     if (terminalActivity <= terminalSeen.current) return;
-    terminalSeen.current = terminalActivity; setTerminalUsed(true);
-    setTerminalShown(true); onCue("focus");
+    terminalSeen.current = terminalActivity;
+    openTerminal();
   }, [terminalActivity, onCue]);
   useEffect(() => {
     if (browserActivity <= activity.current) return;
@@ -361,6 +292,7 @@ export function VoiceStage({ sessionId, folder, workPhase, canvasOpen, onCanvasM
   };
   const input = !muted && phase === "Hearing you";
   const mode: OrbMode = input ? "input" : speaking ? "output" : muted ? "muted" : "idle";
+  const orbStyle = useOrbStyle(sessionId);
   const touch = typeof matchMedia === "function" && matchMedia("(hover: none)").matches;
   const status = waitingForTap ? (touch ? t("Tap to continue voice mode") : t("Click or press a key to continue voice mode")) : starting ? t("Connecting") : input || holding ? t("Hearing you") : speaking ? t("Speaking") : phase === "Speaking" ? t("Preparing your reply") : phase === "Thinking" ? t("Thinking") : phase === "Transcribing" ? t("Transcribing") : muted ? t("Microphone muted") : ptt ? (touch || !bindings["voice.hold"] ? t("Hold the microphone to talk") : t("Hold {keys} to talk", { keys: describe(bindings["voice.hold"], layout) })) : t("Listening");
   const anyPanel = shown || terminalShown || filesShown || picturesShown || conversation;
@@ -464,12 +396,12 @@ export function VoiceStage({ sessionId, folder, workPhase, canvasOpen, onCanvasM
         {!filesShown && <button type="button" onClick={openFiles} title={`${t("Show files")}${hint("voice.files")}`} aria-label={t("Show files")}><LuFolderOpen /></button>}
         {pictures.length > 0 && !picturesShown && <button type="button" onClick={openPictures} title={`${t("Show pictures")}${hint("voice.pictures")}`} aria-label={t("Show pictures")}><LuImage /></button>}
         {(browserAvailable || loaded) && !shown && <button type="button" onClick={open} title={`${t("Show browser")}${hint("voice.browser")}`} aria-label={t("Show browser")}><LuGlobe /></button>}
-        {!terminalShown && <button type="button" aria-label={t("Show terminal")} title={`${t("Show terminal")}${hint("voice.terminal")}`} onClick={() => { setTerminalUsed(true); setTerminalShown(true); onCue("focus"); }}><LuTerminal /></button>}
+        {!terminalShown && <button type="button" aria-label={t("Show terminal")} title={`${t("Show terminal")}${hint("voice.terminal")}`} onClick={openTerminal}><LuTerminal /></button>}
         <button ref={settingsToggle} type="button" data-voice-settings-toggle onClick={() => setSettings(v => !v)} title={`${t("Voice settings")}${hint("voice.settings")}`} aria-label={t("Voice settings")} aria-expanded={settings}><LuSlidersHorizontal /></button>
       </div>
       {settings && <VoiceSettings anchor={settingsToggle} sounds={sounds} onSounds={onSounds} rate={rate} onRate={onRate} steer={steer} onSteer={onSteer} ptt={ptt} onPtt={onPtt} onClose={() => setSettings(false)} />}
     </header>
-    {attachments.length > 0 && <div className="voice-attachments" aria-label={t("Pictures for your next message")}>
+    {attachments.length > 0 && <div className="voice-attachments" role="group" aria-label={t("Pictures for your next message")}>
       <div>{attachments.map(a => <figure key={a.id}>
         <img src={a.data} alt={a.name} />
         <button type="button" aria-label={t("Remove {name}", { name: a.name })} title={t("Remove")} onClick={() => onRemovePicture(a.id)}><LuX /></button>
@@ -495,7 +427,7 @@ export function VoiceStage({ sessionId, folder, workPhase, canvasOpen, onCanvasM
     </section>
     <section ref={filesWindow} className={`voice-files-window ${filesMain ? 'as-main' : 'as-side'} ${filesShown ? 'is-open' : ''}`} aria-label={t("Files")} aria-hidden={!filesShown}>
       <header><span><LuFolderOpen />{t("Files")}</span><div><button type="button" aria-label={t("Minimize files")} title={t("Minimize files")} onClick={() => { setFilesShown(false); end.current?.focus({ preventScroll: true }); }}><LuMinus /></button></div></header>
-      {filesUsed && <FilesPanel sessionId={sessionId} folder={folder} activity={fileActivity} since={filesSince} />}
+      {filesUsed && <FilesPanel key={sessionId} sessionId={sessionId} folder={folder} activity={fileActivity} since={filesSince} />}
       <ResizeHandles target={filesWindow} />
     </section>
     <section ref={picturesWindow} className={`voice-files-window voice-pictures-window ${picturesMain ? 'as-main' : 'as-side'} ${picturesShown ? 'is-open' : ''}`} aria-label={t("Pictures")} aria-hidden={!picturesShown}>
@@ -508,16 +440,16 @@ export function VoiceStage({ sessionId, folder, workPhase, canvasOpen, onCanvasM
       {conversation && <VoiceConversation sessionId={sessionId} items={items} />}
       <ResizeHandles target={conversationWindow} />
     </section>
-    <VoiceToolActivity events={toolEvents} folder={folder} onOpen={openCall} />
+    <VoiceToolActivity events={toolEvents} sessionId={sessionId} folder={folder} onOpen={openCall} />
     <div className="voice-presence">
-      <div className="voice-avatar"><VoiceOrb mode={mode} levels={levels} /></div>
+      <div className="voice-avatar"><VoiceOrb mode={mode} levels={levels} look={orbStyle} /></div>
       <div className="voice-dock-center">
-        {workPhase && ['processing the prompt','compacting the conversation'].includes(workPhase.label) ? <ActivityProgress phase={workPhase} compact /> : <>
+        {workPhase && (workPhase.label === 'processing the prompt' || workPhase.label === 'compacting the conversation') ? <ActivityProgress phase={workPhase} /> : <>
         <div className="voice-status" role="status"><span />{phase === 'Compacting context' ? t('Compacting context') : thought && anyPanel ? t("Thinking") : status}</div>
-        {anyPanel && thought && phase !== 'Compacting context' && <div ref={thoughtViewport} className="voice-thought-stream" aria-label={t("Live model thinking")}>{thought.slice(-1200)}</div>}
+        {anyPanel && thought && phase !== 'Compacting context' && <div ref={thoughtViewport} className="voice-thought-stream" role="group" aria-label={t("Live model thinking")}>{thought.slice(-1200)}</div>}
         </>}
       </div>
-      {!anyPanel && transcript && (input || holding || phase === "Transcribing") && <p className="voice-live-transcript" aria-label={t("Live transcription")}>{transcript}</p>}
+      {!anyPanel && transcript && (input || holding || phase === "Transcribing") && <p className="voice-live-transcript" role="group" aria-label={t("Live transcription")}>{transcript}</p>}
 
       <div className="voice-stage-controls">
         {ptt

@@ -1,17 +1,18 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Select } from "./Select";
 import {
   LuBlocks,
   LuBrain,
   LuBell,
   LuCheck,
-  LuCircleAlert,
   LuDownload,
   LuExternalLink,
   LuEye,
   LuFileJson,
   LuFolder,
   LuHammer,
+  LuShieldCheck,
+  LuImage,
   LuInfo,
   LuKeyboard,
   LuMonitor,
@@ -38,41 +39,35 @@ import { KeepRecent, useKeepRecentSave } from "./KeepRecent";
 import { formatTokens } from "../transcript";
 import { displayName } from "../tool-groups";
 import { useAsksBeforeDeleting } from "../confirm-prefs";
+import { useAnimations } from "../motion";
 import { useNotifyState } from "../notify";
+import { setCommandTrigger, typedCharacter, useCommandTrigger, validTrigger } from "../command-trigger";
+import { DEFAULT_TRIGGER } from "../slash-palette";
 import { PeoplePanel } from "./PeoplePanel";
+import { PicturesPanel } from "./PicturesPanel";
 import { PortalExtensions } from "./PortalExtensions";
-import { Modal } from "./Modal";
+import { Modal, useUnsavedDraft } from "./Modal";
 import { ToolDefaults } from "./ToolDefaults";
+import { SandboxSettings } from "./SandboxSettings";
 import { isEnter } from "../shortcuts";
 import { KeyboardShortcuts } from "./KeyboardShortcuts";
 import { ProvidersPanel } from "./ProvidersPanel";
-import { EffortPicker, Empty, Field, Section, Switch, SwitchRow, btnCls, inputCls, primaryCls } from "./SettingsUi";
+import { EffortPicker, Empty, ErrorBanner, Field, LoadFailed, Section, Switch, SwitchRow, btnCls, inputCls, primaryCls } from "./SettingsUi";
+import { confirmDialog } from "./ConfirmDialog";
 import { PackageCatalog } from "./PackageCatalog";
-import { packageName } from "../package-names";
-import { load, useCached } from "../settings-cache";
+import { packageName, webLink } from "../package-names";
+import { prefetchSettings, refreshFailed, useCached } from "../settings-cache";
+import type { Tab } from "../settings-tabs";
 import { serialSaver } from "../serial-saver";
+import { local } from "../safe-storage";
 import { SETTINGS_INDEX, searchSettings, type SettingEntry } from "../settings-search";
 import { useTheme, type Theme } from "../theme";
 import { humanKey, typed } from "../setting-values";
 import { effortLabel } from "../effort";
 import { modelTraits } from "../model-traits";
 import { languageChoice, languages, msg, setLanguage, t, tp, tx, useLanguage, type LanguageChoice } from "../i18n";
-
-export type Tab =
-  | "models"
-  | "general"
-  | "channels"
-  | "people"
-  | "add-ons"
-  | "tools"
-  | "skills"
-  | "mcp"
-  | "extensions"
-  | "browser"
-  | "push"
-  | "shortcuts"
-  | "about"
-  | "advanced";
+import { SkeletonGroup } from "./Skeleton";
+import { useFlash } from "../use-flash";
 
 /** Either a fixed tab or one extension's own configuration page. */
 type Nav = { kind: "tab"; id: Tab } | { kind: "ext"; spec: string };
@@ -96,6 +91,8 @@ const GROUPS: { label: string; tabs: TabDef[] }[] = [
     label: msg("Agent"),
     tabs: [
       { id: "tools", label: msg("Tools"), icon: <LuHammer />, hint: msg("What the agent may reach for, by default") },
+      { id: "sandbox", label: msg("Sandbox"), icon: <LuShieldCheck />, hint: msg("What the agent may read, change and run") },
+      { id: "images", label: msg("Images"), icon: <LuImage />, hint: msg("The image model behind making and changing pictures") },
       { id: "skills", label: msg("Skills"), icon: <LuWrench />, hint: msg("Procedures the agent can reach for") },
       { id: "mcp", label: msg("MCP"), icon: <LuPlug />, hint: msg("Servers the agent can pull tools from") },
       { id: "extensions", label: msg("Extensions"), icon: <LuBlocks />, hint: msg("Install and manage packages") },
@@ -130,31 +127,18 @@ const TABS = GROUPS.flatMap((g) => g.tabs);
 /** A response faster than this is not worth announcing — see the server's default too. */
 const defaultMinResponseSeconds = 60;
 
-/**
- * What Settings needs first, fetched before it is opened — a moment after the
- * portal loads — so that opening it draws the page rather than a placeholder.
- */
-export function prefetchSettings() {
-  const quietly = (p: Promise<unknown>) => void p.catch(() => {});
-  quietly(load("extensions", api.extensions, 30_000));
-  quietly(load("settings", api.settings, 30_000));
-  quietly(load("models", api.allModels, 30_000));
-  quietly(load("report-targets", api.reportTargets, 30_000));
-  quietly(load("providers", api.providers, 30_000));
-}
-
 /** The rail's extension pages as last seen, so a reload does not start without them. */
 const RAIL_KEY = "pithagoras.settings.extension-rail";
 function railSnapshot(): { spec: string; name: string }[] {
   try {
-    const list = JSON.parse(localStorage.getItem(RAIL_KEY) ?? "[]");
+    const list = JSON.parse(local.get(RAIL_KEY) ?? "[]");
     return Array.isArray(list) ? list.filter((e) => e && typeof e.spec === "string" && typeof e.name === "string") : [];
   } catch {
     return [];
   }
 }
 
-export function ConfigModal({
+export const ConfigModal = memo(function ConfigModal({
   onClose,
   initialTab = "general",
   onSetup,
@@ -166,13 +150,14 @@ export function ConfigModal({
 }) {
   const [nav, setNav] = useState<Nav>({ kind: "tab", id: TABS.some((t) => t.id === initialTab) ? initialTab : "general" });
   const [error, setError] = useState<string | null>(null);
+  const banner = useRef<HTMLDivElement>(null);
   /** A section a search went to, to scroll to once its page has drawn it. */
   const [target, setTarget] = useState<{ section: string; n: number } | null>(null);
   const page = useRef<HTMLDivElement>(null);
 
   // Loaded here rather than inside the Extensions tab: the rail lists every
   // extension that exposes settings, so it needs them before anything is shown.
-  const exts = useCached("extensions", api.extensions, { onError: (e) => setError(e.message) });
+  const exts = useCached("extensions", api.extensions, { onError: refreshFailed("extensions", setError) });
   const extensions = exts.value?.extensions ?? [];
   const settingsPath = exts.value?.settingsPath ?? "";
   const loadingExts = !exts.value && !exts.failed;
@@ -180,14 +165,19 @@ export function ConfigModal({
 
   useEffect(() => prefetchSettings(), []);
 
+  // A refused save is said at the top of the pane, which a long form has scrolled away from: it is brought into
+  // view when it comes, and it is not the next section's.
+  useEffect(() => {
+    if (error) banner.current?.scrollIntoView({ block: "nearest" });
+  }, [error]);
+  const section = nav.kind === "tab" ? nav.id : nav.spec;
+  useEffect(() => setError(null), [section]);
+
   const configurable = exts.value ? extensions.filter((e) => e.settings.length > 0) : railSnapshot().map((e) => ({ ...e, settings: [] as ExtensionInfo["settings"], placeholder: true }));
   useEffect(() => {
     if (!exts.value) return;
-    try {
-      localStorage.setItem(RAIL_KEY, JSON.stringify(configurable.map((e) => ({ spec: e.spec, name: e.name }))));
-    } catch {
-      // Only a head start for next time.
-    }
+    // Only a head start for next time.
+    local.set(RAIL_KEY, JSON.stringify(configurable.map((e) => ({ spec: e.spec, name: e.name }))));
   }, [exts.value]);
   const activeExt =
     nav.kind === "ext" ? extensions.find((e) => e.spec === nav.spec) : undefined;
@@ -293,17 +283,9 @@ export function ConfigModal({
         </SettingsSearch>
       }
     >
-      {error && (
-        <div className="mb-4 flex items-start gap-2 rounded-xl border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
-          <LuCircleAlert className="mt-0.5 h-4 w-4 shrink-0" />
-          <span className="min-w-0 flex-1">{error}</span>
-          <button onClick={() => setError(null)} className="text-danger/70 hover:text-danger">
-            ✕
-          </button>
-        </div>
-      )}
+      {error && <ErrorBanner ref={banner} className="mb-4" onClose={() => setError(null)}>{error}</ErrorBanner>}
 
-      <div key={nav.kind === "tab" ? nav.id : nav.spec} ref={page} className="settings-page">
+      <div key={section} ref={page} className="settings-page">
       {nav.kind === "tab" && nav.id === "models" && <ProvidersPanel onError={setError} onSetup={onSetup} />}
       {nav.kind === "tab" && nav.id === "push" && <PushPanel onError={setError} />}
       {nav.kind === "tab" && nav.id === "general" && <GeneralPanel onError={setError} onProviders={() => setNav({ kind: "tab", id: "models" })} />}
@@ -313,12 +295,16 @@ export function ConfigModal({
       {nav.kind === "tab" && nav.id === "people" && <PeoplePanel onError={setError} />}
       {nav.kind === "tab" && nav.id === "add-ons" && <PortalExtensions onError={setError} />}
       {nav.kind === "tab" && nav.id === "tools" && <ToolDefaults onError={setError} />}
+      {nav.kind === "tab" && nav.id === "sandbox" && <SandboxSettings onError={setError} />}
+      {nav.kind === "tab" && nav.id === "images" && <PicturesPanel onError={setError} />}
       {nav.kind === "tab" && nav.id === "skills" && <SkillsPanel onError={setError} />}
       {nav.kind === "tab" && nav.id === "mcp" && <McpPanel onError={setError} />}
       {nav.kind === "tab" && nav.id === "extensions" && (
         <ExtensionsPanel
           extensions={extensions}
           loading={loadingExts}
+          failed={exts.value ? null : exts.failed}
+          onRetry={exts.reload}
           onError={setError}
           onRefresh={loadExtensions}
           onConfigure={(spec) => setNav({ kind: "ext", spec })}
@@ -332,14 +318,16 @@ export function ConfigModal({
         (activeExt ? (
           <ExtensionPanel ext={activeExt} onError={setError} onSaved={loadExtensions} />
         ) : loadingExts ? (
-          <div className="skeleton-group space-y-2"><div className="skeleton h-9 w-1/2" /><div className="skeleton h-16 w-full" /><div className="skeleton h-16 w-full" /></div>
+          <SkeletonGroup className="space-y-2" label={t("Loading…")}><div className="skeleton h-9 w-1/2" /><div className="skeleton h-16 w-full" /><div className="skeleton h-16 w-full" /></SkeletonGroup>
+        ) : exts.failed ? (
+          <LoadFailed error={exts.failed} onRetry={exts.reload} />
         ) : (
           <Empty>{t("That extension is no longer installed.")}</Empty>
         ))}
       </div>
     </Modal>
   );
-}
+});
 
 // --- rail ---
 
@@ -467,7 +455,7 @@ function RailItem({
       onClick={onClick}
       title={hint}
       aria-current={active ? "page" : undefined}
-      className={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm transition ${
+      className={`rail-item flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm transition ${
         active
           ? "bg-accent/10 text-accent ring-1 ring-inset ring-accent/20"
           : "text-fg-muted hover:bg-fg/5 hover:text-fg"
@@ -489,8 +477,15 @@ function RailItem({
  * opening a form.
  */
 function ReportDefault({ onError }: { onError: (e: string) => void }) {
-  const { value: kept, reload: load } = useCached("report-targets", api.reportTargets, { onError: (e) => onError(e.message) });
-  if (!kept) return null;
+  const { value: kept, failed, reload: load } = useCached("report-targets", api.reportTargets, { onError: refreshFailed("report-targets", onError) });
+  if (!kept) {
+    // Said as it is: the setting is not missing, it was not read.
+    return failed ? (
+      <Section title={t("Routine reports")}>
+        <LoadFailed error={failed} onRetry={load} />
+      </Section>
+    ) : null;
+  }
   const targets: ReportTarget[] = kept.targets;
   const current: ReportTo | null = kept.default;
 
@@ -533,18 +528,89 @@ function Confirmations() {
   return (
     <SwitchRow
       title={t("Ask before deleting")}
-      detail={t("Chats, messages, files, skills, routines, projects, voices, channels, providers. Unsaved changes are still asked about: there is no other copy of them.")}
+      detail={t("Chats, messages, files, skills, routines, projects, voices, channels, providers, MCP servers and extensions. Unsaved changes are still asked about: there is no other copy of them.")}
       on={ask}
       onChange={setAsk}
     />
   );
 }
 
+/** The flourishes on top of the portal's own motion: one switch, kept in this browser. */
+function Animations() {
+  const { chosen, reduced, set } = useAnimations();
+  return (
+    <SwitchRow
+      title={t("Fancy animations")}
+      detail={t("The portal opens through two doors, chats swing in, deleted rows break apart and panels dock with a bounce. Short ones, and none of them waits for you or gets in your way. Off, the portal is as quiet as it was before.")}
+      on={chosen}
+      onChange={set}
+      note={reduced ? t("Your system asks for reduced motion, so none of them play, whatever this says.") : undefined}
+    />
+  );
+}
+
+/**
+ * What a command starts with in the message box: "/" until another is picked.
+ *
+ * Kept as soon as it is typed, over the old one. A character that cannot be
+ * one is said so and not kept, and the field shows the one in use again once
+ * it is left.
+ */
+function CommandCharacter() {
+  const trigger = useCommandTrigger();
+  const [text, setText] = useState(trigger);
+  const [refused, setRefused] = useState(false);
+  // A change made elsewhere — Reset, another tab — is what the field shows.
+  useEffect(() => {
+    setText(trigger);
+    setRefused(false);
+  }, [trigger]);
+  return (
+    <div className="rounded-xl border border-line bg-raised/40 p-3">
+      <div className="flex items-center gap-3">
+        <div className="w-16">
+          <input
+            value={text}
+            aria-label={t("Command character")}
+            aria-invalid={refused}
+            autoComplete="off"
+            spellCheck={false}
+            onFocus={(e) => e.currentTarget.select()}
+            onBlur={() => {
+              setText(trigger);
+              setRefused(false);
+            }}
+            onChange={(e) => {
+              const next = typedCharacter(text, e.target.value);
+              setText(next);
+              setRefused(next !== "" && !validTrigger(next));
+              if (validTrigger(next)) setCommandTrigger(next);
+            }}
+            className={`${inputCls} text-center font-mono`}
+          />
+        </div>
+        <button onClick={() => setCommandTrigger(DEFAULT_TRIGGER)} disabled={trigger === DEFAULT_TRIGGER} className={btnCls}>
+          {t("Reset")}
+        </button>
+      </div>
+      <p className="mt-2 text-xs text-fg-faint">
+        {t("Type {command} in the message box to see the commands, or {skill} to run a skill.", { command: trigger, skill: `${trigger}skill:name` })}
+      </p>
+      {refused && (
+        <p role="alert" className="mt-1 text-xs text-warn">
+          {t("That cannot be it. Use one punctuation mark or symbol: a letter or digit would open the list for every message, and - _ : are part of a command's name.")}
+        </p>
+      )}
+    </div>
+  );
+}
+
 /** Only where there is a password: without one there is nothing to sign out of. */
 function SignOut({ onError }: { onError: (e: string) => void }) {
   const [required, setRequired] = useState(false);
+  const [short, setShort] = useState(false);
   useEffect(() => {
-    api.authStatus().then((s) => setRequired(s.authRequired)).catch(() => {});
+    api.authStatus().then((s) => { setRequired(s.authRequired); setShort(Boolean(s.shortPassword)); }).catch(() => {});
   }, []);
   if (!required) return null;
   const signOut = () =>
@@ -557,6 +623,11 @@ function SignOut({ onError }: { onError: (e: string) => void }) {
       <button onClick={signOut} className={btnCls}>
         {t("Sign out")}
       </button>
+      {short && (
+        <p role="note" className="mt-3 text-xs text-warn">
+          {t("The portal's password is shorter than 8 characters. It keeps working because it was already in use, but anybody who can reach the portal can try to guess it. Set a longer PORTAL_PASSWORD and restart.")}
+        </p>
+      )}
     </Section>
   );
 }
@@ -761,11 +832,20 @@ function BrowserPanel({ onError }: { onError: (e: string) => void }) {
       <Section title={t("Appearance")}>
         <Appearance />
       </Section>
+      <Section title={t("Animations")}>
+        <Animations />
+      </Section>
       <Section title={t("Language")} hint={t("The portal's own words. What the agent writes is up to the agent.")}>
         <LanguagePicker />
       </Section>
       <Section title={t("Notifications")}>
         <Notifications />
+      </Section>
+      <Section
+        title={t("Command character")}
+        hint={t("What a command starts with when you type it in the message box. The agent is still sent the slash form, so skills and every other command keep working. A dead key, such as ^ on a German keyboard, starts a command in the box, but cannot be used to jump to it from elsewhere on the page.")}
+      >
+        <CommandCharacter />
       </Section>
       <Section title={t("Confirmations")}>
         <Confirmations />
@@ -778,8 +858,9 @@ function BrowserPanel({ onError }: { onError: (e: string) => void }) {
 /** Where this portal keeps what it keeps, set when it was deployed. */
 function AboutPanel({ onError }: { onError: (e: string) => void }) {
   // What Defaults reads too, fetched ahead: drawn at once from what is kept.
-  const meta = useCached("settings", api.settings, { onError: (e) => onError(e.message) }).value;
-  if (!meta) return <div className="skeleton-group space-y-2"><div className="skeleton h-4 w-32" /><div className="skeleton h-28 w-full" /></div>;
+  const { value: meta, failed, reload } = useCached("settings", api.settings, { onError: refreshFailed("settings", onError) });
+  if (!meta && failed) return <LoadFailed error={failed} onRetry={reload} />;
+  if (!meta) return <SkeletonGroup className="space-y-2" label={t("Loading…")}><div className="skeleton h-4 w-32" /><div className="skeleton h-28 w-full" /></SkeletonGroup>;
   const agentDir = meta.piSettingsPath.replace(/\/settings\.json$/, "");
   const rows: { icon: ReactNode; label: string; value: string; detail: string }[] = [
     {
@@ -820,7 +901,7 @@ function GeneralPanel({ onError, onProviders }: { onError: (e: string) => void; 
   // All three are fetched ahead and kept, and the page waits for all three:
   // drawn part by part, the model menus filled in and a warning pushed the
   // context settings down after the page was already on screen.
-  const settings = useCached("settings", api.settings, { onError: (e) => onError(e.message) });
+  const settings = useCached("settings", api.settings, { onError: refreshFailed("settings", onError) });
   const modelsQuery = useCached("models", api.allModels);
   const reports = useCached("report-targets", api.reportTargets);
   const r = settings.value;
@@ -946,10 +1027,12 @@ function GeneralPanel({ onError, onProviders }: { onError: (e: string) => void; 
   }, [models]);
 
   const ready = stored && defaults && (models || modelsFailed) && (reports.value || reports.failed);
+  // Without the settings there is nothing to show: no skeleton that never ends.
+  if (!r && settings.failed) return <LoadFailed error={settings.failed} onRetry={settings.reload} />;
   if (!ready) {
     // The shape of the page, so it does not jump when the page replaces it.
     return (
-      <div className="skeleton-group space-y-7" aria-label={t("Loading")}>
+      <SkeletonGroup className="space-y-7" label={t("Loading")}>
         {[56, 44].map((h) => (
           <div key={h} className="space-y-2.5">
             <div className="skeleton h-3 w-28" />
@@ -957,7 +1040,7 @@ function GeneralPanel({ onError, onProviders }: { onError: (e: string) => void; 
             <div className="skeleton w-full" style={{ height: `${h / 4}rem` }} />
           </div>
         ))}
-      </div>
+      </SkeletonGroup>
     );
   }
 
@@ -1139,18 +1222,25 @@ const SOURCES = [
 function ExtensionsPanel({
   extensions,
   loading,
+  failed,
+  onRetry,
   onError,
   onRefresh,
   onConfigure,
 }: {
   extensions: ExtensionInfo[];
   loading: boolean;
+  /** Why the list could not be read, when it has not been: "Nothing installed" would be a claim. */
+  failed: Error | null;
+  onRetry: () => unknown;
   onError: (e: string) => void;
   onRefresh: () => Promise<ExtensionInfo[]>;
   onConfigure: (spec: string) => void;
 }) {
   const [spec, setSpec] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
+  // The same, readable by a second Enter that comes before the draw.
+  const busyRef = useRef(false);
   /** What the last switch did to the conversations that were open. */
   const [note, setNote] = useState<(() => string) | null>(null);
   // The names given in Settings → Tools. A package is one thing and should be
@@ -1165,6 +1255,9 @@ function ExtensionsPanel({
   }, []);
 
   const act = async (label: string, fn: () => Promise<unknown>) => {
+    // Enter in the name field gets here without the disabled button's say: a second install into the same folder collides with the first.
+    if (busyRef.current) return;
+    busyRef.current = true;
     setBusy(label);
     setNote(null);
     try {
@@ -1174,6 +1267,7 @@ function ExtensionsPanel({
     } catch (e) {
       onError((e as Error).message);
     } finally {
+      busyRef.current = false;
       setBusy(null);
     }
   };
@@ -1217,6 +1311,7 @@ function ExtensionsPanel({
               act("install", () => api.installPackage(spec.trim()))
             }
             placeholder="npm:@scope/package"
+            aria-label={t("Install by name")}
             className={`${inputCls} font-mono text-xs`}
           />
           <button
@@ -1245,6 +1340,8 @@ function ExtensionsPanel({
       <Section title={`${t("Installed")}${extensions.length ? ` (${extensions.length})` : ""}`}>
         {loading ? (
           <p className="text-sm text-fg-subtle">{t("Reading installed packages…")}</p>
+        ) : failed ? (
+          <LoadFailed error={failed} onRetry={onRetry} />
         ) : extensions.length === 0 ? (
           <Empty>
             {t("Nothing installed yet.")}
@@ -1289,35 +1386,29 @@ function ExtensionsPanel({
                     </span>
                   )}
                   {ext.enabled !== undefined && (
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={ext.enabled}
-                      aria-label={ext.enabled ? t("Switch off {name}", { name: displayName(ext.name, names) }) : t("Switch on {name}", { name: displayName(ext.name, names) })}
+                    <Switch
+                      on={ext.enabled}
+                      onChange={() => switchPackage(ext)}
+                      label={ext.enabled ? t("Switch off {name}", { name: displayName(ext.name, names) }) : t("Switch on {name}", { name: displayName(ext.name, names) })}
                       title={
                         ext.enabled
                           ? t("On — click to switch it off without uninstalling it")
                           : t("Off — its commands, skills and tools are not loaded. Click to switch it on")
                       }
                       disabled={busy !== null}
-                      onClick={() => switchPackage(ext)}
-                      className="ml-auto shrink-0 disabled:opacity-40"
-                    >
-                      <span
-                        className={`relative block h-5 w-9 rounded-full transition ${ext.enabled ? "bg-accent" : "bg-raised"}`}
-                      >
-                        <span
-                          className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all ${
-                            ext.enabled ? "left-[1.125rem]" : "left-0.5"
-                          }`}
-                        />
-                      </span>
-                    </button>
+                      className="ml-auto"
+                    />
                   )}
                   <button
                     disabled={busy !== null}
-                    onClick={() => act(ext.spec, () => api.removePackage(ext.spec))}
+                    onClick={async () => {
+                      // Its commands, tools and skills go from every chat, and the switch beside it is easy to miss for this one.
+                      const name = displayName(ext.name, names);
+                      if (!(await confirmDialog({ title: t("Remove {name}?", { name }), message: t("It is uninstalled: its commands, tools and skills are gone from every chat."), confirmLabel: t("Remove"), danger: true, deletes: true }))) return;
+                      await act(ext.spec, () => api.removePackage(ext.spec));
+                    }}
                     title={t("Remove")}
+                    aria-label={t("Remove {name}", { name: displayName(ext.name, names) })}
                     className={`${ext.enabled === undefined ? "ml-auto " : ""}shrink-0 rounded-lg p-1.5 text-fg-subtle transition hover:bg-danger/10 hover:text-danger disabled:opacity-40`}
                   >
                     {busy === ext.spec ? (
@@ -1387,12 +1478,14 @@ function ExtensionPanel({
   const [busy, setBusy] = useState<string | null>(null);
   const [savedKey, setSavedKey] = useState<string | null>(null);
 
+  /** A stored value as the field shows it. */
+  const shown = (s: ExtensionInfo["settings"][number]) => (s.value == null ? "" : typeof s.value === "object" ? JSON.stringify(s.value) : String(s.value));
   // Reset when switching between extensions, or the previous one's edits leak.
   useEffect(() => {
-    setValues(
-      Object.fromEntries(ext.settings.map((s) => [s.key, s.value == null ? "" : typeof s.value === "object" ? JSON.stringify(s.value) : String(s.value)]))
-    );
+    setValues(Object.fromEntries(ext.settings.map((s) => [s.key, shown(s)])));
   }, [ext.spec]);
+  // A field with something typed in that its own Save has not stored. (A switch saves as it is flipped.)
+  useUnsavedDraft(ext.settings.some((s) => s.key in values && values[s.key] !== shown(s)));
 
   /** What was typed for a key, as the kind of value it is — told from the text when nothing is set yet. */
   const typedFor = (key: string) => {
@@ -1409,7 +1502,9 @@ function ExtensionPanel({
     setBusy(key);
     try {
       await api.setExtensionSetting(key, value);
-      await onSaved();
+      const now = (await onSaved()).find((e) => e.spec === ext.spec)?.settings.find((s) => s.key === key);
+      // What the field holds is what is stored now, in the form it is stored in: it is not a draft any more.
+      if (now) setValues((was) => ({ ...was, [key]: shown(now) }));
       setSavedKey(key);
       setTimeout(() => setSavedKey(null), 2000);
     } catch (e) {
@@ -1430,9 +1525,9 @@ function ExtensionPanel({
           {ext.description && <p className="text-xs text-fg-subtle">{ext.description}</p>}
           <p className="mt-0.5 truncate font-mono text-[10px] text-fg-faint">{ext.spec}</p>
         </div>
-        {ext.homepage && (
+        {webLink(ext.homepage) && (
           <a
-            href={ext.homepage}
+            href={webLink(ext.homepage)}
             target="_blank"
             rel="noreferrer"
             className="shrink-0 rounded-lg p-1.5 text-fg-subtle transition hover:bg-fg/10 hover:text-fg"
@@ -1520,11 +1615,24 @@ function AdvancedPanel({
   onError: (e: string) => void;
 }) {
   const [file, setFile] = useState<{ path: string; content: string } | null>(null);
-  const [saved, setSaved] = useState(false);
+  const [failed, setFailed] = useState<string | null>(null);
+  const [saved, flashSaved] = useFlash();
   const [busy, setBusy] = useState(false);
+  // The file as it was read or last saved: what is typed over it and not saved is a draft.
+  const [from, setFrom] = useState("");
+  useUnsavedDraft(!!file && !busy && file.content !== from);
 
+  const read = () =>
+    api.piSettings().then(
+      (f) => {
+        setFailed(null);
+        setFile(f);
+        setFrom(f.content);
+      },
+      (e) => setFailed((e as Error).message),
+    );
   useEffect(() => {
-    api.piSettings().then(setFile).catch((e) => onError((e as Error).message));
+    void read();
   }, []);
 
   return (
@@ -1533,11 +1641,12 @@ function AdvancedPanel({
       hint={t("pi's own settings file, where installed extensions keep their configuration.")}
     >
       {!file ? (
-        <p className="text-sm text-fg-subtle">{t("Loading…")}</p>
+        failed ? <LoadFailed error={failed} onRetry={read} /> : <p className="text-sm text-fg-subtle">{t("Loading…")}</p>
       ) : (
         <div className="space-y-2">
           <textarea
             value={file.content}
+            aria-label="settings.json"
             onChange={(e) => setFile({ ...file, content: e.target.value })}
             rows={16}
             spellCheck={false}
@@ -1550,8 +1659,8 @@ function AdvancedPanel({
                 setBusy(true);
                 try {
                   await api.savePiSettings(file.content);
-                  setSaved(true);
-                  setTimeout(() => setSaved(false), 2000);
+                  setFrom(file.content);
+                  flashSaved();
                 } catch (e) {
                   onError((e as Error).message);
                 } finally {

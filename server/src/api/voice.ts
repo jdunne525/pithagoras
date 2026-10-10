@@ -1,14 +1,16 @@
-import { addVoice, listVoices, readVoice, deleteVoice } from '../voice-presets.js';
+import { addVoice, listVoices, readVoice, updateVoice, deleteVoice, VoiceNotFound } from '../voice-presets.js';
 import { spokenNumbers } from '../voice-numbers.js';
 import { INPUT_LANGUAGES, CHATTERBOX_LANGUAGES } from '../voice-languages.js';
+import { DEFAULT_CHOICE, cpuSpeechUrl, endpoints, isManagedUrl, parseChoice, speechUrl, type VoiceChoice } from '../voice-engines.js';
+import { DEFAULT_KOKORO_VOICE, KOKORO_SPEEDS, isKokoroVoice } from '../kokoro-voices.js';
 import { VoiceLeases } from '../extensions/voice-leases.js';
+import { DEFAULT_SKIP_THINKING_PROVIDERS, DEFAULT_VOICE_INSTRUCTIONS, voiceInstructions, voiceRulesOn } from '../pi/voice-first.js';
 import * as voiceService from '../extensions/voice-service.js';
 import { setTimeout as delay } from "node:timers/promises";
 import { once } from "node:events";
-import { readFile } from "node:fs/promises";
-import path from "node:path";
 import express, { type Router } from "express";
-import { getDb, getStoredSettings } from "../db.js";
+import { getSession, getSetting, putSetting } from "../db.js";
+import { agentOf, defaultAgent } from "../agents.js";
 
 const DEFAULT_VAD = { positiveSpeechThreshold: 0.65, negativeSpeechThreshold: 0.35, minSpeechMs: 256, preSpeechPadMs: 320, redemptionMs: 1000 };
 export interface VoiceConfig {
@@ -21,27 +23,46 @@ export interface VoiceConfig {
   voice: string;
   language: string;
   cfgScale: number;
-  runtime?: "breeze" | "audio-cpp" | "chatterbox";
+  // `none`: speech recognition only. There is nothing to speak with, so no replies are spoken.
+  runtime?: "breeze" | "audio-cpp" | "chatterbox" | "kokoro" | "none";
   // Sent as the OpenAI transcription "model" field. audio.cpp requires it and
   // names the loaded model; Whisper.cpp ignores unknown fields, so an empty
   // value keeps the existing Whisper contract byte for byte.
   sttModel?: string;
   // Chatterbox emotion exaggeration; its own scale, unrelated to Breeze's CFG.
   exaggeration?: number;
+  // Kokoro speaks with one of its own voices, kept apart from `voice` so that
+  // switching runtimes keeps the library voice the others speak with.
+  kokoroVoice?: string;
+  // Kokoro's speed multiplier.
+  speed?: number;
+  // How the agent is told to speak in voice mode. Empty means the built-in text.
+  responseInstructions?: string;
+  // The providers whose first call of a spoken turn goes without thinking. Absent means DEFAULT_SKIP_THINKING_PROVIDERS.
+  skipThinkingProviders?: string[];
 }
+/** Long enough for the built-in text several times over; every voice turn carries it. */
+export const MAX_RESPONSE_INSTRUCTIONS = 8000;
+// The addresses of a portal with nothing set up: services of the Compose overlay, not the managed ones.
+const DEFAULT_WHISPER_URL = "http://127.0.0.1:8178/inference";
+const DEFAULT_BREEZE_URL = "http://127.0.0.1:7860/v1/audio/speech";
 function config(): VoiceConfig {
-  const stored = getStoredSettings() as Record<string, string>;
-  return stored.voice ? { voice: "design", language: "auto", cfgScale: 4, ...JSON.parse(stored.voice) } : {
+  const stored = getSetting("voice");
+  return stored ? { voice: "design", language: "auto", cfgScale: 4, ...JSON.parse(stored) } : {
     voice: "design", language: "auto", cfgScale: 4,
-    enabled: false, whisperUrl: "http://127.0.0.1:8178/inference",
-    breezeUrl: "http://127.0.0.1:7860/v1/audio/speech",
+    enabled: false, whisperUrl: DEFAULT_WHISPER_URL,
+    breezeUrl: DEFAULT_BREEZE_URL,
     instruction: "A warm, clear English voice with a calm, conversational delivery.",
   };
 }
 export function validateConfig(value: any): VoiceConfig {
   if (typeof value?.enabled !== "boolean") throw new Error("enabled must be a boolean");
+  const runtime = value.runtime ?? "breeze";
+  if (!["breeze", "audio-cpp", "chatterbox", "kokoro", "none"].includes(runtime)) throw new Error("Choose a supported speech runtime");
   for (const key of ["whisperUrl", "breezeUrl"]) {
     if (typeof value[key] !== "string") throw new Error(`${key} is required`);
+    // With no speech synthesis there is no address to speak to.
+    if (key === "breezeUrl" && runtime === "none" && !value[key].trim()) continue;
     const url = new URL(value[key]);
     if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.hash)
       throw new Error(`${key} must be an HTTP URL without credentials or a fragment`);
@@ -50,20 +71,26 @@ export function validateConfig(value: any): VoiceConfig {
     throw new Error("Provide a voice description of 1–1000 characters");
   const voice = value.voice ?? "design";
   if (typeof voice !== "string") throw new Error("Choose a speaking voice");
-  const preset = ["design", "aria"].includes(voice) ? undefined : readVoice(voice);
+  const preset = voice === "design" ? undefined : readVoice(voice);
   const language = value.language ?? "auto";
   if (!INPUT_LANGUAGES.some(([code]) => code === language))
     throw new Error("Choose a supported input language");
   const cfgScale = value.cfgScale ?? 4;
   if (![1, 4].includes(cfgScale)) throw new Error("Choose fast or expressive speech generation");
-  const runtime = value.runtime ?? "breeze";
-  if (!["breeze", "audio-cpp", "chatterbox"].includes(runtime)) throw new Error("Choose a supported speech runtime");
   const sttModel = typeof value.sttModel === "string" ? value.sttModel.trim() : value.sttModel ?? "";
   if (typeof sttModel !== "string" || sttModel.length > 100 || (sttModel && !/^[\w.:-]+$/.test(sttModel)))
     throw new Error("A speech recognition model id may only contain letters, digits, dot, colon, dash or underscore");
   const exaggeration = value.exaggeration ?? 0.5;
   if (typeof exaggeration !== "number" || !Number.isFinite(exaggeration) || exaggeration < 0 || exaggeration > 2)
     throw new Error("Expressiveness must be between 0 and 2");
+  const kokoroVoice = value.kokoroVoice ?? DEFAULT_KOKORO_VOICE;
+  if (!isKokoroVoice(kokoroVoice)) throw new Error("Choose one of Kokoro's voices");
+  const speed = value.speed ?? 1;
+  if (!(KOKORO_SPEEDS as readonly number[]).includes(speed)) throw new Error("Choose a supported speaking speed");
+  const responseInstructions = value.responseInstructions ?? "";
+  if (typeof responseInstructions !== "string" || responseInstructions.length > MAX_RESPONSE_INSTRUCTIONS)
+    throw new Error(`Speaking instructions may be at most ${MAX_RESPONSE_INSTRUCTIONS} characters`);
+  const skipThinkingProviders = skipThinking(value.skipThinkingProviders);
   if (runtime === "chatterbox") {
     // Chatterbox is told a language or it refuses; it has no detection mode,
     // and the language also decides how numbers are written out for synthesis.
@@ -71,40 +98,69 @@ export function validateConfig(value: any): VoiceConfig {
     if (!CHATTERBOX_LANGUAGES.includes(language)) throw new Error(`Chatterbox speaks: ${CHATTERBOX_LANGUAGES.join(", ")}`);
     // Refuse a voice it cannot speak with here, rather than on every phrase.
     if (voice === "design" || (preset && !preset.audio))
-      throw new Error("Chatterbox speaks with a reference clone: choose Aria or a voice with a recording");
+      throw new Error("Chatterbox speaks with a reference clone: choose a voice with a recording");
   }
   const vad = { ...DEFAULT_VAD, ...value.vad };
   for (const [key, min, max] of [['positiveSpeechThreshold', 0.01, 1], ['negativeSpeechThreshold', 0, 0.99], ['minSpeechMs', 64, 2000], ['preSpeechPadMs', 0, 1000], ['redemptionMs', 200, 3000]] as const) {
     if (typeof vad[key] !== 'number' || !Number.isFinite(vad[key]) || vad[key] < min || vad[key] > max) throw new Error(`Invalid VAD ${key}: expected ${min}–${max}`);
   }
   if (vad.negativeSpeechThreshold >= vad.positiveSpeechThreshold) throw new Error('Speech-end threshold must be lower than speech-start threshold');
-  return { vad, lazyLoad: value.lazyLoad !== false, runtime, voice, language, cfgScale, sttModel, exaggeration, enabled: value.enabled, whisperUrl: value.whisperUrl.trim(), breezeUrl: value.breezeUrl.trim(), instruction: value.instruction.trim() };
+  return { vad, lazyLoad: value.lazyLoad !== false, runtime, voice, language, cfgScale, sttModel, exaggeration, kokoroVoice, speed, responseInstructions: savedInstructions(responseInstructions), skipThinkingProviders, enabled: value.enabled, whisperUrl: value.whisperUrl.trim(), breezeUrl: value.breezeUrl.trim(), instruction: value.instruction.trim() };
+}
+/**
+ * The providers as saved: names as the model menu shows them, each once. The
+ * default list is not saved, so it follows the portal's updates; an empty list
+ * is, and switches the first call's thinking back on everywhere.
+ */
+function skipThinking(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > 50 || value.some((name) => typeof name !== "string"))
+    throw new Error("Name at most 50 providers");
+  const names = [...new Set((value as string[]).map((name) => name.trim()).filter(Boolean))];
+  const bad = names.find((name) => name.length > 100 || !/^[\w.:@-]+$/.test(name));
+  if (bad) throw new Error(`"${bad}" is not a provider name: use letters, digits, dot, colon, @, dash or underscore`);
+  const same = names.length === DEFAULT_SKIP_THINKING_PROVIDERS.length && names.every((name) => DEFAULT_SKIP_THINKING_PROVIDERS.includes(name));
+  return same ? undefined : names;
+}
+/** Text equal to the built-in instructions is not saved, so they follow the portal's updates. */
+function savedInstructions(text: string): string {
+  const trimmed = text.trim();
+  return trimmed === DEFAULT_VOICE_INSTRUCTIONS ? "" : trimmed;
+}
+/**
+ * The settings as the page gets them: the speaking instructions in use, whether
+ * saved or built in, and the built-in ones to go back to. `off` says the portal
+ * sends none at all (VOICE_RESPONSE_INSTRUCTIONS=false), saved or not.
+ */
+function withInstructions<T extends { responseInstructions?: string; skipThinkingProviders?: string[] }>(value: T) {
+  return { ...value, responseInstructions: voiceInstructions(value.responseInstructions), defaultResponseInstructions: DEFAULT_VOICE_INSTRUCTIONS, responseInstructionsOff: !voiceRulesOn(),
+    skipThinkingProviders: value.skipThinkingProviders ?? [...DEFAULT_SKIP_THINKING_PROVIDERS], defaultSkipThinkingProviders: [...DEFAULT_SKIP_THINKING_PROVIDERS] };
 }
 /** The samples of a RIFF/WAVE buffer, checked to be what the player expects. */
-export function wavPcm(wav: Buffer): Buffer {
+export function wavPcm(wav: Buffer, runtime = "Chatterbox"): Buffer {
   if (wav.length < 44 || wav.toString("ascii", 0, 4) !== "RIFF" || wav.toString("ascii", 8, 12) !== "WAVE")
-    throw new Error("Chatterbox returned invalid WAV audio");
+    throw new Error(`${runtime} returned invalid WAV audio`);
   let format = false;
   for (let at = 12; at + 8 <= wav.length;) {
     const id = wav.toString("ascii", at, at + 4), size = wav.readUInt32LE(at + 4);
     if (id === "fmt ") {
       if (size < 16 || at + 24 > wav.length || wav.readUInt16LE(at + 8) !== 1 || wav.readUInt16LE(at + 10) !== 1 || wav.readUInt32LE(at + 12) !== 24000 || wav.readUInt16LE(at + 22) !== 16)
-        throw new Error("Expected mono 24 kHz 16-bit audio from Chatterbox");
+        throw new Error(`Expected mono 24 kHz 16-bit audio from ${runtime}`);
       format = true;
     }
     if (id === "data") {
       // Samples are only meaningful once the fmt chunk has described them.
-      if (!format) throw new Error("Expected mono 24 kHz 16-bit audio from Chatterbox");
+      if (!format) throw new Error(`Expected mono 24 kHz 16-bit audio from ${runtime}`);
       // A writer that does not know the length up front leaves a placeholder
       // size behind. The response is fully buffered, so its end is the truth.
       const end = size && at + 8 + size <= wav.length ? at + 8 + size : wav.length;
       const pcm = wav.subarray(at + 8, end);
-      if (!pcm.length || pcm.length % 2) throw new Error("Chatterbox returned invalid PCM audio");
+      if (!pcm.length || pcm.length % 2) throw new Error(`${runtime} returned invalid PCM audio`);
       return pcm;
     }
     at += 8 + size + (size % 2);
   }
-  throw new Error("Chatterbox returned no audio data");
+  throw new Error(`${runtime} returned no audio data`);
 }
 export function pcmWav(pcm: Buffer): Buffer {
   if (!pcm.length || pcm.length % 2) throw new Error("Breeze returned invalid PCM audio");
@@ -116,16 +172,25 @@ export function pcmWav(pcm: Buffer): Buffer {
   header.write("data", 36); header.writeUInt32LE(pcm.length, 40);
   return Buffer.concat([header, pcm]);
 }
-const managedVoice = () => config().runtime === 'audio-cpp' && config().breezeUrl === voiceService.breezeUrl;
-const leases = new VoiceLeases(()=>voiceService.modelAction('load'),()=>voiceService.modelAction('unload'));
+// Speech is in the GPU process, or in the CPU one where Kokoro is put on the CPU.
+const managedVoice = () => ['audio-cpp', 'chatterbox', 'kokoro'].includes(config().runtime ?? '') && [speechUrl, cpuSpeechUrl].includes(config().breezeUrl);
+const managedPort = () => Number(new URL(config().breezeUrl).port);
+// The lease loads the speech model the saved runtime speaks with. Recognition loads itself on its first request.
+const managedEngine = () => { const runtime = config().runtime; return runtime === 'chatterbox' || runtime === 'kokoro' ? runtime : 'breeze'; };
+const leases = new VoiceLeases(()=>voiceService.modelAction('load', managedEngine(), managedPort()),()=>voiceService.modelAction('unload', managedEngine(), managedPort()));
+/**
+ * A setup that was started here and has finished is connected to, once: what the page's Install did not wait for.
+ * Taken up wherever the finished service is first seen, which is the timer or the page asking after it.
+ */
+function adoptFinishedInstall(service: Awaited<ReturnType<typeof voiceService.status>>) {
+  if (service.state !== 'running' || getSetting('voice_setup_pending') !== '1') return;
+  connectManagedVoice(service.choice);
+  putSetting('voice_setup_pending', '');
+}
 async function maintainManagedVoice() {
   // Also reconciles running legacy containers after portal updates, without
   // requiring the settings modal to be opened. Stopped add-ons stay stopped.
-  const state = await voiceService.status();
-  if ((getStoredSettings() as Record<string,string>).voice_setup_pending === '1' && state.state === 'running') {
-    connectManagedVoice();
-    getDb().prepare("DELETE FROM settings WHERE key='voice_setup_pending'").run();
-  }
+  adoptFinishedInstall(await voiceService.status());
   if (managedVoice()) await leases.sweep(config().lazyLoad !== false);
 }
 const maintain = () => { void maintainManagedVoice().catch(e => console.error('[voice] maintenance:', (e as Error).message)); };
@@ -134,56 +199,166 @@ leaseTimer.unref();
 // Wait until module initialization finishes before accessing configuration.
 setImmediate(maintain);
 
-/** Point the saved config at the managed Breeze and Whisper pair. */
-export function connectManagedVoice() {
+/**
+ * What the portal keeps of the settings a connect overwrites, for the uninstall to put back. Kept for each side on its own, so
+ * that an address the user sets up after the install is remembered as well: `listening` is the recognition address with its
+ * model, `speaking` the speech address with its runtime. A side is there once it held something that was not the managed
+ * service's, with whether voice was on then: that goes with the side, as the connect itself saves voice as on, and a side that
+ * stays the service's while the other is set up again must not take the other's flag over. `noSpeech`: the last connect saved
+ * no speech address, which is how recognition alone leaves the speech side, and which is then the managed service's and not the user's.
+ */
+interface Remembered {
+  listening?: { whisperUrl: string; sttModel: string; enabled: boolean };
+  speaking?: { breezeUrl: string; runtime: NonNullable<VoiceConfig["runtime"]>; enabled: boolean };
+  noSpeech?: boolean;
+}
+const REMEMBERED_KEY = "voice_before_managed";
+function saveVoice(value: VoiceConfig) {
+  putSetting("voice", JSON.stringify(value));
+}
+function remembered(): Remembered {
+  try {
+    const value = JSON.parse(getSetting(REMEMBERED_KEY) ?? "{}");
+    const { listening, speaking } = value;
+    return {
+      ...(typeof listening?.whisperUrl === "string" ? { listening: { whisperUrl: listening.whisperUrl, sttModel: typeof listening.sttModel === "string" ? listening.sttModel : "", enabled: listening.enabled === true } } : {}),
+      ...(typeof speaking?.breezeUrl === "string" && typeof speaking.runtime === "string" ? { speaking: { breezeUrl: speaking.breezeUrl, runtime: speaking.runtime, enabled: speaking.enabled === true } } : {}),
+      ...(typeof value.noSpeech === "boolean" ? { noSpeech: value.noSpeech } : {}),
+    };
+  } catch { return {}; }
+}
+/** Which sides of the saved settings are the managed service's, as far as the portal can tell. */
+function managedSides(c: VoiceConfig, noSpeech: boolean | undefined) {
+  const listening = isManagedUrl(c.whisperUrl);
+  // No speech address and the runtime none is the service's where a connect saved it. Where nothing says (a service connected by an older portal), it is when the recognition is.
+  const speaking = isManagedUrl(c.breezeUrl) || (c.runtime === "none" && !c.breezeUrl && (noSpeech ?? listening));
+  return { listening, speaking };
+}
+/** Do the saved settings still point at the managed service, in either side? */
+export const pointsAtManagedVoice = () => { const { listening, speaking } = managedSides(config(), remembered().noSpeech); return listening || speaking; };
+/** Point the saved config at the managed services, for the engines they were built with. */
+export function connectManagedVoice(choice: VoiceChoice = DEFAULT_CHOICE) {
+  const { runtime, ...urls } = endpoints(choice);
+  const current = config();
+  // What is about to be overwritten is kept for the uninstall, side by side: a side that is the managed service's already (a
+  // rebuild, a second connect) keeps what was remembered of it, as the service is not what there was before it.
+  const kept = remembered();
+  const { listening, speaking } = managedSides(current, kept.noSpeech);
+  const next: Remembered = { ...kept, noSpeech: runtime === "none" };
+  if (!listening) next.listening = { whisperUrl: current.whisperUrl, sttModel: current.sttModel ?? "", enabled: current.enabled };
+  if (!speaking) next.speaking = { breezeUrl: current.breezeUrl, runtime: current.runtime ?? "breeze", enabled: current.enabled };
+  putSetting(REMEMBERED_KEY, JSON.stringify(next));
+  // Chatterbox is told a language and has no detection mode; keep one it speaks rather than save a setting it refuses.
+  const language = runtime === 'chatterbox' && !CHATTERBOX_LANGUAGES.includes(current.language) ? 'en' : current.language;
   // Whisper.cpp serves one model and is sent no model field: an id left over
   // from another runtime would reach it in the multipart body.
-  const saved = { ...config(), enabled: true, runtime: 'audio-cpp', sttModel: '', whisperUrl: voiceService.whisperUrl, breezeUrl: voiceService.breezeUrl };
-  getDb().prepare("INSERT INTO settings (key, value) VALUES ('voice', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify(saved));
+  const saved = { ...current, language, enabled: true, runtime, ...urls };
+  saveVoice(saved);
   return {...saved, managed:true};
+}
+/**
+ * Takes the managed service out of the saved settings after it has been uninstalled: what the connect overwrote is put back, or,
+ * where nothing was remembered of a side (the service was connected before the portal did), what points at it is reset to a portal
+ * with nothing set up. Only what points at the managed service is touched: an address the user set up themselves stays as it is,
+ * and so do the voice, the speech detection and the rest.
+ */
+export function disconnectManagedVoice() {
+  const current = config();
+  const kept = remembered();
+  putSetting(REMEMBERED_KEY, "");
+  const { listening, speaking } = managedSides(current, kept.noSpeech);
+  if (!listening && !speaking) return current;
+  const back = {
+    ...(listening ? { whisperUrl: kept.listening?.whisperUrl ?? DEFAULT_WHISPER_URL, sttModel: kept.listening?.sttModel ?? "" } : {}),
+    ...(speaking ? { breezeUrl: kept.speaking?.breezeUrl ?? DEFAULT_BREEZE_URL, runtime: kept.speaking?.runtime ?? "breeze" } : {}),
+  };
+  // Voice was switched on by the connect, and is left on only where everything put back is what the user had, it was on when each
+  // part of it was, and it has not been turned off since; an address that is only a default is no use switched on.
+  const on = (!listening || kept.listening?.enabled === true) && (!speaking || kept.speaking?.enabled === true);
+  const saved: VoiceConfig = { ...current, ...back, enabled: on && current.enabled };
+  saveVoice(saved);
+  return saved;
 }
 export function voiceRouter(): Router {
   const router = express.Router();
+  // The stored GPU choice, in place before anything asks the service to start.
+  voiceService.useGpu(getSetting('voice_gpu') ?? '');
+  /** Choose the GPU by UUID, or "" to leave it to VOICE_GPU and then the card with the most room. A running voice moves now; a stopped one on its next start. */
+  router.put('/voice/gpu', async (req, res) => {
+    const id = req.body?.gpu;
+    if (typeof id !== 'string') return res.status(400).json({ error: 'gpu must be a GPU UUID, or empty to choose automatically' });
+    try {
+      // Before anything is saved or stopped: a card that is not there, or that cannot hold the engines installed, leaves the service where it is.
+      if (id) await voiceService.checkGpu(id);
+      putSetting('voice_gpu', id);
+      voiceService.useGpu(id);
+      const restarting = ['running', 'starting'].includes((await voiceService.status()).state);
+      if (restarting) {
+        // Saved either way: a setup already under way picks the new GPU up on the next start.
+        try { await voiceService.install(); }
+        catch (e) { return res.status(409).json({ error: `GPU choice saved, but voice could not restart on it now: ${(e as Error).message}. It moves on the next start.` }); }
+      }
+      res.json({ selected: id, restarting });
+    } catch (e) { res.status(400).json({ error: (e as Error).message }); }
+  });
   router.get('/voice/presets',(_req,res)=>res.json(listVoices()));
   router.post('/voice/presets',(req,res)=>{try{res.json(addVoice(req.body));}catch(e){res.status(400).json({error:(e as Error).message});}});
+  router.patch('/voice/presets/:id',(req,res)=>{try{res.json(updateVoice(String(req.params.id),req.body));}catch(e){res.status(e instanceof VoiceNotFound?404:400).json({error:(e as Error).message});}});
   router.get('/voice/presets/:id/audio',(req,res)=>{try{const row=readVoice(String(req.params.id));if(!row.audio)return res.sendStatus(404);res.set({'Content-Type':'audio/wav','Cache-Control':'no-store'}).send(row.audio);}catch{res.sendStatus(404);}});
   router.delete('/voice/presets/:id',(req,res)=>{try{deleteVoice(String(req.params.id));res.json({ok:true});}catch(e){res.status(404).json({error:(e as Error).message});}});
   router.get('/voice/install', async (_req, res) => {
     try {
       const state = await voiceService.status();
-      if (state.state === 'running' && (getStoredSettings() as Record<string,string>).voice_setup_pending === '1') {
-        connectManagedVoice();
-        getDb().prepare("DELETE FROM settings WHERE key = 'voice_setup_pending'").run();
-      }
-      res.json(state);
+      adoptFinishedInstall(state);
+      // `connected`: the saved settings point at the service, whether or not it is there, so that they can be put right after the container was removed by hand.
+      res.json({ ...state, connected: pointsAtManagedVoice() });
     } catch (e) { res.status(503).json({ error: (e as Error).message }); }
   });
-  for (const action of ['install', 'start', 'stop'] as const) router.post(`/voice/${action}`, async (_req, res) => {
+  router.get('/voice/hardware', async (_req, res) => {
+    try { res.json(await voiceService.hardware()); } catch (e) { res.status(503).json({ error: (e as Error).message }); }
+  });
+  for (const action of ['install', 'start', 'stop'] as const) router.post(`/voice/${action}`, async (req, res) => {
     try {
-      await voiceService[action]();
-      if (action !== 'stop') getDb().prepare("INSERT INTO settings (key,value) VALUES ('voice_setup_pending','1') ON CONFLICT(key) DO UPDATE SET value='1'").run();
-      else getDb().prepare("DELETE FROM settings WHERE key = 'voice_setup_pending'").run();
+      // Install takes the engines to build for; without them it keeps what is installed, or picks for the GPU.
+      if (action === 'install') await voiceService.install(Object.keys(req.body ?? {}).length ? parseChoice(req.body) : undefined);
+      else await voiceService[action]();
+      putSetting('voice_setup_pending', action !== 'stop' ? '1' : '');
+      res.json({ ok: true });
+    } catch (e) { res.status(400).json({ error: (e as Error).message }); }
+  });
+  // The container goes, and with it the settings that point at it. The downloads stay unless `removeData` says they go too.
+  router.post('/voice/uninstall', async (req, res) => {
+    try {
+      const removeData = req.body?.removeData ?? false;
+      if (typeof removeData !== 'boolean') throw new Error('removeData must be true or false');
+      // The container being gone is what the settings follow, whether or not the downloads could be deleted after it.
+      let kept: Error | undefined;
+      try { await voiceService.uninstall(removeData); }
+      catch (e) { if (!(e instanceof voiceService.DataNotRemoved)) throw e; kept = e; }
+      putSetting('voice_setup_pending', '');
+      disconnectManagedVoice();
+      if (kept) return res.status(409).json({ error: kept.message });
       res.json({ ok: true });
     } catch (e) { res.status(400).json({ error: (e as Error).message }); }
   });
   router.post('/voice/connect', async (_req, res) => {
     try {
-      if ((await voiceService.status()).state !== 'running') throw new Error('Wait for voice setup to finish before connecting');
-      res.json(connectManagedVoice());
+      const state = await voiceService.status();
+      if (state.state !== 'running') throw new Error('Wait for voice setup to finish before connecting');
+      res.json(withInstructions(connectManagedVoice(state.choice)));
     } catch (e) { res.status(400).json({ error: (e as Error).message }); }
   });
-  router.get("/voice", (_req, res) => res.json({...config(),managed:managedVoice(),comparison:process.env.VOICE_COMPARISON === "true",statusSpeech:process.env.VOICE_STATUS_SPEECH !== "false",ttsPrefetch:process.env.VOICE_TTS_PREFETCH === "true",sentenceChunks:process.env.VOICE_SENTENCE_CHUNKS === "true",pipelineMode:process.env.VOICE_PIPELINE_MODE === "sequential" ? "sequential" : "parallel"}));
+  router.get("/voice", (_req, res) => res.json({...withInstructions(config()),managed:managedVoice(),speech:config().runtime!=="none",comparison:process.env.VOICE_COMPARISON === "true",statusSpeech:process.env.VOICE_STATUS_SPEECH !== "false",ttsPrefetch:process.env.VOICE_TTS_PREFETCH === "true",sentenceChunks:process.env.VOICE_SENTENCE_CHUNKS === "true",pipelineMode:process.env.VOICE_PIPELINE_MODE === "sequential" ? "sequential" : "parallel"}));
   router.put("/voice", (req, res) => {
     try {
       const saved = validateConfig(req.body);
-      getDb().prepare("INSERT INTO settings (key, value) VALUES ('voice', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify(saved));
-      res.json(saved);
+      saveVoice(saved);
+      res.json(withInstructions(saved));
     } catch (e) { res.status(400).json({ error: (e as Error).message }); }
   });
   router.use("/sessions/:id/voice", (req, res, next) => {
     if (!config().enabled) return res.status(409).json({ error: "Enable Voice in Settings → Add-ons first" });
-    if (!getDb().prepare("SELECT id FROM sessions WHERE id = ?").get(req.params.id))
-      return res.status(404).json({ error: "Session not found" });
+    if (!getSession(req.params.id)) return res.status(404).json({ error: "Session not found" });
     next();
   });
   router.post('/sessions/:id/voice/connection', async (req,res)=>{
@@ -220,12 +395,19 @@ export function voiceRouter(): Router {
     } catch (e) { if (!res.destroyed) res.status(502).json({ error: (e as Error).message }); }
   });
   router.post("/sessions/:id/voice/speech", async (req, res) => {
+    // Recognition alone has nothing to speak with: say so, rather than send the text to an address that is not there.
+    if (config().runtime === "none") return res.status(409).json({ error: "Speech synthesis is not installed: replies are not spoken" });
     const speechStarted=performance.now();
     let busyMs=0;
     const text = req.body?.text;
     if (typeof text !== "string" || !text.trim() || text.length > 600)
       return res.status(400).json({ error: "Speech text must contain 1–600 characters" });
-    const settings = config();
+    // The voice of the agent the chat is with, where it has one of its own: the
+    // first agent's for a chat in a project, as its avatar is.
+    // An agent's voice is one of Kokoro's or one from the library, and is used by the runtime it belongs to.
+    const own = (agentOf(getSession(req.params.id)?.workspace) ?? defaultAgent()).voice;
+    const saved = config();
+    const settings = { ...saved, ...(own && saved.runtime === "kokoro" && isKokoroVoice(own) ? { kokoroVoice: own } : own && !isKokoroVoice(own) ? { voice: own } : {}) };
     const controller = new AbortController();
     res.on("close", () => controller.abort());
     try {
@@ -233,28 +415,24 @@ export function voiceRouter(): Router {
       // the runtime that is about to be called should pay to carry it.
       let instruction = settings.instruction;
       let reference: { audio: Buffer; transcript: string; filename: string } | undefined;
-      if (!['design','aria'].includes(settings.voice)) {
+      // Kokoro speaks with a voice of its own and reads no library voice.
+      if (settings.runtime !== "kokoro" && settings.voice !== "design") {
         const preset = readVoice(settings.voice);
         instruction = preset.instruction;
         if (preset.audio) reference = { audio: preset.audio, transcript: preset.transcript, filename: "reference.wav" };
-      }
-      if (settings.voice === "aria") {
-        const directory = path.join(process.env.DATA_DIR || "./data", "voices");
-        const [audio, transcript] = await Promise.all([
-          readFile(path.join(directory, "aria.wav")),
-          readFile(path.join(directory, "aria.txt"), "utf8"),
-        ]).catch(() => { throw new Error("Install the Aria reference audio and transcript in the portal voices directory"); });
-        if (!audio.length || !transcript.trim()) throw new Error("Aria reference audio and transcript must not be empty");
-        reference = { audio, transcript: transcript.trim(), filename: "aria.wav" };
       }
       // Chatterbox clones a speaker; it has no designed or built-in voice.
       // validateConfig refuses this combination on save; a config written before
       // that check, or by the managed connect, still reaches here.
       if (settings.runtime === "chatterbox" && !reference)
-        throw new Error("Chatterbox speaks with a reference clone: choose Aria or a voice with a recording");
+        throw new Error("Chatterbox speaks with a reference clone: choose a voice with a recording");
       let form: FormData | undefined;
       let json: Record<string, unknown> | undefined;
-      if (settings.runtime === "chatterbox") {
+      if (settings.runtime === "kokoro") {
+        // Kokoro has no streaming mode in audio.cpp either, and is fast enough that a phrase is ready
+        // soon after it is asked for. The voice names the language, so none is sent.
+        json = { model: "kokoro", input: text, voice: settings.kokoroVoice ?? DEFAULT_KOKORO_VOICE, speed: settings.speed ?? 1, response_format: "wav", options: { seed: "42" } };
+      } else if (settings.runtime === "chatterbox") {
         // Chatterbox has no streaming mode in audio.cpp: one phrase, one WAV.
         // The browser buffers each phrase before playing it either way.
         json = { model: "chatterbox", input: spokenNumbers(text, settings.language), language: settings.language,
@@ -283,13 +461,13 @@ export function voiceRouter(): Router {
         await delay(750, undefined, { signal });
         busyMs+=performance.now()-attemptStarted;
       } while (true);
-      const runtimeName = settings.runtime === "chatterbox" ? "Chatterbox" : "Breeze";
+      const runtimeName = settings.runtime === "chatterbox" ? "Chatterbox" : settings.runtime === "kokoro" ? "Kokoro" : "Breeze";
       if (!upstream.ok) throw new Error(`${runtimeName} returned HTTP ${upstream.status}`);
-      if (settings.runtime === "chatterbox") {
-        if (!/^audio\/(wav|x-wav|wave|vnd\.wave)\b/.test(upstream.headers.get("content-type") ?? "")) throw new Error("Expected WAV audio from the Chatterbox API");
+      if (settings.runtime === "chatterbox" || settings.runtime === "kokoro") {
+        if (!/^audio\/(wav|x-wav|wave|vnd\.wave)\b/.test(upstream.headers.get("content-type") ?? "")) throw new Error(`Expected WAV audio from the ${runtimeName} API`);
         const wav = Buffer.from(await upstream.arrayBuffer());
         // Validate before either branch, so a malformed WAV is never passed on.
-        const pcm = wavPcm(wav);
+        const pcm = wavPcm(wav, runtimeName);
         res.set("Server-Timing", `tts_headers;dur=${(performance.now()-speechStarted).toFixed(1)}, tts_busy;dur=${busyMs.toFixed(1)}`);
         if (req.get("accept") !== "audio/pcm") return res.set({ "Content-Type": "audio/wav", "Cache-Control": "no-store" }).send(wav);
         return res.set({ "Content-Type": "audio/pcm", "X-Sample-Rate": "24000", "X-Sample-Format": "s16le", "Cache-Control": "no-store" }).send(pcm);

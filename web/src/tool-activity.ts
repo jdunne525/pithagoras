@@ -1,5 +1,6 @@
 import { insideFolder } from "./file-activity";
 import { t, tp } from "./i18n";
+import { toolArgsOf, toolNameOf } from "./tool-payload";
 
 /**
  * What a tool call is, in words, for the cards that fly out of the orb in voice mode.
@@ -46,9 +47,6 @@ const hostOf = (url: string) => {
  */
 export const SHELL_TOOL = /^(bash|shell|terminal|exec_command)$/i;
 
-const nameOf = (p: any) => String(p?.toolName ?? p?.name ?? "tool");
-const argsOf = (p: any): unknown => p?.input ?? p?.args ?? p?.parameters;
-
 /**
  * The call as the agent made it. The MCP adapter puts every server's tools
  * behind one `mcp` tool, so a web search and a database query would both read
@@ -64,7 +62,7 @@ export function unwrapCall(name: string, args: unknown): { name: string; input: 
 }
 
 /** A payload's call, unwrapped: see unwrapCall. */
-export const unwrap = (p: any) => unwrapCall(nameOf(p), argsOf(p));
+export const unwrap = (p: any) => unwrapCall(toolNameOf(p, "tool"), toolArgsOf(p));
 
 /** The name to show for a call. */
 export const toolName = (name: string, args: unknown): string => unwrapCall(name, args).name;
@@ -73,8 +71,11 @@ function browser(action: string, input: Record<string, any>): ToolCall {
   const url = text(input.url);
   if (/navigate|open|goto/.test(action)) return { label: t("Opening a page"), detail: url ? hostOf(url) : "", target: "browser" };
   if (/screenshot/.test(action)) return { label: t("Taking a screenshot"), detail: "", target: "browser" };
+  if (/scroll|wheel/.test(action)) return { label: t("Scrolling the page"), detail: "", target: "browser" };
+  if (/find/.test(action)) return { label: t("Searching the page"), detail: text(input.query), target: "browser" };
+  if (/get_text/.test(action)) return { label: t("Reading the page"), detail: "", target: "browser" };
   if (/click|hover|drag/.test(action)) return { label: t("Clicking in the browser"), detail: text(input.element), target: "browser" };
-  if (/type|fill|press|select/.test(action)) return { label: t("Typing in the browser"), detail: text(input.element), target: "browser" };
+  if (/type|fill|press|select|key/.test(action)) return { label: t("Typing in the browser"), detail: text(input.element), target: "browser" };
   if (/snapshot|evaluate|console|network/.test(action)) return { label: t("Reading the page"), detail: "", target: "browser" };
   if (/tab|close|back|forward|resize|wait/.test(action)) return { label: t("Using the browser"), detail: "", target: "browser" };
   return { label: t("Using the browser"), detail: url ? hostOf(url) : "", target: "browser" };
@@ -105,6 +106,9 @@ export function describeCall(payload: any, folder: string): ToolCall {
   if (name === "grep") return { label: t("Searching for “{pattern}”", { pattern: flat(text(input.pattern), 40) }), detail: flat([text(input.path), text(input.glob)].filter(Boolean).join(" · ")) };
   if (name === "find") return { label: t("Looking for “{pattern}”", { pattern: flat(text(input.pattern), 40) }), detail: flat(text(input.path)) };
   if (name === "ls") return { label: t("Listing {folder}", { folder: path ? base(path) : t("the folder") }), detail: "" };
+  // No target here: whether the call has a picture to show is known from its end (see VoiceToolActivity), and a tool of this name that an extension brings has none of the portal's. The same for edit_image.
+  if (name === "generate_image") return { label: t("Making a picture"), detail: flat(text(input.title) || text(input.prompt)) };
+  if (name === "edit_image") return { label: t("Editing a picture"), detail: flat(text(input.title) || text(input.prompt)) };
   if (name === "show_image") return { label: t("Showing a picture"), detail: flat(text(input.title) || text(input.path)), target: "pictures" };
   if (name.startsWith("canvas_")) {
     const verb: Record<string, string> = { canvas_create: t("Starting a document"), canvas_write: t("Writing in a document"), canvas_read: t("Reading a document"), canvas_list: t("Looking at the documents"), canvas_delete: t("Deleting a document") };
@@ -120,7 +124,7 @@ export function describeCall(payload: any, folder: string): ToolCall {
 }
 
 /** What a tool said back, as text. */
-export function resultText(payload: any): string {
+function resultText(payload: any): string {
   const content = payload?.result?.content;
   if (Array.isArray(content)) return content.filter((c: any) => c?.type === "text").map((c: any) => text(c.text)).join("\n");
   return text(payload?.result) || text(payload?.error);

@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { confirmDialog } from "./ConfirmDialog";
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { SessionActions, sessionError } from "./SessionActions";
 import { TitleInput } from "./TitleInput";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 import { StatusDot, workingText } from "./StatusDot";
@@ -8,19 +8,16 @@ import {
   LuBot,
   LuPanelLeftClose,
   LuPanelLeftOpen,
-  LuPencil,
   LuClock,
   LuFolderKanban,
   LuGlobe,
   LuBrain,
+  LuImage,
   LuMessagesSquare,
-  LuPin,
-  LuPinOff,
   LuPlus,
   LuSearch,
   LuSettings,
   LuShield,
-  LuTrash2,
   LuListChecks,
   LuPlay,
 } from "react-icons/lu";
@@ -28,16 +25,17 @@ import type { Session } from "../api";
 import { local } from "../safe-storage";
 import { filterSessions } from "../session-filter";
 import { isEscape } from "../shortcuts";
+import { pick, useFlip } from "../motion";
 import { HOME, folderKeys, folderName, groupByFolder, sortFolders, type Places } from "../session-folders";
 import { useFolderPrefs, useOpenFolders } from "../use-session-folders";
-import { t } from "../i18n";
+import { t, useLanguage } from "../i18n";
 
 /** How many unpinned sessions the sidebar shows before deferring to Sessions. */
 const RECENTS_LIMIT = 12;
 /** How many of a folder's chats the sidebar shows before deferring to Sessions, opened at that folder. */
 const FOLDER_LIMIT = 8;
 
-export function Sidebar({
+export const Sidebar = memo(function Sidebar({
   forceExpanded = false,
   sessions,
   executor,
@@ -45,6 +43,7 @@ export function Sidebar({
   view,
   hasBrowser,
   hasMemory = false,
+  hasImages = false,
   places,
   pendingByProject,
   onSelect,
@@ -63,11 +62,13 @@ export function Sidebar({
   executor: string;
   activeId: string | null;
   /** Which top-level destination is showing, so the nav can mark it. */
-  view: "chat" | "sessions" | "projects" | "agent" | "routines" | "browser" | "memory" | "audit";
+  view: "chat" | "sessions" | "projects" | "agents" | "routines" | "browser" | "memory" | "images" | "audit";
   /** Whether the optional browser service is there at all. */
   hasBrowser: boolean;
   /** Understory is the agent's memory: its page is there to read. */
   hasMemory?: boolean;
+  /** Image generation is on and has an address: the Images page is there to make pictures in and to look through them. */
+  hasImages?: boolean;
   /** Where Home and the projects are, to list the chats by folder: undefined until known, null if they could not be. */
   places?: Places | null;
   onSelect: (id: string) => void;
@@ -87,6 +88,8 @@ export function Sidebar({
   /** Pending-task count per project, owned by the parent so it stays current. */
   pendingByProject?: Record<string, number>;
 }) {
+  // Not drawn again with every token of a chat, so the language is asked for here.
+  useLanguage();
   const [storedCollapsed, setCollapsed] = useState(() => local.get("sidebarCollapsed") === "true");
   const collapsed = forceExpanded ? false : storedCollapsed;
   const toggleSidebar = () => {
@@ -158,6 +161,18 @@ export function Sidebar({
 
   const headingProps = { grouping, sort, onGrouping: setGrouping, onSort: setSort };
 
+  // Rows slide to their new places, and new ones come in (see motion.ts): not
+  // while a search is typed, which moves them with every key.
+  const rowsOrder = [byFolder ? "folders" : "recents", ...pinned.map((s) => s.id), "|", ...(byFolder ? folders.flatMap((f) => listed.get(f.key)!) : shownRecents).map((s) => s.id)].join();
+  const list = useFlip<HTMLDivElement>(rowsOrder, searching);
+  // The chat that is picked lights up: when the open chat changes, not each time its row is shown again.
+  const opened = useRef(activeId);
+  useEffect(() => {
+    if (opened.current === activeId) return;
+    opened.current = activeId;
+    if (activeId) pick(list.current?.querySelector(`[data-flip="${CSS.escape(activeId)}"]`));
+  }, [activeId]);
+
   const item = (s: Session) => (
     <SessionItem
       key={s.id}
@@ -167,19 +182,22 @@ export function Sidebar({
       onRename={onRename}
       onDelete={onDelete}
       onPin={onPin}
+      onError={setStartError}
     />
   );
 
   const destinations: { to: Destination; icon: ReactNode; label: string }[] = [
     { to: "sessions", icon: <LuMessagesSquare />, label: t("Sessions") },
     { to: "projects", icon: <LuFolderKanban />, label: t("Projects") },
-    { to: "agent", icon: <LuBot />, label: t("Agent") },
+    { to: "agents", icon: <LuBot />, label: t("Agents") },
     { to: "routines", icon: <LuClock />, label: t("Routines") },
     // Hidden unless there is one. The browser is an optional service, and
     // a dead link to a feature you did not install is just clutter.
     ...(hasBrowser ? [{ to: "browser" as const, icon: <LuGlobe />, label: t("Browser") }] : []),
     // Likewise: only while Understory holds the agent's memory.
     ...(hasMemory ? [{ to: "memory" as const, icon: <LuBrain />, label: t("Memory") }] : []),
+    // And only while there is an image endpoint to make pictures with.
+    ...(hasImages ? [{ to: "images" as const, icon: <LuImage />, label: t("Images") }] : []),
     { to: "audit", icon: <LuShield />, label: t("Audit") },
   ];
   const anyRunning = sessions.some((s) => s.status === "running");
@@ -224,13 +242,13 @@ export function Sidebar({
       </div>
 
       {/* Destinations, above the session lists. */}
-      <nav className="px-2 pb-2">
-        <NavItem icon={<LuPlus />} label={t("New")} onClick={() => newChat()} active={starting} />
+      <nav className="px-2 pb-2" aria-label={t("Destinations")}>
+        <NavItem icon={<LuPlus />} label={t("New")} onClick={() => newChat()} active={starting} isNew />
         {destinations.map((d) => (
           <NavItem key={d.to} icon={d.icon} label={d.label} onClick={() => onNavigate(d.to)} active={view === d.to} />
         ))}
 
-        {startError && <p className="px-2.5 pt-1 text-xs text-danger">{startError}</p>}
+        {startError && <p role="alert" className="px-2.5 pt-1 text-xs text-danger">{startError}</p>}
       </nav>
 
       {searchable && (
@@ -248,7 +266,7 @@ export function Sidebar({
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto px-2 pb-2">
+      <div ref={list} className="sidebar-list flex-1 overflow-y-auto px-2 pb-2">
         {/* By folder, each says so itself, and a chat can be started in it. */}
         {sessions.length === 0 && !byFolder && (
           <p className="px-2 py-4 text-xs text-fg-subtle">{t("No sessions yet.")}</p>
@@ -274,7 +292,7 @@ export function Sidebar({
               isOpen={openFolders.isOpen}
               onToggle={openFolders.toggle}
               onMove={searching || !allKeys ? undefined : (shown, key, to) => move(shown, key, to, allKeys)}
-              onNewChat={(f) => newChat(f.kind === "home" ? undefined : f.path!)}
+              onNewChat={(f) => newChat(f.key === HOME ? undefined : f.path!)}
             >
               {(f) => {
                 const chats = listed.get(f.key)!;
@@ -367,7 +385,7 @@ export function Sidebar({
       </div>
     </aside>
   );
-}
+});
 
 const Divider = () => <div className="my-2 h-px bg-line" />;
 
@@ -377,7 +395,7 @@ const GroupLabel = ({ children }: { children: ReactNode }) => (
   </p>
 );
 
-type Destination = "sessions" | "projects" | "agent" | "routines" | "browser" | "memory" | "audit";
+type Destination = "sessions" | "projects" | "agents" | "routines" | "browser" | "memory" | "images" | "audit";
 
 function RailButton({
   icon,
@@ -405,25 +423,30 @@ function NavItem({
   label,
   active,
   onClick,
+  isNew,
 }: {
   icon: ReactNode;
   label: string;
   active: boolean;
   onClick: () => void;
+  /** The one that starts a chat: its plus turns. */
+  isNew?: boolean;
 }) {
   return (
     <button
       onClick={onClick}
-      className={`group relative flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-sm transition ${
+      aria-current={active ? "page" : undefined}
+      data-new={isNew || undefined}
+      className={`nav-item group relative flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-sm transition ${
         active ? "bg-fg/[0.07] text-fg" : "text-fg-muted hover:bg-fg/5 hover:text-fg"
       }`}
     >
       <span
-        className={`absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-r-full bg-accent transition-opacity ${
-          active ? "opacity-100" : "opacity-0"
+        className={`nav-bar absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-r-full bg-accent transition-opacity ${
+          active ? "is-on opacity-100" : "opacity-0"
         }`}
       />
-      <span className={`shrink-0 transition-colors ${active ? "text-accent" : "text-fg-faint group-hover:text-fg-subtle"}`}>
+      <span className={`nav-icon shrink-0 transition-colors ${active ? "text-accent" : "text-fg-faint group-hover:text-fg-subtle"}`}>
         {icon}
       </span>
       {label}
@@ -438,6 +461,7 @@ function SessionItem({
   onRename,
   onDelete,
   onPin,
+  onError,
 }: {
   session: Session;
   active: boolean;
@@ -445,12 +469,14 @@ function SessionItem({
   onRename: (id: string, title: string) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
   onPin: (id: string, pinned: boolean) => Promise<void>;
+  onError: (message: string | null) => void;
 }) {
   const [renaming, setRenaming] = useState(false);
   return (
     // A row with buttons in it, so not a button itself: reachable with Tab and
     // opened with Enter all the same, which a bare div with a click was not.
     <div
+      data-flip={s.id}
       onClick={onSelect}
       tabIndex={0}
       aria-current={active ? "page" : undefined}
@@ -461,7 +487,7 @@ function SessionItem({
           onSelect();
         }
       }}
-      className={`group mb-0.5 cursor-pointer rounded-lg px-2.5 py-1.5 transition focus-visible:outline-offset-0 ${
+      className={`session-row group mb-0.5 cursor-pointer rounded-lg px-2.5 py-1.5 transition focus-visible:outline-offset-0 ${
         active ? "bg-fg/[0.07]" : "hover:bg-fg/5"
       }`}
     >
@@ -474,7 +500,8 @@ function SessionItem({
             className="flex-1 text-sm"
             onCommit={(next) => {
               setRenaming(false);
-              onRename(s.id, next);
+              onError(null);
+              onRename(s.id, next).catch((e) => onError(sessionError("rename", s.title, e)));
             }}
             onCancel={() => setRenaming(false)}
           />
@@ -492,46 +519,7 @@ function SessionItem({
 
         {/* Without a mouse there is no hover: the open chat's row keeps them. */}
         <div className={`ml-auto hidden shrink-0 items-center gap-0.5 group-focus-within:flex group-hover:flex ${active ? "[@media(hover:none)]:flex" : ""}`}>
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onPin(s.id, !s.pinned);
-            }}
-            className="rounded p-1 text-fg-subtle hover:text-accent"
-            title={s.pinned ? t("Unpin") : t("Pin")}
-          >
-            {s.pinned ? <LuPinOff className="h-3 w-3" /> : <LuPin className="h-3 w-3" />}
-          </button>
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              setRenaming(true);
-            }}
-            className="rounded p-1 text-fg-subtle hover:text-accent"
-            title={t("Rename")}
-          >
-            <LuPencil className="h-3 w-3" />
-          </button>
-          <button
-            onClick={async (e) => {
-              e.stopPropagation();
-              if (
-                await confirmDialog({
-                  title: t("Delete \"{name}\"?", { name: s.title }),
-                  message: t("It is stopped if it is running, and its transcript is removed."),
-                  confirmLabel: t("Delete"),
-                  danger: true,
-                  deletes: true,
-                })
-              ) {
-                onDelete(s.id);
-              }
-            }}
-            className="rounded p-1 text-fg-subtle hover:text-danger"
-            title={t("Delete session")}
-          >
-            <LuTrash2 className="h-3 w-3" />
-          </button>
+          <SessionActions session={s} small onPin={onPin} onStartRename={() => setRenaming(true)} onDelete={onDelete} onError={onError} />
         </div>
       </div>
       {/* Cut at the start, not the end: what tells chats apart is the last part of

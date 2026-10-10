@@ -1,4 +1,6 @@
 import type { PortalEvent } from "./api";
+import { below } from "./paths";
+import { toolArgsOf, toolNameOf } from "./tool-payload";
 
 /** A file the agent has just read or changed, as a path inside the chat's folder. */
 export interface FileActivity {
@@ -9,9 +11,8 @@ export interface FileActivity {
 }
 
 const TOOLS = new Set(["read", "write", "edit"]);
-const nameOf = (p: any): string => String(p?.toolName ?? p?.name ?? "");
 const pathOf = (p: any): string | undefined => {
-  const input = p?.input ?? p?.args ?? p?.parameters ?? {};
+  const input = toolArgsOf(p) ?? {};
   const given = input.path ?? input.file_path;
   return typeof given === "string" && given ? given : undefined;
 };
@@ -21,11 +22,11 @@ const pathOf = (p: any): string | undefined => {
  * path inside `folder`, or undefined when it is somewhere else.
  */
 export function insideFolder(folder: string, given: string): string | undefined {
-  const root = folder.replace(/\/+$/, "");
   let text = given;
   if (text.startsWith("/")) {
-    if (!text.startsWith(root + "/")) return undefined;
-    text = text.slice(root.length + 1);
+    const under = below(folder, text);
+    if (under === undefined) return undefined;
+    text = under;
   }
   const parts: string[] = [];
   for (const part of text.split("/")) {
@@ -35,6 +36,11 @@ export function insideFolder(folder: string, given: string): string | undefined 
     } else parts.push(part);
   }
   return parts.length ? parts.join("/") : undefined;
+}
+
+/** The entry it was before when nothing in it differs, so that what is handed it on is not seen as changed by a later event that was about something else. */
+export function keepFileActivity(was: FileActivity | null, next: FileActivity | null): FileActivity | null {
+  return was && next && was.seq === next.seq && was.path === next.path && was.tool === next.tool ? was : next;
 }
 
 /**
@@ -48,7 +54,7 @@ export function latestFileActivity(events: PortalEvent[], folder: string): FileA
   for (let i = events.length - 1; i >= 0; i--) {
     const event = events[i];
     const p = event.payload;
-    const tool = nameOf(p);
+    const tool = toolNameOf(p);
     if (!TOOLS.has(tool)) continue;
     let given: string | undefined;
     if (event.type === "tool_execution_start" && tool === "read") given = pathOf(p);

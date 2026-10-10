@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import {
   LuArrowLeft,
   LuChevronRight,
@@ -18,14 +18,16 @@ import {
   LuTrash2,
   LuUpload,
 } from "react-icons/lu";
-import { api, type FileEntry } from "../api";
+import { ApiError, api, type FileEntry, type Unsaved } from "../api";
 import type { FileActivity } from "../file-activity";
+import { flushFileDraft, keepFileDraft, readFileDraft } from "../file-drafts";
+import { local } from "../safe-storage";
+import { bytesLabel } from "../projects";
 import { confirmDialog } from "./ConfirmDialog";
+import { within } from "../paths";
 import { isEnter, isEscape } from "../shortcuts";
-import { t, tp } from "../i18n";
-
-/** What the server says when a save would put older text over newer. */
-const CHANGED = "The file changed after you opened it";
+import { deleteAsking, unsavedNotes } from "../unsaved";
+import { t, tp, useLanguage } from "../i18n";
 
 interface Open {
   path: string;
@@ -38,18 +40,9 @@ interface Open {
   saved: string;
 }
 
-const sizeOf = (bytes: number): string =>
-  bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-
 const HIDDEN_KEY = "filesShowHidden";
 /** Whether names that start with a dot are shown. Off unless it was turned on: they are mostly settings and tools' own folders. */
-const savedShowHidden = (): boolean => {
-  try {
-    return localStorage.getItem(HIDDEN_KEY) === "1";
-  } catch {
-    return false;
-  }
-};
+const savedShowHidden = (): boolean => local.get(HIDDEN_KEY) === "1";
 
 /** By its name only: whether it is one is the server's to say, from its bytes, and a refusal falls back to the note. */
 const looksLikePicture = (p: string) => /\.(png|jpe?g|gif|webp)$/i.test(p);
@@ -79,8 +72,10 @@ const join = (dir: string, name: string) => (dir ? `${dir}/${name}` : name);
  * Only what the agent does after the panel opens is followed, so opening it does
  * not jump to a file from earlier. `since` moves that line, for a panel that
  * opens because of what the agent just did and should show it.
+ *
+ * Not drawn again for a draw of the chat that changed none of what it is given.
  */
-export function FilesPanel({
+export const FilesPanel = memo(function FilesPanel({
   sessionId,
   folder,
   activity,
@@ -88,6 +83,7 @@ export function FilesPanel({
   reveal,
   onRevealed,
   onDirtyChange,
+  keepDraft = false,
 }: {
   sessionId: string;
   folder: string;
@@ -99,18 +95,33 @@ export function FilesPanel({
   onRevealed?: () => void;
   /** Told whether there are changes not saved, so that whoever can close the panel can ask first. */
   onDirtyChange?: (dirty: boolean) => void;
+  /**
+   * Whether this is the chat's own panel, which brings back the edit it was left
+   * with and keeps the next. One more panel of the same chat — the voice stage's —
+   * would take over an edit that belongs to the first, and then not follow the agent.
+   */
+  keepDraft?: boolean;
 }) {
-  const [dir, setDir] = useState("");
+  // Its text is in the language chosen: it is drawn for that, as it is not for the chat's draws.
+  useLanguage();
+  // An edit this chat's panel was left with, from before it was unmounted: the chat was switched or left with it open.
+  const [left] = useState(() => (keepDraft ? readFileDraft(sessionId) : null));
+  const [dir, setDir] = useState(() => (left ? parentOf(left.path) : ""));
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [truncated, setTruncated] = useState(false);
   const [listing, setListing] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
 
-  const [file, setFile] = useState<Open | null>(null);
-  const [draft, setDraft] = useState("");
+  const [file, setFile] = useState<Open | null>(() =>
+    left ? { path: left.path, loading: false, binary: false, size: left.size, mtime: left.mtime, saved: left.saved } : null,
+  );
+  const [draft, setDraft] = useState(left?.text ?? "");
   const [saving, setSaving] = useState(false);
+  // A save that failed, shown above the editor: the text stays, and so does the button, to try again.
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [changed, setChanged] = useState(false);
-  const [following, setFollowing] = useState(true);
+  // The agent's next file would take an edit away from the screen: it follows only when nothing was left open.
+  const [following, setFollowing] = useState(!left);
   const [showHidden, setShowHidden] = useState(savedShowHidden);
   // The entry being given a name, and the name so far.
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -126,6 +137,13 @@ export function FilesPanel({
   const dirty = !!file && !file.binary && !file.loading && draft !== file.saved;
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
+  // For what finishes later than it started, such as a delete that asked first.
+  const dirRef = useRef(dir);
+  dirRef.current = dir;
+  const fileRef = useRef(file);
+  fileRef.current = file;
+  /** Deletes on their way, by path: asking git first can take a moment, and a second click is not a second delete. */
+  const [removing, setRemoving] = useState<ReadonlySet<string>>(() => new Set());
   // Answers that arrive after a newer question was asked are not the answer.
   const listAsk = useRef(0);
   const fileAsk = useRef(0);
@@ -146,6 +164,28 @@ export function FilesPanel({
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
   }, [dirty]);
+  // Kept while there are changes, for a panel that is unmounted with them: switching chat or leaving the page.
+  useEffect(() => {
+    if (!keepDraft) return;
+    keepFileDraft(sessionId, dirty && file ? { path: file.path, text: draft, saved: file.saved, mtime: file.mtime, size: file.size } : null);
+  }, [keepDraft, sessionId, dirty, file, draft]);
+  // Written before it goes: unmounting must not lose what was typed a moment ago. Closing the panel on purpose forgets it first.
+  useEffect(() => (keepDraft ? () => flushFileDraft(sessionId) : undefined), [keepDraft, sessionId]);
+  // An edit brought back may be of a file that changed meanwhile: told the way a save would, instead of at the save.
+  useEffect(() => {
+    if (!left) return;
+    const ask = fileAsk.current;
+    void api
+      .readFile(sessionId, left.path)
+      .then((r) => {
+        if (ask === fileAsk.current && r.mtime !== left.mtime) setChanged(true);
+      })
+      .catch(() => {
+        if (ask === fileAsk.current) setChanged(true);
+      });
+    // Once, for what the panel opened with.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const root = folder.split("/").filter(Boolean).pop() || "folder";
 
   const loadDir = useCallback(
@@ -180,6 +220,7 @@ export function FilesPanel({
     (path: string) => {
       const ask = ++fileAsk.current;
       setChanged(false);
+      setSaveError(null);
       setFile({ path, loading: true, binary: false, size: 0, mtime: 0, saved: "" });
       setDraft("");
       return api
@@ -276,14 +317,15 @@ export function FilesPanel({
   const save = async (overwrite = false) => {
     if (!file || file.binary || saving) return;
     setSaving(true);
+    setSaveError(null);
     try {
       const r = await api.saveFile(sessionId, file.path, draft, overwrite ? undefined : file.mtime);
       setFile({ ...file, saved: draft, mtime: r.mtime, size: r.size, error: undefined });
       setChanged(false);
     } catch (e) {
-      const message = (e as Error).message;
-      if (message === CHANGED) setChanged(true);
-      else setFile({ ...file, error: message });
+      // By the code, not the sentence: the server's wording is not this page's to depend on.
+      if (e instanceof ApiError && e.body.code === "conflict") setChanged(true);
+      else setSaveError((e as Error).message);
     } finally {
       setSaving(false);
     }
@@ -292,11 +334,8 @@ export function FilesPanel({
   const toggleHidden = () => {
     const next = !showHidden;
     setShowHidden(next);
-    try {
-      localStorage.setItem(HIDDEN_KEY, next ? "1" : "0");
-    } catch {
-      // Not remembered, but it works for now.
-    }
+    // Not remembered where storage fails, but it works for now.
+    local.set(HIDDEN_KEY, next ? "1" : "0");
   };
 
   const startRename = (entry: FileEntry) => {
@@ -319,33 +358,60 @@ export function FilesPanel({
     if (problem) setListError(problem);
   };
 
-  const remove = async (entry: FileEntry) => {
-    const path = join(dir, entry.name);
+  /** Whether to delete, and whether git work that only it holds goes with it: null for "no". */
+  const askToRemove = async (entry: FileEntry, unsaved: Unsaved | undefined): Promise<boolean | null> => {
+    const { lost, risky, sentences } = unsavedNotes(unsaved);
     // A link to a folder is listed as a folder, but only the link goes.
-    const message = entry.link
+    const what = entry.link
       ? t("This removes the link only. What it points to is not touched.")
       : entry.type === "dir"
         ? t("This removes the folder and everything in it. It cannot be undone.")
         : t("This removes the file. It cannot be undone.");
     const ok = await confirmDialog({
-      title: t("Delete \"{name}\"?", { name: entry.name }),
-      message,
-      confirmLabel: t("Delete"),
+      title: lost
+        ? t("Delete \"{name}\" and its unsaved work?", { name: entry.name })
+        : risky
+          ? t("Delete \"{name}\" anyway?", { name: entry.name })
+          : t("Delete \"{name}\"?", { name: entry.name }),
+      message: [...sentences, what].join(" "),
+      confirmLabel: risky ? t("Delete anyway") : t("Delete"),
       danger: true,
-      deletes: true,
+      // Asked whatever Settings says when there is work to lose: the server refuses without it, and it has no copy.
+      deletes: !risky,
     });
-    if (!ok) return;
+    return ok ? risky : null;
+  };
+
+  const remove = async (entry: FileEntry) => {
+    const path = join(dir, entry.name);
+    if (removing.has(path)) return;
+    setRemoving((now) => new Set(now).add(path));
     let problem: string | null = null;
     try {
-      await api.deleteFile(sessionId, path);
-      if (file && (file.path === path || file.path.startsWith(path + "/"))) {
+      // Only a folder can hold git work, and it is asked first so that the one question names it.
+      // When that cannot be asked, the plain question goes first, and the server's refusal brings this one.
+      const unsaved = entry.type === "dir" && !entry.link ? await api.fileUnsaved(sessionId, path).then((r) => r.unsaved, () => null) : null;
+      const gone = await deleteAsking(unsaved, (u) => askToRemove(entry, u), (discard) => api.deleteFile(sessionId, path, discard));
+      if (!gone) return;
+      // What is open and shown now, not when the delete was clicked: the person may have moved on while it was asked.
+      const open = fileRef.current;
+      if (open && within(path, open.path)) {
         fileAsk.current++;
         setFile(null);
       }
+      // Opened while it was asked, and gone now: up to the folder it was in, which the change of folder loads.
+      const shown = dirRef.current;
+      if (within(path, shown)) return setDir(parentOf(path));
     } catch (e) {
       problem = (e as Error).message;
+    } finally {
+      setRemoving((now) => {
+        const next = new Set(now);
+        next.delete(path);
+        return next;
+      });
     }
-    await loadDir(dir);
+    await loadDir(dirRef.current);
     if (problem) setListError(problem);
   };
 
@@ -506,7 +572,7 @@ export function FilesPanel({
               )}
             </span>
             {!file.loading && !file.error && (
-              <span className="shrink-0 text-[10px] text-fg-faint">{sizeOf(file.size)}</span>
+              <span className="shrink-0 text-[10px] text-fg-faint">{bytesLabel(file.size)}</span>
             )}
             <a href={api.fileDownloadUrl(sessionId, file.path)} title={t("Download this file")} aria-label={t("Download this file")} className="shrink-0 rounded p-1 text-fg-faint transition hover:bg-fg/5 hover:text-fg">
               <LuDownload aria-hidden className="h-3.5 w-3.5" />
@@ -532,6 +598,11 @@ export function FilesPanel({
                 {t("Save mine anyway")}
               </button>
             </div>
+          )}
+          {saveError && (
+            <p role="alert" className="flex shrink-0 items-start gap-1.5 border-b border-line bg-danger/10 px-3 py-1.5 text-xs text-danger">
+              <LuCircleAlert aria-hidden className="mt-0.5 h-3.5 w-3.5 shrink-0" /> {saveError}
+            </p>
           )}
           {file.error ? (
             <p role="alert" className="m-3 flex items-start gap-1.5 rounded-lg border border-danger/25 bg-danger/10 px-2 py-2 text-xs text-danger">
@@ -661,7 +732,7 @@ export function FilesPanel({
                     )}
                     <span className="min-w-0 flex-1 truncate">{entry.name}</span>
                     {entry.link && entry.type !== "link" && <LuLink aria-label={t("A link")} className="h-3 w-3 shrink-0 text-fg-faint" />}
-                    {entry.type === "file" && <span className="shrink-0 text-[10px] text-fg-faint">{sizeOf(entry.size)}</span>}
+                    {entry.type === "file" && <span className="shrink-0 text-[10px] text-fg-faint">{bytesLabel(entry.size)}</span>}
                   </button>
                   {/* Out of the way until the row is pointed at, but always there on a touch screen, which cannot point. */}
                   <div className="files-row-actions flex shrink-0 items-center opacity-0 transition focus-within:opacity-100 group-hover:opacity-100 [@media(pointer:coarse)]:opacity-100">
@@ -683,13 +754,16 @@ export function FilesPanel({
                     >
                       <LuPencil aria-hidden className="h-3.5 w-3.5" />
                     </button>
+                    {/* Off by aria-disabled, not disabled: while the question is open this button is where focus goes back to, and a button that is disabled keeps none. remove() ignores the click. */}
                     <button
                       onClick={() => void remove(entry)}
+                      aria-disabled={removing.has(join(dir, entry.name))}
+                      aria-busy={removing.has(join(dir, entry.name))}
                       title={t("Delete {name}", { name: entry.name })}
                       aria-label={t("Delete {name}", { name: entry.name })}
-                      className="rounded p-1 text-fg-faint transition hover:bg-danger/10 hover:text-danger"
+                      className="rounded p-1 text-fg-faint transition hover:bg-danger/10 hover:text-danger aria-disabled:opacity-60"
                     >
-                      <LuTrash2 aria-hidden className="h-3.5 w-3.5" />
+                      {removing.has(join(dir, entry.name)) ? <LuRefreshCw aria-hidden className="h-3.5 w-3.5 animate-spin" /> : <LuTrash2 aria-hidden className="h-3.5 w-3.5" />}
                     </button>
                   </div>
                 </>
@@ -706,4 +780,4 @@ export function FilesPanel({
       )}
     </div>
   );
-}
+});

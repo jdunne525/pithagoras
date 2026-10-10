@@ -1,6 +1,8 @@
 import { existsSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { agentHomePath } from "./agent-home.js";
+import { agentAt, agentOf, agentsRoot } from "./agents.js";
+import { pathBelow, realPath } from "./within.js";
 
 /** Where projects live. WORKSPACE_ROOT is the new name; WORKSPACES_DIR still works for existing deploys. */
 export function workspaceRoot(): string {
@@ -32,12 +34,19 @@ const inside = (parent: string, child: string) => {
  * A bare name is a project under the root.
  */
 export function checkWorkspace(raw: string): { path: string } | { error: string } {
-  const home = agentHomePath();
   const root = workspaceRoot();
   const resolved = path.isAbsolute(raw) ? path.resolve(raw) : path.join(root, raw);
-  if (samePath(resolved, home)) return { path: home };
+  // An agent's home is the one place outside the workspace root a chat may work in.
+  if (samePath(resolved, agentHomePath()) || agentAt(resolved)) return { path: resolved };
   // Keep pi inside the mounted workspace area — no escaping to the rest of the FS.
   if (!inside(root, resolved)) {
+    // Where an agent's home was, with no agent there now: said so, or the one who
+    // set it is sent looking for a project that was never meant to be one. Only a
+    // folder directly in the agents' folder was ever a home.
+    const inAgents = pathBelow(agentsRoot(), resolved);
+    if (inAgents && !inAgents.includes("/")) return { error: "the agent whose home this was has been deleted" };
+    // A folder in the home of an agent that is there: its home itself is the place, not what is in it.
+    if (agentOf(resolved)) return { error: "only an agent's home itself can be used, not a folder in it" };
     return { error: "workspace must be inside the workspace root" };
   }
   if (!existsSync(resolved)) return { error: "workspace does not exist" };
@@ -60,25 +69,33 @@ export function checkWorkspace(raw: string): { path: string } | { error: string 
   return { path: resolved };
 }
 
+/**
+ * The project a chat or a routine works in, by its folder's name: the one
+ * directly under the root that `workspace` is, or is inside — a chat may run in
+ * a subfolder, and it belongs to the project all the same. Home, and anywhere
+ * else outside the root, is none.
+ *
+ * Judged by where the path really leads, as checkWorkspace does, so that a link
+ * in one project to another does not borrow the first one's settings while
+ * working in the second. The text of the path decides only where that cannot be
+ * followed, such as a folder that is gone.
+ */
+export function projectOf(workspace: string | null | undefined): string | undefined {
+  if (!workspace) return undefined;
+  const root = workspaceRoot();
+  const realRoot = realPath(root);
+  const real = realRoot && realPath(workspace);
+  const inside = realRoot && real ? pathBelow(realRoot, real) : pathBelow(root, workspace);
+  const name = inside?.split("/")[0];
+  // Not one resolveProject would accept either: a project's name is never a dot-name.
+  return name && !name.startsWith(".") ? name : undefined;
+}
+
 /** Why a routine's place cannot be used now, such as a project that was deleted; null when it can. Home always can. */
 export function placeProblem(workspace: string | null): string | null {
   if (!workspace) return null;
   const where = checkWorkspace(workspace);
   return "error" in where ? where.error : null;
-}
-
-/**
- * `where` is the folder `dir` or inside it: by the text of the path, or by
- * where it really leads, so that a link to a project counts as in the project.
- */
-export function isWithin(dir: string, where: string | null): boolean {
-  if (!where) return false;
-  if (inside(dir, where)) return true;
-  try {
-    return inside(realpathSync(dir), realpathSync(where));
-  } catch {
-    return false;
-  }
 }
 
 /**

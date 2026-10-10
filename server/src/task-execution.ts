@@ -1,5 +1,6 @@
 import { nanoid } from "nanoid";
-import { sessions, EXECUTOR_KIND, PromptQueuedForSingleActive } from "./session-manager.js";
+import { sessions, PromptQueuedForSingleActive } from "./session-manager.js";
+import { EXECUTOR_KIND } from "./executor-kind.js";
 import * as db from "./db.js";
 import * as tasks from "./tasks.js";
 import { buildTaskPrompt, DEFAULT_MAX_ATTEMPTS } from "./task-prompt.js";

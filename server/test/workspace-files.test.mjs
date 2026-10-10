@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
-import { chmodSync, closeSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, closeSync, existsSync, linkSync, mkdirSync, readFileSync, readSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
+import { scratch } from './server-harness.mjs';
 const files = await import('../dist/workspace-files.js');
 const { FileError, baseDir, listDir, readText, writeText, removeEntry, renameEntry, folderPath, resolveInside, openDownload, MAX_EDIT_BYTES } = files;
 
 /** A folder to work in, and one beside it that nothing may reach. */
 function setup() {
-  const top = mkdtempSync(path.join(tmpdir(), 'wsfiles-'));
+  const top = scratch('wsfiles-');
   const dir = path.join(top, 'work');
   const outside = path.join(top, 'outside');
   mkdirSync(dir); mkdirSync(outside);
@@ -16,6 +16,8 @@ function setup() {
   return { top, dir, outside, base: baseDir(dir), done: () => rmSync(top, { recursive: true, force: true }) };
 }
 const code = (fn) => { try { fn(); } catch (e) { return e instanceof FileError ? e.code : `other:${e.message}`; } return 'none'; };
+/** The same, for what is awaited: removeEntry asks git first. */
+const codeOf = async (fn) => { try { await fn(); } catch (e) { return e instanceof FileError ? e.code : `other:${e.message}`; } return 'none'; };
 
 test('a folder is listed with folders first, and .git is left out', () => {
   const { dir, base, done } = setup();
@@ -39,13 +41,13 @@ test('a nested folder is listed by its path, and an empty one is empty', () => {
   done();
 });
 
-test('nothing outside the folder can be reached by a path', () => {
+test('nothing outside the folder can be reached by a path', async () => {
   const { base, outside, done } = setup();
   for (const p of ['..', '../outside', '../outside/secret', '/etc/passwd', 'a/../../outside', path.join(outside, 'secret'), 'x\0y']) {
     assert.match(code(() => readText(base, p)), /invalid|missing/, JSON.stringify(p));
     assert.match(code(() => listDir(base, p)), /invalid|missing/, JSON.stringify(p));
     assert.match(code(() => writeText(base, p, 'x')), /invalid|missing/, JSON.stringify(p));
-    assert.match(code(() => removeEntry(base, p)), /invalid|missing/, JSON.stringify(p));
+    assert.match(await codeOf(() => removeEntry(base, p)), /invalid|missing/, JSON.stringify(p));
   }
   assert.equal(readFileSync(path.join(outside, 'secret'), 'utf8'), 'top secret');
   done();
@@ -164,25 +166,25 @@ test('a file too large to edit is refused, and a file with a second name is left
   done();
 });
 
-test('a folder is removed with what is in it; a link goes, and what it led to stays', () => {
+test('a folder is removed with what is in it; a link goes, and what it led to stays', async () => {
   const { dir, base, outside, done } = setup();
   mkdirSync(path.join(dir, 'sub')); writeFileSync(path.join(dir, 'sub', 'a.txt'), 'x');
-  removeEntry(base, 'sub');
+  await removeEntry(base, 'sub');
   assert.equal(existsSync(path.join(dir, 'sub')), false);
   symlinkSync(outside, path.join(dir, 'escape'));
-  removeEntry(base, 'escape');
+  await removeEntry(base, 'escape');
   assert.equal(existsSync(path.join(dir, 'escape')), false);
   assert.equal(readFileSync(path.join(outside, 'secret'), 'utf8'), 'top secret');
   symlinkSync(path.join(dir, 'gone'), path.join(dir, 'broken'));
-  removeEntry(base, 'broken');
-  assert.equal(code(() => removeEntry(base, 'broken')), 'missing');
+  await removeEntry(base, 'broken');
+  assert.equal(await codeOf(() => removeEntry(base, 'broken')), 'missing');
   done();
 });
 
-test('the folder itself cannot be removed, however it is spelled', () => {
+test('the folder itself cannot be removed, however it is spelled', async () => {
   const { dir, base, done } = setup();
   for (const p of ['', '.', './', '/', 'sub/..']) {
-    assert.match(code(() => removeEntry(base, p)), /invalid|missing/, JSON.stringify(p));
+    assert.match(await codeOf(() => removeEntry(base, p)), /invalid|missing/, JSON.stringify(p));
   }
   assert.equal(existsSync(dir), true);
   done();
@@ -206,11 +208,10 @@ test('a download is a plain file opened once, dotfiles included, and nothing els
 });
 
 test('a download from a folder that sits under a dot-folder is not refused for it', () => {
-  const top = mkdtempSync(path.join(tmpdir(), 'wsfiles-'));
+  const top = scratch('wsfiles-');
   const dir = path.join(top, '.hidden', 'home'); mkdirSync(dir, { recursive: true });
   writeFileSync(path.join(dir, 'a.txt'), 'x');
   assert.equal(drain(openDownload(baseDir(dir), 'a.txt')), 'x');
-  rmSync(top, { recursive: true });
 });
 
 test('a folder that is itself a link is followed once, up front, and checked against where it leads', () => {
@@ -390,23 +391,23 @@ test('a read-only file in a folder that can be written is saved, and stays read-
   done();
 });
 
-test('what the system refuses on a delete or a rename is said, not a 500', { skip: process.getuid?.() === 0 && 'root can write anywhere' }, () => {
+test('what the system refuses on a delete or a rename is said, not a 500', { skip: process.getuid?.() === 0 && 'root can write anywhere' }, async () => {
   const { dir, base, done } = setup();
   mkdirSync(path.join(dir, 'sub')); writeFileSync(path.join(dir, 'sub', 'a.txt'), 'x');
   chmodSync(path.join(dir, 'sub'), 0o500);
   try {
-    assert.equal(code(() => removeEntry(base, 'sub/a.txt')), 'failed');
+    assert.equal(await codeOf(() => removeEntry(base, 'sub/a.txt')), 'failed');
     assert.equal(code(() => renameEntry(base, 'sub/a.txt', 'b.txt')), 'failed');
     assert.equal(existsSync(path.join(dir, 'sub', 'a.txt')), true);
   } finally { chmodSync(path.join(dir, 'sub'), 0o700); }
   done();
 });
 
-test('a delete of something that has gone in the meantime is not an error', () => {
+test('a delete of something that has gone in the meantime is not an error', async () => {
   const { dir, base, done } = setup();
   writeFileSync(path.join(dir, 'a.txt'), 'x');
-  removeEntry(base, 'a.txt');
-  assert.equal(code(() => removeEntry(base, 'a.txt')), 'missing');
+  await removeEntry(base, 'a.txt');
+  assert.equal(await codeOf(() => removeEntry(base, 'a.txt')), 'missing');
   done();
 });
 
@@ -425,4 +426,18 @@ test('a link is marked as one, also when it leads to a folder that is listed as 
   assert.equal(by.sub.link, undefined);
   assert.equal(by['a.txt'].link, undefined);
   done();
+});
+
+test('a refusal is sent with its code, so that the page does not have to read the sentence', async () => {
+  const { fail } = await import('../dist/api/files.js');
+  const answer = (e) => {
+    const sent = {};
+    const res = { status(s) { sent.status = s; return this; }, json(b) { sent.body = b; return this; } };
+    fail(res, e);
+    return sent;
+  };
+  // Both are 409: only the code says which one it is.
+  assert.deepEqual(answer(new FileError('conflict', 'The file changed after you opened it')), { status: 409, body: { error: 'The file changed after you opened it', code: 'conflict' } });
+  assert.deepEqual(answer(new FileError('exists', 'Something with that name is already here')), { status: 409, body: { error: 'Something with that name is already here', code: 'exists' } });
+  assert.equal(answer(new FileError('too_large', 'Too big')).body.code, 'too_large');
 });

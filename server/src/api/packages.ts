@@ -1,10 +1,10 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import path from "node:path";
-import { piSettingsPath } from "../pi-settings.js";
-import { extensionStash, setExtensionStash } from "../db.js";
+import { existsSync, readFileSync } from "node:fs";
+import { piSettingsPath, writePiSettingsText } from "../pi-settings.js";
+import { packageRemoved } from "../db.js";
 import express, { type Router } from "express";
 import { searchCatalog } from "../catalog.js";
-import { runPi, PiMissingError } from "./pi-cli.js";
+import { oneAtATime } from "../one-at-a-time.js";
+import { runPi as piCli, PiMissingError } from "./pi-cli.js";
 
 /**
  * pi packages (extensions, skills, prompts, themes) are managed by the pi CLI
@@ -17,9 +17,15 @@ import { runPi, PiMissingError } from "./pi-cli.js";
  * that into an empty, non-alarming state, while a mutation still fails loudly
  * but with an explanation rather than the raw `spawn pi ENOENT`.
  */
-export async function pi(args: string[]): Promise<{ stdout: string; stderr: string }> {
+export function pi(args: string[]): Promise<{ stdout: string; stderr: string }> {
+  // What changes the package folder and pi's settings goes one at a time: two at once collide on the same npm prefix and settings.json.
+  return args[0] === "list" ? runPi(args) : changing(() => runPi(args));
+}
+const changing = oneAtATime();
+
+async function runPi(args: string[]): Promise<{ stdout: string; stderr: string }> {
   try {
-    return await runPi(args, { timeout: 120_000, maxBuffer: 4 * 1024 * 1024 });
+    return await piCli(args, { timeout: 120_000, maxBuffer: 4 * 1024 * 1024 });
   } catch (e) {
     if (e instanceof PiMissingError) throw e;
     const err = e as { stdout?: string; stderr?: string; message: string };
@@ -80,12 +86,7 @@ export function packagesRouter(): Router {
     }
     try {
       const { stdout, stderr } = await pi(["remove", spec]);
-      // What was kept aside for switching it back on has nothing left to go to.
-      const stash = extensionStash();
-      if (spec in stash) {
-        delete stash[spec];
-        setExtensionStash(stash);
-      }
+      await packageRemoved(spec);
       res.json({ ok: true, output: (stdout + stderr).trim() });
     } catch (e) {
       res.status(500).json({ error: (e as Error).message });
@@ -94,7 +95,9 @@ export function packagesRouter(): Router {
 
   router.post("/packages/update", async (_req, res) => {
     try {
-      const { stdout, stderr } = await pi(["update", "--all"]);
+      // The packages only: `--all` updates pi as well, which it cannot do where it is the portal's own locked copy
+      // (the image), and says so with an error after the packages were updated. pi comes with the portal's version.
+      const { stdout, stderr } = await pi(["update", "--extensions"]);
       res.json({ ok: true, output: (stdout + stderr).trim() });
     } catch (e) {
       res.status(500).json({ error: (e as Error).message });
@@ -118,21 +121,24 @@ export function packagesRouter(): Router {
     }
   });
 
-  router.put("/pi-settings", (req, res) => {
+  router.put("/pi-settings", async (req, res) => {
     const content = req.body?.content;
     if (typeof content !== "string") return res.status(400).json({ error: "content required" });
     // Refuse to write anything pi could not parse — a broken settings.json
     // stops every future session from starting.
+    let parsed: unknown;
     try {
-      JSON.parse(content);
+      parsed = JSON.parse(content);
     } catch (e) {
       return res.status(400).json({ error: `Not valid JSON: ${(e as Error).message}` });
     }
-    const file = piSettingsPath();
+    // An object, as every other change of the file takes it to be.
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return res.status(400).json({ error: "settings.json must be a JSON object" });
+    }
     try {
-      mkdirSync(path.dirname(file), { recursive: true });
-      writeFileSync(file, content, "utf8");
-      res.json({ ok: true, path: file, note: "Applies to newly started sessions" });
+      await writePiSettingsText(content);
+      res.json({ ok: true, path: piSettingsPath(), note: "Applies to newly started sessions" });
     } catch (e) {
       res.status(500).json({ error: (e as Error).message });
     }

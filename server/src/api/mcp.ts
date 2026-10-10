@@ -1,12 +1,10 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import express, { type Router } from "express";
-import { piAgentDir } from "../pi-settings.js";
+import { writeFileAtomic } from "../atomic-write.js";
+import { isSwitchedOff, sourceOf } from "../extension-switch.js";
+import { piAgentDir, readPiSettings } from "../pi-settings.js";
 import { BROWSER_MCP } from "../tool-policy.js";
-
-const run = promisify(execFile);
 
 /**
  * MCP servers, as configured for `pi-mcp-adapter`.
@@ -85,6 +83,22 @@ function stripComments(text: string): string {
   return out;
 }
 
+let lastReadable: McpFile | undefined;
+
+/**
+ * The configuration as it last could be read: the file now, or, while it
+ * cannot be parsed, what it was before. What the servers offer is judged by
+ * this (db.ts mcpView), and so is which servers a write took out: a typo in
+ * the file must neither withdraw a tool nor hand back one that was withdrawn,
+ * nor make the write that fixes it forget the servers it leaves out.
+ * Undefined where the file has not been readable since the portal started.
+ */
+export function readableMcpConfig(): McpFile | undefined {
+  const { config, error } = readMcpFile();
+  if (!error) lastReadable = config;
+  return lastReadable;
+}
+
 export function readMcpFile(): { config: McpFile; raw: string; error?: string } {
   const file = mcpConfigPath();
   if (!existsSync(file)) return { config: { mcpServers: {} }, raw: "" };
@@ -116,19 +130,64 @@ export function mcpServerNames(): string[] {
   }
 }
 
-/** Where the agent's browser listens for the debugging protocol. */
-export const BROWSER_CDP = process.env.BROWSER_CDP_URL || "http://127.0.0.1:9222";
+/**
+ * The adapter's own file of what each server offered, `servers.<name>`, which
+ * it reads to list tools before a server has been started. A server that is
+ * removed from the configuration leaves its entry there, and its tools with it.
+ */
+export const mcpCachePath = (): string => path.join(piAgentDir(), "mcp-cache.json");
 
-/** The servers configured to attach to our browser, whatever they are called. */
-function connectedServers(): string[] {
+/** The adapter's cache as it is on disk, or null where it is not there or cannot be read. */
+export function readMcpCache(): { servers?: Record<string, { tools?: unknown; resources?: unknown } | undefined> } | null {
+  try {
+    const cache = JSON.parse(readFileSync(mcpCachePath(), "utf8"));
+    const servers = cache?.servers;
+    return servers && typeof servers === "object" && !Array.isArray(servers) ? cache : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Take the named servers out of the adapter's cache. A cache that is not there
+ * or cannot be read is left alone: it is the adapter's file, it rebuilds it,
+ * and a removal that is done must not fail over it.
+ */
+export function dropMcpCache(names: string[]): void {
+  const file = mcpCachePath();
+  try {
+    const cache = JSON.parse(readFileSync(file, "utf8"));
+    const servers = cache?.servers;
+    if (!servers || typeof servers !== "object" || Array.isArray(servers)) return;
+    const present = names.filter((name) => Object.prototype.hasOwnProperty.call(servers, name));
+    if (!present.length) return;
+    for (const name of present) delete servers[name];
+    writeFileAtomic(file, JSON.stringify(cache, null, 2) + "\n");
+  } catch {
+    // Missing, unparsable or not writable.
+  }
+}
+
+/** Where the agent's browser listens for the debugging protocol, read from the environment as it is now. */
+export const browserCdp = () => process.env.BROWSER_CDP_URL || "http://127.0.0.1:9222";
+/** The same, as it was when the portal started: what the tools and the servers configured for it go by. */
+export const BROWSER_CDP = browserCdp();
+
+/** The servers of a configuration that attach to our browser, whatever they are called. */
+function connectedIn(config: McpFile): string[] {
   const names: string[] = [];
-  for (const [name, entry] of Object.entries(readMcpFile().config.mcpServers ?? {})) {
+  for (const [name, entry] of Object.entries(config.mcpServers ?? {})) {
     const args = (entry as { args?: unknown }).args;
     if (Array.isArray(args) && args.includes("--cdp-endpoint") && args.includes(BROWSER_CDP)) {
       names.push(name);
     }
   }
   return names;
+}
+
+/** The servers configured to attach to our browser, whatever they are called. */
+function connectedServers(): string[] {
+  return connectedIn(readMcpFile().config);
 }
 
 /** Is some MCP server pointed at our browser, whatever it is called? */
@@ -146,25 +205,68 @@ export function findConnection(): string | null {
  * too — it is the name the rest of the portal has always looked for.
  */
 export function browserServers(): string[] {
-  const names = new Set(connectedServers());
-  if (mcpServerNames().includes(BROWSER_MCP)) names.add(BROWSER_MCP);
-  return [...names];
+  return serversAndBrowsers().browsers;
+}
+
+/** The servers configured and which of them are the browser, from one read of the file: what a pass over many conversations asks once. */
+export function serversAndBrowsers(): { servers: string[]; browsers: string[] } {
+  const config = readMcpFile().config;
+  const servers = Object.keys(config.mcpServers ?? {});
+  const browsers = new Set(connectedIn(config));
+  if (servers.includes(BROWSER_MCP)) browsers.add(BROWSER_MCP);
+  return { servers, browsers: [...browsers] };
+}
+
+/**
+ * The file holds the keys of the MCP servers and the portal's own token for
+ * Understory, so it is for its owner alone, and put in place whole: one cut
+ * off by a full disk would take every MCP server with it.
+ */
+export function writeMcpText(text: string): void {
+  const file = mcpConfigPath();
+  const before = Object.keys(readableMcpConfig()?.mcpServers ?? {});
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileAtomic(file, text.endsWith("\n") ? text : text + "\n", 0o600);
+  for (const listener of [...writtenListeners]) {
+    try {
+      listener(before);
+    } catch (e) {
+      console.error(`[portal] could not take in the MCP configuration that was written: ${(e as Error).message}`);
+    }
+  }
+}
+
+const writtenListeners = new Set<(before: string[]) => void>();
+
+/**
+ * Told after every write of the file, whoever wrote it — a route of the panel,
+ * a feature switched off, the browser moved over — with the servers it had
+ * before: what the configuration offers decides which tools a running chat may
+ * still use (see mcp-offer.ts), and a chat that has to be restarted to notice
+ * a server switched off is a switch that looks broken. Returns the way to stop
+ * listening.
+ */
+export function onMcpWritten(listener: (before: string[]) => void): () => void {
+  writtenListeners.add(listener);
+  return () => writtenListeners.delete(listener);
 }
 
 export function writeMcpFile(config: McpFile): void {
-  const file = mcpConfigPath();
-  mkdirSync(path.dirname(file), { recursive: true });
-  writeFileSync(file, JSON.stringify(config, null, 2) + "\n", "utf8");
+  writeMcpText(JSON.stringify(config, null, 2));
 }
 
-/** Is the adapter installed? Without it, none of this configuration does anything. */
-async function adapterInstalled(): Promise<boolean> {
-  try {
-    const { stdout } = await run("pi", ["list"], { timeout: 60_000 });
-    return stdout.includes(ADAPTER);
-  } catch {
-    return false;
+/**
+ * pi-mcp-adapter as pi's settings list it, if they do: without it, none of this
+ * configuration does anything, and no MCP server is a tool. Read from the
+ * settings, not by asking `pi list`: that starts pi, which takes a second or
+ * more, and this is asked each time the panel opens or something in it changes.
+ */
+export function mcpAdapter(packages: unknown = readPiSettings().packages): { source: string; enabled: boolean } | undefined {
+  for (const entry of Array.isArray(packages) ? packages : []) {
+    const source = sourceOf(entry);
+    if (source && /(^|[:/])pi-mcp-adapter(@[^/]*)?$/.test(source)) return { source, enabled: !isSwitchedOff(entry) };
   }
+  return undefined;
 }
 
 /** stdio, http and socket are mutually exclusive in the adapter. */
@@ -202,7 +304,7 @@ export function mcpRouter(): Router {
       res.json({
         path: mcpConfigPath(),
         exists: existsSync(mcpConfigPath()),
-        adapterInstalled: await adapterInstalled(),
+        adapterInstalled: mcpAdapter() !== undefined,
         adapterSpec: ADAPTER_SPEC,
         servers,
         settings: config.settings ?? {},
@@ -214,7 +316,7 @@ export function mcpRouter(): Router {
     }
   });
 
-  /** Create or replace one server. `from` renames an existing entry. */
+  /** Create or change one server. `from` renames an existing entry; a name that is taken by another is refused. */
   router.put("/mcp/servers/:name", (req, res) => {
     const name = req.params.name;
     const from = typeof req.body?.from === "string" ? req.body.from : null;
@@ -226,6 +328,11 @@ export function mcpRouter(): Router {
 
     const { config, error } = readMcpFile();
     if (error) return res.status(409).json({ error: `Fix the file first: ${error}` });
+    // An entry of that name already there is somebody's setup — environment, headers, an oauth block the form does not show — and a new or renamed server would replace it unseen.
+    if (name !== from && Object.prototype.hasOwnProperty.call(config.mcpServers, name)) {
+      return res.status(409).json({ error: `A server called ${name} already exists`, code: "exists" });
+    }
+    // A rename removes the old name, and its tools are not the new one's (see writeMcpText).
     if (from && from !== name) delete config.mcpServers[from];
     config.mcpServers[name] = req.body.entry;
     try {
@@ -304,6 +411,11 @@ export function mcpRouter(): Router {
         skipped.push({ name, reason: problem });
         continue;
       }
+      // As the form's save refuses it: what is there is somebody's setup, and a pasted README snippet would replace it unseen.
+      if (Object.prototype.hasOwnProperty.call(config.mcpServers, name)) {
+        skipped.push({ name, reason: `A server called ${name} already exists` });
+        continue;
+      }
       config.mcpServers[name] = entry as Record<string, unknown>;
       added.push(name);
     }
@@ -311,7 +423,9 @@ export function mcpRouter(): Router {
       return res.status(400).json({ error: "No servers found in that JSON" });
     }
     try {
-      if (added.length) writeMcpFile(config);
+      if (added.length) {
+        writeMcpFile(config);
+      }
       res.json({ ok: true, added, skipped });
     } catch (e) {
       res.status(500).json({ error: (e as Error).message });
@@ -328,9 +442,7 @@ export function mcpRouter(): Router {
       return res.status(400).json({ error: `Not valid JSON: ${(e as Error).message}` });
     }
     try {
-      const file = mcpConfigPath();
-      mkdirSync(path.dirname(file), { recursive: true });
-      writeFileSync(file, content.endsWith("\n") ? content : content + "\n", "utf8");
+      writeMcpText(content);
       res.json({ ok: true });
     } catch (e) {
       res.status(500).json({ error: (e as Error).message });

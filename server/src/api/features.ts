@@ -1,5 +1,5 @@
 import express, { type Router } from "express";
-import { extensionStash, getSession, sessionSubagentModel, setExtensionStash, setSessionSubagentModel } from "../db.js";
+import { getSession, packageRemoved, sessionSubagentModel, setSessionSubagentModel } from "../db.js";
 import {
   SUBAGENT_MAX_PARALLEL,
   UNDERSTORY,
@@ -7,7 +7,6 @@ import {
   bundledSubagentDir,
   isModelChoice,
   localPackagePath,
-  mcpAdapter,
   subagentModelOf,
   subagentState,
   understoryDefaultUrl,
@@ -16,13 +15,15 @@ import {
   understoryOn,
   understoryTokenOf,
 } from "../features.js";
+import { ImageGenerationError, imageEditingMultiple, imageEditingReady, imageGenerationReady, imageGenerationState, parseImageGenerationPatch, saveImageGeneration } from "../image-generation.js";
 import { readPiSettings, updatePiSettings } from "../pi-settings.js";
 import { sessions } from "../session-manager.js";
 import { switchPackage } from "./extensions.js";
-import { ADAPTER_SPEC, readMcpFile, writeMcpFile } from "./mcp.js";
+import { ADAPTER_SPEC, mcpAdapter, readMcpFile, writeMcpFile } from "./mcp.js";
 import * as service from "../extensions/understory-service.js";
 import { readModelsJson } from "../providers.js";
 import { pi } from "./packages.js";
+import { serverTimeZone } from "../time-zone.js";
 
 const adapterEntry = () => mcpAdapter();
 
@@ -77,7 +78,7 @@ async function understoryState() {
       lastDream: service.lastDream(),
       nextDream: service.nextDreamAt()?.toISOString() ?? null,
       // What "03:00" means: the portal's clock.
-      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      timeZone: serverTimeZone(),
     },
     ...(error ? { configError: error } : {}),
   };
@@ -153,10 +154,11 @@ export function featuresRouter(): Router {
   /**
    * Only whether each is on: for the sidebar and every chat's menus, which
    * need no more. Reads two small files; nothing is asked of Understory or Docker.
+   * Images is on when it can make a picture: switched on, and with an address to ask.
    */
   router.get("/features/flags", (_req, res) => {
     try {
-      res.json({ subagent: { enabled: subagentState().enabled }, understory: { enabled: understoryOn() } });
+      res.json({ subagent: { enabled: subagentState().enabled }, understory: { enabled: understoryOn() }, images: { enabled: imageGenerationReady() || imageEditingReady() } });
     } catch (e) {
       res.status(500).json({ error: (e as Error).message });
     }
@@ -171,9 +173,18 @@ export function featuresRouter(): Router {
     }
   });
 
+  /** Image generation alone, as the subagent tool: its tab needs nothing of Understory or Docker. The key is never in it, only whether one is set. */
+  router.get("/features/images", (_req, res) => {
+    try {
+      res.json({ images: imageGenerationState() });
+    } catch (e) {
+      res.status(500).json({ error: (e as Error).message });
+    }
+  });
+
   router.get("/features", async (_req, res) => {
     try {
-      res.json({ subagent: subagentState(), understory: await understoryState() });
+      res.json({ subagent: subagentState(), understory: await understoryState(), images: imageGenerationState() });
     } catch (e) {
       res.status(500).json({ error: (e as Error).message });
     }
@@ -215,25 +226,35 @@ export function featuresRouter(): Router {
         // to `pi remove` as it is, pi reads it from where the portal runs.
         const local = !/^(npm|git|https?):/.test(state.source);
         await pi(["remove", local ? localPackagePath(state.source) : state.source]);
-        // What was kept aside for switching it back on has nothing left to go
-        // to — dropped in turn with the other switches, which read and write it too.
-        const source = state.source;
-        await updatePiSettings(
-          () => {},
-          () => {
-            const stash = extensionStash();
-            if (source in stash) {
-              delete stash[source];
-              setExtensionStash(stash);
-            }
-          },
-        );
+        await packageRemoved(state.source);
       }
       // The mode changes what the tool tells the model, which it reads when it is loaded.
       const { reloaded, waiting } = await sessions.reloadIdle();
       res.json({ subagent: subagentState(), reloaded, waiting });
     } catch (e) {
       res.status(500).json({ error: (e as Error).message });
+    }
+  });
+
+  /**
+   * The image endpoint and whether the agent has a tool for it, and for editing
+   * a picture. A tool is there only while it is on and has an address, and a
+   * chat decides that when it loads, so a change in either reloads the idle
+   * ones. So does one in whether the edit tool takes a list of pictures, which
+   * is the shape of its parameters. The rest — address, model, size, key — is
+   * read at each call and needs no reload.
+   */
+  router.put("/features/images", async (req, res) => {
+    const patch = parseImageGenerationPatch(req.body);
+    if (typeof patch === "string") return res.status(400).json({ error: patch });
+    try {
+      const before = [imageGenerationReady(), imageEditingReady(), imageEditingMultiple()];
+      saveImageGeneration(patch);
+      const changed = imageGenerationReady() !== before[0] || imageEditingReady() !== before[1] || imageEditingMultiple() !== before[2];
+      const { reloaded, waiting } = changed ? await sessions.reloadIdle() : { reloaded: 0, waiting: 0 };
+      res.json({ images: imageGenerationState(), changed, reloaded, waiting });
+    } catch (e) {
+      res.status(e instanceof ImageGenerationError ? 400 : 500).json({ error: (e as Error).message });
     }
   });
 

@@ -19,8 +19,11 @@ import {
   unlinkSync,
   writeSync,
 } from "node:fs";
+import { rm } from "node:fs/promises";
 import path from "node:path";
+import { holdsWork, unsavedIn, unsavedRefusal, type Unsaved } from "./git.js";
 import { pictureType } from "./prompt-images.js";
+import { isWithinText, pathBelow } from "./within.js";
 
 /**
  * Looking at, changing and taking away the files in a chat's folder, from the browser.
@@ -45,12 +48,14 @@ export const MAX_ENTRIES = 2_000;
 /** Left out of the whole-folder archive: regenerable, or huge, and not the work itself. */
 export const ARCHIVE_EXCLUDES = ["node_modules", ".git", "__pycache__", ".venv", "venv", "dist", "build"];
 
-export type FileErrorCode = "invalid" | "missing" | "conflict" | "exists" | "too_large" | "failed";
+export type FileErrorCode = "invalid" | "missing" | "conflict" | "exists" | "too_large" | "failed" | "unsaved";
 
 export class FileError extends Error {
   constructor(
     readonly code: FileErrorCode,
     message: string,
+    /** With "unsaved": what the delete would lose. */
+    readonly unsaved?: Unsaved,
   ) {
     super(message);
   }
@@ -68,8 +73,6 @@ export interface FileEntry {
   size: number;
   mtime: number;
 }
-
-const isWithin = (root: string, p: string) => p === root || p.startsWith(root + path.sep);
 
 const lexists = (p: string): boolean => {
   try {
@@ -129,9 +132,9 @@ export function resolveInside(base: string, rel: unknown): string {
   const text = String(rel ?? "");
   if (text.includes("\0")) throw new FileError("invalid", "That is not a valid path");
   const resolved = path.resolve(base, text.replace(/^[/\\]+/, ""));
-  if (!isWithin(base, resolved)) throw new FileError("invalid", "That path leads outside the folder");
+  if (!isWithinText(base, resolved)) throw new FileError("invalid", "That path leads outside the folder");
   const real = realThroughExisting(resolved);
-  if (!isWithin(base, real)) throw new FileError("invalid", "That path leads outside the folder");
+  if (!isWithinText(base, real)) throw new FileError("invalid", "That path leads outside the folder");
   return real;
 }
 
@@ -170,7 +173,7 @@ export function listDir(base: string, rel: unknown): { path: string; entries: Fi
         // A link that leads out, or nowhere, is listed and left alone.
         type = "link";
         const real = realpathSync(full);
-        if (isWithin(base, real)) {
+        if (isWithinText(base, real)) {
           st = statSync(real);
           type = st.isDirectory() ? "dir" : "file";
         }
@@ -281,6 +284,28 @@ export function openPicture(base: string, rel: unknown): { fd: number; size: num
   } catch (e) {
     closeSync(opened.fd);
     throw e;
+  }
+}
+
+/**
+ * A picture in the folder, read whole, for one that is sent on as it is, to an
+ * image endpoint to be changed. Opened as a picture shown is: checked by its
+ * bytes and its size, and never through a link out of the folder.
+ */
+export function readPicture(base: string, rel: unknown): { bytes: Buffer; mimeType: string; name: string } {
+  const opened = openPicture(base, rel);
+  try {
+    const bytes = Buffer.alloc(opened.size);
+    let read = 0;
+    while (read < bytes.length) {
+      const n = readSync(opened.fd, bytes, read, bytes.length - read, read);
+      // Shorter than it was when it was measured.
+      if (n === 0) break;
+      read += n;
+    }
+    return { bytes: bytes.subarray(0, read), mimeType: opened.mimeType, name: opened.name };
+  } finally {
+    closeSync(opened.fd);
   }
 }
 
@@ -400,24 +425,52 @@ export function writeText(
 }
 
 /**
- * Removes a file, or a folder and all that is in it. A link is removed as the
- * link it is, and what it points at stays. The folder itself is not removable
- * from here: that is the chat's place, not something in it.
+ * The place `rel` names, for taking it away or giving it another name: its
+ * folder followed and checked, its last name not, so that a link there is what
+ * is changed, not what it leads to. The folder itself is not something in it.
+ * One check for both, because what one lets through the other must not.
  */
-export function removeEntry(base: string, rel: unknown): void {
+function entryPlace(base: string, rel: unknown, verb: "removed" | "renamed"): string {
   const text = String(rel ?? "");
   if (text.includes("\0")) throw new FileError("invalid", "That is not a valid path");
   const lexical = path.resolve(base, text.replace(/^[/\\]+/, ""));
-  if (!isWithin(base, lexical)) throw new FileError("invalid", "That path leads outside the folder");
-  if (lexical === base) throw new FileError("invalid", "The folder itself is not removed from here");
-  // The parent is followed and checked; the last name is not, so that a link
-  // there goes, not what it leads to.
+  const under = pathBelow(base, lexical);
+  if (under === undefined) throw new FileError("invalid", "That path leads outside the folder");
+  if (under === "") throw new FileError("invalid", `The folder itself is not ${verb} from here`);
   const parent = resolveInside(base, path.relative(base, path.dirname(lexical)));
   const target = path.join(parent, path.basename(lexical));
   if (!lexists(target)) throw new FileError("missing", "There is no such file or folder");
+  return target;
+}
+
+/**
+ * What deleting `rel` would lose that nothing else has — see unsavedIn — or
+ * null when nothing git holds goes with it. Asked before the question, so that
+ * it can say so.
+ */
+export async function unsavedAt(base: string, rel: unknown): Promise<Unsaved | null> {
+  return unsavedIn(base, entryPlace(base, rel, "removed"));
+}
+
+/**
+ * Removes a file, or a folder and all that is in it. A link is removed as the
+ * link it is, and what it points at stays. The folder itself is not removable
+ * from here: that is the chat's place, not something in it.
+ *
+ * A folder that holds git work nothing else has — a clone with commits no
+ * remote has, changes not committed, stashes — or a repository's .git is
+ * refused, with what it holds, unless `discard` says that is meant.
+ */
+export async function removeEntry(base: string, rel: unknown, discard = false): Promise<void> {
+  const target = entryPlace(base, rel, "removed");
+  if (!discard) {
+    const unsaved = await unsavedIn(base, target);
+    if (unsaved && holdsWork(unsaved)) throw new FileError("unsaved", unsavedRefusal(unsaved).error, unsaved);
+  }
   try {
+    // Not rmSync: a folder with many files is seconds on the thread that serves every chat.
     // A file that has gone since it was looked for is what was asked for.
-    rmSync(target, { recursive: true, force: true });
+    await rm(target, { recursive: true, force: true });
   } catch (e) {
     throw ioFailure(e, "It could not be deleted", "Nothing more was changed.");
   }
@@ -439,16 +492,8 @@ function checkName(name: unknown): string {
  */
 export function renameEntry(base: string, rel: unknown, newName: unknown): string {
   const name = checkName(newName);
-  const text = String(rel ?? "");
-  if (text.includes("\0")) throw new FileError("invalid", "That is not a valid path");
-  const lexical = path.resolve(base, text.replace(/^[/\\]+/, ""));
-  if (!isWithin(base, lexical)) throw new FileError("invalid", "That path leads outside the folder");
-  if (lexical === base) throw new FileError("invalid", "The folder itself is not renamed from here");
-  // The parent is followed and checked; the last name is not, so that a link
-  // is renamed and not what it leads to.
-  const parent = resolveInside(base, path.relative(base, path.dirname(lexical)));
-  const from = path.join(parent, path.basename(lexical));
-  if (!lexists(from)) throw new FileError("missing", "There is no such file or folder");
+  const from = entryPlace(base, rel, "renamed");
+  const parent = path.dirname(from);
   const to = path.join(parent, name);
   if (to === from) return path.relative(base, to);
   if (lexists(to)) throw new FileError("exists", `There is already something called "${name}" here`);
@@ -488,7 +533,7 @@ export function makeFolder(base: string, dirRel: unknown, name: unknown): string
 }
 
 /** The start of a name that fits in `max` bytes, cut between letters, not inside one. */
-function fitBytes(name: string, max: number): string {
+export function fitBytes(name: string, max: number): string {
   let start = "";
   for (const ch of name) {
     if (Buffer.byteLength(start + ch) > max) break;
@@ -569,4 +614,26 @@ export function uploadTarget(
     throw new FileError("exists", `Too many files called "${clean}" here`);
   };
   return { fd, finish, abandon };
+}
+
+/**
+ * Keeps `data` as a new file called `name` in the folder `dirRel`, for what
+ * the portal makes itself, such as a picture the agent had generated. Put in
+ * place as an upload is: written beside its place first, never over something
+ * that is there (a taken name gets a number), and into no place outside the
+ * folder. Returns its path, from the chat's folder.
+ */
+export function saveNewFile(base: string, dirRel: unknown, name: string, data: Buffer): string {
+  const target = uploadTarget(base, dirRel, name);
+  try {
+    let written = 0;
+    while (written < data.length) written += writeSync(target.fd, data, written, data.length - written, written);
+    fsyncSync(target.fd);
+  } catch (e) {
+    closeSync(target.fd);
+    target.abandon();
+    throw ioFailure(e, "The file could not be saved", "Nothing was changed.");
+  }
+  closeSync(target.fd);
+  return target.finish();
 }

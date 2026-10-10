@@ -1,9 +1,12 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { DATA_DIR } from "../data-dir.js";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { bundledPath } from "../bundled.js";
+import { channelsPath } from "../data-dir.js";
+import { oneAtATime } from "../one-at-a-time.js";
+import { isUnderText, isWithinText } from "../within.js";
 
 const run = promisify(execFile);
 
@@ -70,7 +73,7 @@ export interface BrokenChannel {
 
 /** Where third-party packages are installed. Builtins ship inside the image. */
 export const channelsDir = (): string => {
-  const dir = path.resolve(process.env.CHANNELS_DIR || path.join(DATA_DIR, "channels"));
+  const dir = channelsPath();
   mkdirSync(dir, { recursive: true });
   return dir;
 };
@@ -79,18 +82,7 @@ export const channelsDir = (): string => {
  * The repo's own `channels/` directory. Resolved relative to the compiled file
  * so it works both from `dist` and from a source run.
  */
-const builtinDir = (): string => {
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  for (const candidate of [
-    path.resolve(here, "../../../channels"), // dist/channels -> repo root
-    path.resolve(here, "../../channels"),
-    path.resolve(process.cwd(), "channels"),
-    path.resolve(process.cwd(), "../channels"),
-  ]) {
-    if (existsSync(candidate)) return candidate;
-  }
-  return path.resolve(process.cwd(), "channels");
-};
+const builtinDir = (): string => bundledPath("channels") ?? path.resolve(process.cwd(), "channels");
 
 const isChannelPackage = (meta: any) =>
   Boolean(meta?.pithagoras?.channel) || /^pithagoras-channel-/.test(meta?.name ?? "");
@@ -207,14 +199,19 @@ export const invalidate = () => {
  * worth supporting: `user/repo`, `github:user/repo#tag`, a git URL, an https
  * tarball, or a plain npm name.
  */
-export async function installChannelPackage(spec: string): Promise<string> {
+export function installChannelPackage(spec: string): Promise<string> {
+  // One at a time: two npm installs into the same folder collide.
+  return installing(() => installChannelPackageNow(spec));
+}
+const installing = oneAtATime();
+
+async function installChannelPackageNow(spec: string): Promise<string> {
   const dir = channelsDir();
   if (!existsSync(path.join(dir, "package.json"))) {
     // npm needs somewhere to record the dependency, or it walks up and installs
     // into whatever project happens to be above this directory.
     const stub = { name: "pithagoras-channels", private: true, dependencies: {} };
     mkdirSync(dir, { recursive: true });
-    const { writeFileSync } = await import("node:fs");
     writeFileSync(path.join(dir, "package.json"), JSON.stringify(stub, null, 2) + "\n");
   }
 
@@ -235,11 +232,11 @@ export function channelPackageTarget(packageName: string): string {
   if (!isPackageName(packageName)) throw new Error("Invalid package name");
   const root = path.resolve(channelsDir(), "node_modules");
   const target = path.resolve(root, packageName);
-  if (!target.startsWith(root + path.sep)) throw new Error("Invalid package path");
+  if (!isUnderText(root, target)) throw new Error("Invalid package path");
   const parent = path.dirname(target);
   if (existsSync(parent) && existsSync(root)) {
     const realRoot = realpathSync(root), realParent = realpathSync(parent);
-    if (realParent !== realRoot && !realParent.startsWith(realRoot + path.sep)) {
+    if (!isWithinText(realRoot, realParent)) {
       throw new Error("Package scope escapes node_modules");
     }
   }

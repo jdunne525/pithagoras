@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useNow } from "../use-now";
 import {
   LuBot,
   LuBrain,
@@ -19,8 +20,8 @@ import {
   LuX,
 } from "react-icons/lu";
 import type { IconType } from "react-icons";
-import { Streamdown } from "streamdown";
-import { formatElapsed, formatTokens, lineCount, prefillShare, promptLabel, stripAnsi, type Activity, type Item } from "../transcript";
+import { Markdown } from "./Markdown";
+import { formatElapsed, formatTokens, lineCount, prefillShare, promptLabel, shownFrom, stripAnsi, type Activity, type Item } from "../transcript";
 import { SHELL_TOOL, unwrapCall } from "../tool-activity";
 import { argLabel, isBlock, isScalar } from "../tool-args";
 import { useFollowBottom } from "../use-follow-bottom";
@@ -99,7 +100,11 @@ export function ThinkingBlock({
   const seconds = since ? Math.max(0, Math.round(((streaming ? now : until ?? since) - since) / 1000)) : undefined;
   const label = streaming ? t("Thinking") : seconds && seconds >= 1 ? t("Thought for {time}", { time: formatElapsed(seconds) }) : t("Thought process");
   // The end of what it is thinking, under a closed header.
-  const tail = streaming && !open ? recentText(thinking) : "";
+  // Where the end starts is only moved on rarely (see shownFrom): a start that
+  // followed the newest token made every line wrap anew with each one.
+  const from = useRef(0);
+  from.current = shownFrom(thinking, from.current);
+  const tail = streaming && !open ? tidyText(thinking.slice(from.current)) : "";
   // As high as what it shows, up to three lines — a sentence of reasoning is
   // not a sentence and two empty lines — and never lower again while it runs:
   // a window that shrank and grew with the text as it wrapped jumped with every
@@ -175,20 +180,9 @@ function ThinkingBody({ thinking, streaming, open }: { thinking: string; streami
   );
 }
 
-/**
- * The end of a text that is still being written, for a window a few lines
- * high that shows its last lines: enough to fill it, cut at a word.
- *
- * It is one block that grows, not a line swapped for the next: that one was
- * drawn anew, and faded in, with every token, which at a fast model's speed
- * was a flicker rather than something to read.
- */
-function recentText(text: string, chars = 600): string {
-  const trimmed = text.replace(/\n{2,}/g, "\n").trimEnd();
-  if (trimmed.length <= chars) return trimmed.trimStart();
-  const cut = trimmed.slice(-chars);
-  const space = cut.search(/\s/);
-  return (space >= 0 && space < 40 ? cut.slice(space + 1) : cut).trimStart();
+/** The text the end shows, with its blank lines closed up. */
+function tidyText(text: string): string {
+  return text.replace(/\n{2,}/g, "\n").trim();
 }
 
 /** The last few lines of a command's output that say something, oldest first. */
@@ -238,18 +232,6 @@ function ToolIcon({ name }: { name: string }) {
   return <Icon />;
 }
 
-/** A clock that ticks once a second while `on`. */
-function useNow(on: boolean) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!on) return;
-    setNow(Date.now());
-    const t = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(t);
-  }, [on]);
-  return now;
-}
-
 /**
  * The exit code a shell tool gave in its own words, on one of the first or
  * last lines of its output: pi's "Command exited with code 2", another
@@ -273,7 +255,7 @@ function reportedExit(output: string): number | undefined {
  */
 export function shellOutcome(status: ToolItem["status"], output: string, interrupted?: boolean, tool = "bash"): { label: string; tone: "ok" | "error" | "warn" } | undefined {
   if (status === "running") return undefined;
-  if (interrupted) return { label: "interrupted", tone: "warn" };
+  if (interrupted) return { label: t("interrupted"), tone: "warn" };
   if (status === "done") {
     const code = reportedExit(output) ?? (tool.toLowerCase() === "bash" ? 0 : undefined);
     return code === undefined ? undefined : { label: `exit ${code}`, tone: code === 0 ? "ok" : "error" };
@@ -334,7 +316,7 @@ export function ToolCall({
   const outcome = shell
     ? shellOutcome(item.status, output, item.interrupted, name)
     : item.interrupted
-      ? ({ label: "interrupted", tone: "warn" } as const)
+      ? ({ label: t("interrupted"), tone: "warn" } as const)
       : undefined;
   // Counted on the whole output: what is kept of it is only the end.
   const lines = shell ? (item.outputLines ?? lineCount(output)) : 0;
@@ -502,7 +484,7 @@ function ArgValue({ value, depth }: { value: unknown; depth: number }): ReactNod
  * short, is not. Nor is one with a number too long for JavaScript to hold —
  * an id, most often — which read back would be shown as another number.
  */
-export function jsonOutput(output: string): object | undefined {
+function jsonOutput(output: string): object | undefined {
   const t = output.trim();
   // Sixteen digits or more in a row, a point or two among them: more than a
   // JavaScript number holds, whole or after the point. A string with as many
@@ -570,7 +552,7 @@ export function CompactionMarker({ item }: { item: CompactionItem }) {
         <Collapse open={open}>
           {/* pi writes the summary in markdown: headings, checklists, file lists. */}
           <div className="chat-compaction-summary md">
-            <Streamdown shikiTheme={["github-light", "github-dark"]}>{item.summary}</Streamdown>
+            <Markdown>{item.summary}</Markdown>
           </div>
         </Collapse>
       )}
@@ -586,7 +568,9 @@ export function CompactionMarker({ item }: { item: CompactionItem }) {
  * been said — rather than a card that grows and shrinks. Writing and tool calls
  * are drawn where they happen, so this steps aside for them.
  */
-export function StatusIndicator({ phase, now }: { phase: Activity; now: number }) {
+export function StatusIndicator({ phase }: { phase: Activity }) {
+  // Its own clock: a second's tick redraws this pill, and not the conversation it sits under.
+  const now = useNow(true);
   const seconds = phase.since ? Math.max(0, Math.floor((now - phase.since) / 1000)) : 0;
   const elapsed = seconds >= 2 ? formatElapsed(seconds) : null;
   const p = phase.prefill;

@@ -1,16 +1,24 @@
 // Development-only fixture: the chat's activity, thinking, tools and compaction, without a server.
-// Open /tests/chat.html?phase=model|prefill|thinking|reasoning|compacting|tools|agents|interrupted to see each state,
+// Open /tests/chat.html?phase=model|prefill|thinking|reasoning|compacting|tools|agents|interrupted|turns to see each state,
 // and add &loading=1 for the conversation still arriving.
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import { Chat } from '../src/components/Chat';
+import { ConfirmHost } from '../src/components/ConfirmDialog';
 import { fillFrom } from '../src/editor-fills';
 import { Select } from '../src/components/Select';
 import type { PortalEvent, Session } from '../src/api';
 import '../src/styles';
 import { installTooltips } from '../src/tooltips';
+import { installMotion } from '../src/motion';
+import { mockFetch } from './mock-fetch';
+import { setLanguage } from '../src/i18n';
+// Offers the languages, as the app does: `setLang('de')` fetches German.
+import '../src/locales';
 installTooltips();
+// As the app does: the Animations switch and reduced motion are read from the page, for what moves with them.
+installMotion();
 
 const phase = new URLSearchParams(location.search).get('phase') ?? 'tools';
 const now = Date.now();
@@ -32,7 +40,7 @@ const events: PortalEvent[] = [
   ev('compaction_end', { result: { summary: 'The user asked to fix the build. The build passes; one test fails.', tokensBefore: 84210 } }, 60),
 ];
 if (phase === 'tools') events.push(ev('turn_start', {}, 20), ...bash('b3', 'for i in $(seq 1 40); do echo "step $i"; sleep 1; done', Array.from({ length: 12 }, (_, i) => `step ${i + 1}`).join('\n'), undefined, 12));
-if (phase === 'model') events.push(ev('turn_start', {}, 8), ev('portal_model', { model: 'Qwen3.6-35B-A3B-UD-Q4_K_XL', state: 'loading' }, 7));
+if (phase === 'model') events.push(ev('turn_start', {}, 8), ev('portal_model', { model: 'model-b-q4', state: 'loading' }, 7));
 if (phase === 'prefill') events.push(ev('turn_start', {}, 8), ev('message_start', { message: { role: 'assistant' } }, 7), ev('portal_prefill', { total: 48000, processed: 20160, cache: 12000 }, 1));
 if (phase === 'thinking') events.push(ev('turn_start', {}, 8), ev('message_update', { streamId: 's', assistantMessageEvent: { type: 'thinking_delta', delta: 'The test fails because the regex expects the status at the very end.\nI should check how pi appends it' } }, 5), ev('message_update', { streamId: 's', assistantMessageEvent: { type: 'thinking_delta', delta: ' — it adds two newlines before "Command exited".' } }, 1));
 // Slash commands and how each went: quiet, answered, a run, terminal-only, failed.
@@ -47,6 +55,26 @@ if (phase === 'commands') {
   );
 }
 if (phase === 'compacting') events.push(ev('compaction_start', {}, 6));
+// Pictures: one sent, one made, one made from that, and one shown without a title. Their files are what the test serves.
+// An edit's path is the original's, as the agent gave it; the folder is the chat's, so a path inside it is the same file.
+if (phase === 'pictures') events.push(
+  ev('portal_prompt', { message: 'Paint a lighthouse, then make it blue.', images: [{ name: 'sketch.png', mimeType: 'image/png' }] }, 9),
+  ev('tool_execution_start', { toolCallId: 'g1', toolName: 'generate_image', args: { prompt: 'A lighthouse at dusk', title: 'A lighthouse at dusk' } }, 8),
+  ev('tool_execution_end', { toolCallId: 'g1', toolName: 'generate_image', result: { content: [{ type: 'text', text: 'Generated and shown to the user: generated-images/lighthouse.png' }], details: { path: 'generated-images/lighthouse.png', title: 'A lighthouse at dusk', portalImage: true } } }, 7),
+  ev('tool_execution_start', { toolCallId: 'e1', toolName: 'edit_image', args: { path: '/workspaces/pithagoras/generated-images/lighthouse.png', prompt: 'Make it blue' } }, 6),
+  ev('tool_execution_end', { toolCallId: 'e1', toolName: 'edit_image', result: { content: [{ type: 'text', text: 'Edited and shown to the user: generated-images/lighthouse-edited.png' }], details: { path: 'generated-images/lighthouse-edited.png', title: 'The lighthouse, in blue', portalImage: true } } }, 5),
+  ev('tool_execution_start', { toolCallId: 's1', toolName: 'show_image', args: { path: 'docs/diagram.png' } }, 4),
+  ev('tool_execution_end', { toolCallId: 's1', toolName: 'show_image', result: { content: [{ type: 'text', text: 'Shown: docs/diagram.png' }], details: { path: 'docs/diagram.png' } } }, 3),
+  ev('message_end', { message: { role: 'assistant', content: [{ type: 'text', text: 'Here they are.' }] } }, 2),
+  ev('agent_end', {}, 1),
+);
+// A finished reply with what writing it took, as llama.cpp measured it: `?phase=stats`.
+if (phase === 'stats') events.push(
+  ev('portal_prompt', { message: 'hi' }, 6),
+  ev('message_end', { streamId: 'st', message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'A greeting.' }, { type: 'text', text: 'Hi — what do you need?' }], usage: { input: 1203, output: 41, cacheRead: 11264, cacheWrite: 0 } },
+    timings: { promptTokens: 1203, cachedTokens: 11264, promptMs: 2210, promptPerSecond: 544.3, outputTokens: 41, outputMs: 1142, outputPerSecond: 35.9, draftTokens: 30, draftAccepted: 22 }, thinkingSince: now - 5000, thinkingUntil: now - 4000 }, 3),
+  ev('agent_end', {}, 2),
+);
 // Tools called with more than a path: a search with several queries, an edit with a list of changes, an MCP tool that answers in JSON; then the answer, finished.
 if (phase === 'args') events.push(
   ev('turn_start', {}, 20),
@@ -54,7 +82,7 @@ if (phase === 'args') events.push(
   ev('tool_execution_end', { toolCallId: 'ws', toolName: 'web_search', result: { content: [{ type: 'text', text: 'Found 10 results.' }] } }, 18),
   ev('tool_execution_start', { toolCallId: 'ed', toolName: 'edit', args: { path: 'web/src/main.tsx', edits: [{ oldText: 'const a = 1;', newText: 'const a = 2;' }, { oldText: 'render(<App />);', newText: 'render(\n  <App />\n);' }] } }, 17),
   ev('tool_execution_end', { toolCallId: 'ed', toolName: 'edit', result: { content: [{ type: 'text', text: 'Applied 2 edits.' }] } }, 16.5),
-  ev('tool_execution_start', { toolCallId: 'mc', toolName: 'mcp', args: { tool: 'github_list_issues', args: { owner: 'Piggidragon', repo: 'pithagoras', state: 'open', labels: ['bug', 'ui'] } } }, 16),
+  ev('tool_execution_start', { toolCallId: 'mc', toolName: 'mcp', args: { tool: 'github_list_issues', args: { owner: 'octo-org', repo: 'pithagoras', state: 'open', labels: ['bug', 'ui'] } } }, 16),
   ev('tool_execution_end', { toolCallId: 'mc', toolName: 'mcp', result: { content: [{ type: 'text', text: JSON.stringify([{ number: 21, title: 'Jump button over the tools menu', labels: ['bug', 'ui'] }, { number: 23, title: 'Copy beside the reply', labels: ['ui'] }]) }] } }, 15.5),
   // Numbers as they were written, spaces as they were given, and an id too long for JavaScript's numbers.
   ev('tool_execution_start', { toolCallId: 'cf', toolName: 'configure', args: { port: 8080, threshold: 0.0001, old_string: '    return x;' } }, 15),
@@ -64,6 +92,15 @@ if (phase === 'args') events.push(
   ev('message_end', { message: { role: 'assistant', content: [{ type: 'text', text: 'pgvector is enough below ten million vectors; both open issues are UI polish.' }] } }, 10),
   ev('agent_end', {}, 9),
 );
+// Two more questions, each answered in a run of its own as pi reports it: the answer to the first keeps its Copy after the second is asked.
+const asked = (message: string, answer: string, ago: number) => [
+  ev('portal_prompt', { message }, ago),
+  ev('agent_start', {}, ago),
+  ev('message_start', { message: { role: 'user', content: [{ type: 'text', text: message }] } }, ago),
+  ev('message_end', { message: { role: 'assistant', content: [{ type: 'text', text: answer }] } }, ago - 1),
+  ev('agent_end', {}, ago - 1),
+];
+if (phase === 'turns') events.push(...asked('Which database?', 'pgvector is enough for now.', 20), ...asked('And the cache?', 'Redis is fine for the cache.', 10));
 // A model that thinks a few words and a model that thinks a lot, fast: `window.think(text)` adds reasoning as it streams.
 if (phase === 'brief') events.push(ev('turn_start', {}, 8), ev('message_update', { streamId: 's', assistantMessageEvent: { type: 'thinking_delta', delta: 'Short one.' } }, 1));
 // A reply being written under a conversation long enough to scroll: `window.say(text)` adds to it as it streams.
@@ -96,7 +133,8 @@ if (phase === 'reasoning') events.push(
   ev('message_update', { streamId: 's', assistantMessageEvent: { type: 'thinking_delta', delta: 'The last step writes the bundle.' } }, 1),
 );
 // The portal restarted mid-command: nothing says the call ended, only that the chat was interrupted.
-if (phase === 'interrupted') events.push(ev('turn_start', {}, 20), ...bash('b3', 'npm run test:e2e', 'Running 42 tests using 4 workers\n  ✓ login (1.2s)\n', undefined, 12));
+// A tool that is not a shell command has no exit to say how it ended, only that it was cut off.
+if (phase === 'interrupted') events.push(ev('turn_start', {}, 20), ...bash('b3', 'npm run test:e2e', 'Running 42 tests using 4 workers\n  ✓ login (1.2s)\n', undefined, 12), ev('tool_execution_start', { toolCallId: 'r3', toolName: 'read', args: { path: 'docs/guide/interface.md' } }, 11));
 if (phase === 'agents') {
   events.push(
     ev('tool_execution_start', { toolCallId: 'dr', toolName: 'deep_research', args: { query: 'Which vector DB fits a homelab?' } }, 50),
@@ -113,15 +151,11 @@ if (phase === 'agents') {
     { key: 'j1', sid: 4242, pids: [4242, 4250], command: 'npm run dev -- --port 5173', startedAt: now - 754_000, state: 'running', hasOutput: true, attached: false },
     { key: 'j2', sid: 4300, pids: [], command: 'python -m http.server 8000', startedAt: now - 3_600_000, exitedAt: now - 1_200_000, state: 'exited', hasOutput: true, attached: false },
   ] };
-  const realFetch = window.fetch;
-  window.fetch = (async (url: any, init?: any) => {
-    const u = String(url);
-    const reply = (body: unknown) => new Response(JSON.stringify(body), { headers: { 'Content-Type': 'application/json' } });
-    if (u.endsWith('/background')) return reply(jobs);
-    if (u.includes('/commands')) return reply({ commands: [{ name: 'bg-update', description: 'Update pi-background', source: 'extension' }] });
-    if (u.includes('/background/') && u.includes('/output')) return reply({ text: u.includes('from=') ? '' : '> vite\n\n  VITE v5.4  ready in 312 ms\n\n  ➜  Local:   http://localhost:5173/\n  ➜  Network: use --host to expose\n', from: 0, size: 120 });
-    return realFetch(url, init);
-  }) as typeof fetch;
+  mockFetch((u) => {
+    if (u.endsWith('/background')) return jobs;
+    if (u.includes('/commands')) return { commands: [{ name: 'bg-update', description: 'Update pi-background', source: 'extension' }] };
+    if (u.includes('/background/') && u.includes('/output')) return { text: u.includes('from=') ? '' : '> vite\n\n  VITE v5.4  ready in 312 ms\n\n  ➜  Local:   http://localhost:5173/\n  ➜  Network: use --host to expose\n', from: 0, size: 120 };
+  });
 }
 
 // An extension fills the chat box twice at once, the way pi's RPC mode names it and then as a paste: delivered as the page does, on arrival.
@@ -132,89 +166,81 @@ const fills: PortalEvent[] = phase === 'editor' ? [
 // What is typed is told to the portal, for an extension to read; an extension pastes into it later.
 // Whether the chat's pi is up is what the background list says: `?pi=off` until the test sets window.piUp.
 if (phase === 'editor' || phase === 'paste') {
-  const realFetch = window.fetch;
   (window as any).drafts = [];
   (window as any).piUp = new URLSearchParams(location.search).get('pi') !== 'off';
-  window.fetch = (async (url: any, init?: any) => {
-    const reply = (body: unknown) => new Response(JSON.stringify(body), { headers: { 'Content-Type': 'application/json' } });
-    if (String(url).endsWith('/draft')) {
-      (window as any).drafts.push(JSON.parse(init.body));
-      return reply({ ok: true });
+  mockFetch((u, init) => {
+    if (u.endsWith('/draft')) {
+      (window as any).drafts.push(JSON.parse(init!.body as string));
+      return { ok: true };
     }
-    if (String(url).endsWith('/background')) return reply({ supported: true, jobs: [], statuses: [], widgets: [], piRunning: (window as any).piUp });
-    return realFetch(url, init);
-  }) as typeof fetch;
+    if (u.endsWith('/background')) return { supported: true, jobs: [], statuses: [], widgets: [], piRunning: (window as any).piUp };
+  });
 }
 // A status left by a pi that has gone: the chat has none to ask, and none is started to answer.
 if (phase === 'gone') {
-  const realFetch = window.fetch;
   (window as any).commandsAsked = [];
-  window.fetch = (async (url: any, init?: any) => {
-    const u = String(url);
-    const reply = (body: unknown) => new Response(JSON.stringify(body), { headers: { 'Content-Type': 'application/json' } });
-    if (u.endsWith('/background')) return reply({ supported: true, jobs: [], widgets: [], statuses: [{ key: 'bg', text: 'bg ⬆ v2.6.5 /bg-update' }] });
+  mockFetch((u) => {
+    if (u.endsWith('/background')) return { supported: true, jobs: [], widgets: [], statuses: [{ key: 'bg', text: 'bg ⬆ v2.6.5 /bg-update' }] };
     if (u.includes('/commands')) {
       (window as any).commandsAsked.push(u.slice(u.indexOf('/commands')));
-      return reply(u.includes('ifRunning=1') ? { commands: [], notRunning: true } : { commands: [{ name: 'bg-update', description: 'Update', source: 'extension' }] });
+      return u.includes('ifRunning=1') ? { commands: [], notRunning: true } : { commands: [{ name: 'bg-update', description: 'Update', source: 'extension' }] };
     }
-    return realFetch(url, init);
-  }) as typeof fetch;
+  });
 }
 // Two chats: the first has a status that names a command, the second nothing. Which chats are asked for their commands is kept.
 if (phase === 'switch') {
-  const realFetch = window.fetch;
   (window as any).commandsAsked = [];
-  window.fetch = (async (url: any, init?: any) => {
-    const u = String(url);
-    const reply = (body: unknown) => new Response(JSON.stringify(body), { headers: { 'Content-Type': 'application/json' } });
-    if (u.endsWith('/background')) return reply({ supported: true, jobs: [], widgets: [], statuses: u.includes('/sessions/first/') ? [{ key: 'bg', text: 'bg ⬆ v2.6.5 /bg-update' }] : [] });
+  mockFetch((u) => {
+    if (u.endsWith('/background')) return { supported: true, jobs: [], widgets: [], statuses: u.includes('/sessions/first/') ? [{ key: 'bg', text: 'bg ⬆ v2.6.5 /bg-update' }] : [] };
     if (u.includes('/commands')) {
       (window as any).commandsAsked.push(u.split('/')[3]);
-      return reply({ commands: [{ name: 'bg-update', description: 'Update', source: 'extension' }] });
+      return { commands: [{ name: 'bg-update', description: 'Update', source: 'extension' }] };
     }
-    return realFetch(url, init);
-  }) as typeof fetch;
+  });
 }
 
 // The Git panel, Files and the tools list of a chat that has not started: `?phase=git`. What the page sent is in window.sentTools.
 if (phase === 'git') {
-  const realFetch = window.fetch;
   (window as any).sentTools = [];
+  // How often the Git panel read its state: it does once when it opens, and again when it is done with the file activity it was opened with.
+  (window as any).gitAsked = 0;
   let off: string[] = [];
-  window.fetch = (async (url: any, init?: any) => {
-    const u = String(url);
-    const reply = (body: unknown) => new Response(JSON.stringify(body), { headers: { 'Content-Type': 'application/json' } });
-    if (u.endsWith('/git/gh')) return reply({ installed: false, authed: false, repo: null, url: null, defaultBranch: null, note: 'Install gh' });
-    if (/\/git(\?|$)/.test(u)) return reply({ repo: true, root: '/workspaces/pithagoras', prefix: '', branch: 'main', head: 'a'.repeat(40), upstream: 'origin/main', ahead: 0, behind: 0, stashes: 0, operation: null, truncated: false, remotes: [], files: [{ path: 'README.md', x: '.', y: 'M', kind: 'changed', unstaged: { added: 2, removed: 1, binary: false } }, { path: 'notes.txt', x: '?', y: '?', kind: 'untracked' }] });
-    if (u.includes('/files?')) return reply({ path: '', entries: [{ name: 'README.md', type: 'file', size: 12, mtime: 1 }], truncated: false });
-    if (u.includes('/file?')) return reply({ content: '# Pithagoras\n', binary: false, size: 13, mtime: 1 });
-    if (u.endsWith('/tools') && init?.method === 'PUT') {
-      off = JSON.parse(init.body).off;
-      (window as any).sentTools.push(off);
-      return reply({ off });
+  mockFetch((u, init) => {
+    if (u.endsWith('/git/gh')) return { installed: false, authed: false, repo: null, url: null, defaultBranch: null, note: 'Install gh' };
+    if (/\/git(\?|$)/.test(u)) {
+      (window as any).gitAsked++;
+      return { repo: true, root: '/workspaces/pithagoras', prefix: '', branch: 'main', head: 'a'.repeat(40), upstream: 'origin/main', ahead: 0, behind: 0, stashes: 0, operation: null, truncated: false, remotes: [], files: [{ path: 'README.md', x: '.', y: 'M', kind: 'changed', unstaged: { added: 2, removed: 1, binary: false } }, { path: 'notes.txt', x: '?', y: '?', kind: 'untracked' }] };
     }
-    if (u.endsWith('/tools')) return reply({ live: false, off, names: {}, tools: [
+    if (u.includes('/files?')) return { path: '', entries: [{ name: 'README.md', type: 'file', size: 12, mtime: 1 }], truncated: false };
+    if (u.includes('/file?')) return { content: '# Pithagoras\n', binary: false, size: 13, mtime: 1 };
+    if (u.endsWith('/tools') && init?.method === 'PUT') {
+      off = JSON.parse(init.body as string).off;
+      (window as any).sentTools.push(off);
+      return { off };
+    }
+    if (u.endsWith('/tools')) return { live: false, off, names: {}, tools: [
       { name: 'web_search', source: 'pi-web-access', description: 'Search the web', enabled: !off.includes('web_search'), defaultOn: true },
       { name: 'web_fetch', source: 'pi-web-access', enabled: !off.includes('web_fetch'), defaultOn: true },
       { name: 'bash', source: 'builtin', enabled: true, defaultOn: true },
-    ] });
-    return realFetch(url, init);
-  }) as typeof fetch;
+      // The portal's picture tools, each registered by an extension of its own.
+      { name: 'show_image', source: 'pictures', inline: true, enabled: !off.includes('show_image'), defaultOn: true },
+      { name: 'generate_image', source: 'image-generation', inline: true, enabled: true, defaultOn: true },
+      { name: 'edit_image', source: 'image-editing', inline: true, enabled: true, defaultOn: true },
+    ] };
+  });
 }
 
-const session: Session = { id: 'preview', title: 'Fix the build', workspace: '/workspaces/pithagoras', executor: 'host', status: phase === 'interrupted' ? 'interrupted' : phase === 'args' ? 'idle' : 'running', created_at: '', updated_at: '', last_error: null, pinned: false, provider: 'llama-server', model: 'Qwen3.6 35B', thinking_level: 'medium' } as Session;
+const session: Session = { id: 'preview', title: 'Fix the build', workspace: '/workspaces/pithagoras', executor: 'host', status: phase === 'interrupted' ? 'interrupted' : phase === 'args' || phase === 'pictures' || phase === 'stats' ? 'idle' : 'running', created_at: '', updated_at: '', last_error: null, pinned: false, provider: 'llama-server', model: 'Model A', thinking_level: 'medium' } as Session;
 const noop = async () => {};
 // An extension moves its status twenty times a second: how often the chat asks for /background is counted.
 if (phase === 'nudge') {
-  const realFetch = window.fetch;
   (window as any).backgroundAsked = 0;
-  window.fetch = (async (url: any, init?: any) => {
-    if (String(url).endsWith('/background')) {
+  mockFetch((u) => {
+    if (u.endsWith('/background')) {
       (window as any).backgroundAsked++;
-      return new Response(JSON.stringify({ supported: true, jobs: [], widgets: [], statuses: [] }), { headers: { 'Content-Type': 'application/json' } });
+      return { supported: true, jobs: [], widgets: [], statuses: [] };
     }
-    return realFetch(url, init);
-  }) as typeof fetch;
+  });
 }
 
 function Fixture() {
@@ -242,9 +268,11 @@ function Fixture() {
   }, []);
   const shown = which === session.id ? session : { ...session, id: which, title: which === 'first' ? 'First chat' : 'Second chat', status: 'idle' as const };
   return <div style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
-    <div style={{ padding: 8, display: 'flex', gap: 8 }}><Select aria-label="Preview select" size="sm" className="w-64" value={v} onChange={setV} options={[{ value: 'a', label: 'Project notes' }, { value: 'b', label: 'Release plan', hint: 'Temporary — not stored' }, { value: 'c', label: 'Meeting summary' }]} /><label className="flex items-center gap-2 text-xs"><input type="checkbox" defaultChecked />Checkbox</label><input type="range" defaultValue={40} />{phase === 'switch' && <button onClick={() => setWhich('second')}>Open the second chat</button>}{phase === 'paste' && <button onClick={paste}>Paste from the extension</button>}</div>
+    <div style={{ padding: 8, display: 'flex', gap: 8 }}><Select aria-label="Preview select" size="sm" className="w-64" value={v} onChange={setV} options={[{ value: 'a', label: 'Project notes' }, { value: 'b', label: 'Release plan', hint: 'Temporary — not stored' }, { value: 'c', label: 'Meeting summary' }]} /><label className="flex items-center gap-2 text-xs"><input type="checkbox" defaultChecked />Checkbox</label><input type="range" defaultValue={40} />{phase === 'switch' && <button onClick={() => setWhich('second')}>Open the second chat</button>}{phase === 'switch' && <button onClick={() => setWhich('first')}>Open the first chat</button>}{phase === 'paste' && <button onClick={paste}>Paste from the extension</button>}</div>
     <div style={{ flex: 1, minHeight: 0 }}><Chat session={shown} events={shownEvents} onSend={async (message) => { (window as any).sent = [...((window as any).sent ?? []), message]; }} onEditMessage={noop} onDeleteMessage={noop} onAbort={noop} onClientCommand={noop} onRename={noop} loading={new URLSearchParams(location.search).has('loading')} /></div>
   </div>;
 }
+// The language, as Settings changes it: `window.setLang('de')`.
+(window as any).setLang = setLanguage;
 // Inside a router, as in the app: the chat's links go through it.
-createRoot(document.getElementById('root')!).render(<BrowserRouter><Fixture /></BrowserRouter>);
+createRoot(document.getElementById('root')!).render(<BrowserRouter><Fixture /><ConfirmHost /></BrowserRouter>);

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { LuArrowDown, LuArrowLeft, LuArrowUp, LuCloudDownload, LuGitBranch, LuRefreshCw } from "react-icons/lu";
 import { gitApi, type GhState, type GitState } from "../../git-api";
 import { Branches } from "./Branches";
@@ -8,7 +8,8 @@ import { ErrorNote, Quiet, TextButton } from "./bits";
 import { History } from "./History";
 import { Pulls } from "./Pulls";
 import { ViewHost } from "./views";
-import { msg, t, tp } from "../../i18n";
+import { labelOf, msg, t, tp, useLanguage } from "../../i18n";
+import { below } from "../../paths";
 
 export type GitTab = "changes" | "history" | "branches" | "pulls";
 export const GIT_TABS: { id: GitTab; label: string }[] = [
@@ -35,8 +36,11 @@ const WHILE_RUNNING_MS = 8000;
  * What it drills into — a diff, a commit, a pull request — goes on top of the
  * tab, with a way back, rather than beside it: the panel is often a third of
  * the screen, and a list beside a diff leaves room for neither.
+ *
+ * Not drawn again for a draw of the chat that changed none of what it is
+ * given: with a large diff open, each word of a reply would draw every line of it.
  */
-export function GitPanel({
+export const GitPanel = memo(function GitPanel({
   sessionId,
   tab,
   onTab,
@@ -56,6 +60,8 @@ export function GitPanel({
   /** How many files have changed, for the tab. */
   onCount?: (n: number) => void;
 }) {
+  // Its text is in the language chosen: a panel that is not drawn for the chat's draws is drawn for that.
+  useLanguage();
   const [state, setState] = useState<GitState | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState<Busy | null>(null);
@@ -154,24 +160,35 @@ export function GitPanel({
 
   const ctx: GitCtx | null = useMemo(() => {
     if (!state?.repo) return null;
-    const prefix = state.prefix ? `${state.prefix}/` : "";
+    // A path of the repository as one in the chat's folder, undefined outside
+    // it. At the repository's top every path is in it; the folder itself is
+    // not a file in it.
+    const inFolder = (p: string) => (state.prefix ? below(state.prefix, p) || undefined : p);
     return {
       id: sessionId,
       repo: { ...state, gh },
-      reload: () => reload(),
       act,
       busy,
       show: (view) => setStack((s) => [...s, view]),
       // Files shows the chat's folder; a file of the repository outside it is
       // not there to open, and is offered no button that would do nothing.
-      inFolder: (p) => p.startsWith(prefix),
-      openFile: onOpenFile ? (p) => p.startsWith(prefix) && onOpenFile(p.slice(prefix.length)) : undefined,
+      inFolder: (p) => inFolder(p) !== undefined,
+      openFile: onOpenFile
+        ? (p) => {
+            const rel = inFolder(p);
+            if (rel !== undefined) onOpenFile(rel);
+          }
+        : undefined,
     };
   }, [state, gh, sessionId, reload, act, busy, onOpenFile]);
 
   if (!state) {
-    return loadError ? <ErrorNote>{loadError}</ErrorNote> : <Quiet>{t("Loading…")}</Quiet>;
+    return loadError ? <ErrorNote onRetry={() => void reload()}>{loadError}</ErrorNote> : <Quiet>{t("Loading…")}</Quiet>;
   }
+  // A read that failed after an earlier one worked: what is shown is the last state, not this one.
+  const stale = loadError && (
+    <ErrorNote onRetry={() => void reload()}>{t("Could not read the repository, so what is shown may be out of date: {error}", { error: loadError })}</ErrorNote>
+  );
 
   if (!state.repo) {
     return (
@@ -181,6 +198,7 @@ export function GitPanel({
           {t("Make it one (git init)")}
         </TextButton>
         {error && <ErrorNote onClose={() => setError(null)}>{error}</ErrorNote>}
+        {stale}
       </div>
     );
   }
@@ -196,6 +214,7 @@ export function GitPanel({
             {t(busy.label, busy.vars)}…
           </p>
         )}
+        {stale}
         {error && <ErrorNote onClose={() => setError(null)}>{error}</ErrorNote>}
         {said && (
           <p role="status" className="mx-2 mt-2 flex items-start gap-1 rounded-lg bg-fg/5 px-2 py-1.5 font-mono text-[11px] text-fg-subtle">
@@ -227,7 +246,7 @@ export function GitPanel({
       </div>
     </Ctx.Provider>
   );
-}
+});
 
 /** Where the repository is: the branch, how far it is from its upstream, and the ways to bring the two together. */
 function BranchBar({ onBranches, onRefresh }: { onBranches: () => void; onRefresh: () => void }) {
@@ -297,6 +316,15 @@ function BarButton({ label, onClick, disabled, children }: { label: string; onCl
   );
 }
 
+/** What a stopped operation is called in "Giving up the …". */
+const OPERATION_NAME: Record<string, string> = {
+  merge: msg("merge"),
+  rebase: msg("rebase"),
+  am: msg("patch series"),
+  "cherry-pick": msg("cherry-pick"),
+  revert: msg("revert"),
+};
+
 /** A merge or rebase that stopped half way, and the two ways out of it. */
 function Operation() {
   const { id, repo, act, busy } = useGit();
@@ -312,7 +340,7 @@ function Operation() {
       <TextButton disabled={!!busy || conflicts > 0} onClick={() => void act(msg("Continuing"), () => gitApi.continue(id))}>
         {t("Continue")}
       </TextButton>
-      <TextButton danger disabled={!!busy} onClick={() => void act(msg("Giving up the {operation}"), () => gitApi.abort(id), { operation: repo.operation ?? "" })}>
+      <TextButton danger disabled={!!busy} onClick={() => void act(msg("Giving up the {operation}"), () => gitApi.abort(id), { operation: labelOf(OPERATION_NAME, repo.operation ?? "merge") })}>
         {t("Abort")}
       </TextButton>
     </div>
