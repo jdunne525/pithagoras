@@ -246,16 +246,29 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
     return () => { cancelled = true; };
   }, [projectName]);
 
-  // Choose the first active task once the list has loaded and none is picked,
-  // so an empty workspace does not open on nothing.
-  useEffect(() => {
-    if (rows.length && selectedId == null) {
-      const next = rows.find((x) => x.status !== "completed");
-      setSelectedId(next?.id ?? rows[rows.length - 1].id);
-    }
-  }, [rows]);
+  // The open tab's own rows: Pending lists every not-yet-finished Task, Completed
+  // every finished one. This is the one list the page works from — the rows shown,
+  // the Task opened, and the session streamed below all come from here. Reading
+  // the selection off the whole queue instead let a Task from the other tab drive
+  // the bottom panel: opening the Completed tab left a still-pending Task's
+  // session on screen (nothing on this tab had been picked), so a completed
+  // Task's history read as another Task's.
+  const tabRows = useMemo(
+    () => rows.filter((x) => (tab === "actions" ? x.status !== "completed" : x.status === "completed")),
+    [rows, tab],
+  );
 
-  const selected = useMemo(() => rows.find((x) => x.id === selectedId) ?? null, [rows, selectedId]);
+  // Open on the first Task this tab lists while nothing here is picked, so the
+  // workspace does not open on nothing. A selection carried over from the other
+  // tab is replaced with one of this tab's own rows, which is what keeps the
+  // transcript below from showing a Task that is not even on screen.
+  useEffect(() => {
+    if (!tabRows.length) return;
+    if (tabRows.some((x) => x.id === selectedId)) return;
+    setSelectedId(tabRows[0].id);
+  }, [tabRows]);
+
+  const selected = useMemo(() => tabRows.find((x) => x.id === selectedId) ?? null, [tabRows, selectedId]);
   const viewedTask = useMemo(() => rows.find((x) => x.id === viewingMockId) ?? null, [rows, viewingMockId]);
   // The "View session" messages are seeded once per task and kept, rather than
   // rebuilt whenever the project list refreshes. They are cached by task id in a
@@ -325,7 +338,20 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
   // loading; this guard guarantees nothing stale ever re-populates it.
   const loadSeqRef = useRef(0);
   useEffect(() => {
-    if (!projectName || !selected) return;
+    if (!projectName) return;
+    // Nothing of this tab is open (an empty tab, or a selection that left it):
+    // drop whatever another tab's Task had loaded, so no foreign session is
+    // left sitting in the panel.
+    if (!selected) {
+      if (loadedTaskRef.current !== null) {
+        setActiveAttemptId(null);
+        setAttempts([]);
+        loadedTaskRef.current = null;
+        ++loadSeqRef.current;
+        setLoadingAttempts(false);
+      }
+      return;
+    }
     if (loadedTaskRef.current !== selected.id) {
       setActiveAttemptId(null);
       setAttempts([]);
@@ -393,6 +419,13 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
           setRows(next);
           prevStatusesRef.current = Object.fromEntries(next.map((n) => [n.id, n.status]));
           if (!launched) return;
+          // The loop only runs Tasks that are not finished yet, so a launch
+          // belongs to the Pending tab. While the Completed tab is open it must
+          // not steal the view: the Task being read there is the one that stays
+          // selected, and following a launch from the other tab is what put a
+          // running Task's session under a completed Task's rows.
+          const visible = tab === "actions" ? launched.status !== "completed" : launched.status === "completed";
+          if (!visible) return;
           if (launched.id !== selectedId) {
             setSelectedId(launched.id);
           } else {
@@ -421,7 +454,10 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
     refresh();
     const interval = setInterval(refresh, 1500);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [loopRunning, projectName]);
+    // The tab is a dependency so the poll reads the open one: following a
+    // launch is decided by the tab, and a poll left holding a stale tab would
+    // follow a Task nothing on screen belongs to.
+  }, [loopRunning, projectName, tab]);
 
   // The queue changed: tell the parent to re-read this project's pending count,
   // so the sidebar badge stays honest without the sidebar polling.
@@ -619,10 +655,9 @@ ${base}
   // purely by status — matching how the server counts pending tasks for the
   // sidebar badge — so it never lingers with completed Tasks: navigating away
   // and back cannot resurrect them, and nothing stays stuck once it is done.
-  const actions =
-    tab === "actions"
-      ? rows.filter((x) => x.status !== "completed")
-      : rows.filter((x) => x.status === "completed");
+  // This is the same list the selection above is read off, so the rows shown
+  // and the session streamed below can never disagree about which Task is open.
+  const actions = tabRows;
 
   // Badge counts for each tab, computed independently of the open tab so they
   // stay correct no matter where the user is. Pending lists every
