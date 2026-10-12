@@ -17,7 +17,9 @@ import { freePort, inProcessHome } from "./server-harness.mjs";
 // src/schema-version.ts (once for the release, not once for each change),
 // pin the new version and fingerprint here, and have an upgrade test for what
 // changed (below) that starts from a database made before it.
-const PINNED = { version: 4, fingerprint: "e40d3b7b0f6575145b65a873f53267fa097c833d3b323ccd410229dac424b1c9" };
+// Version 5 is this tree's: the Tasks, Task attempts and Scripts tables the
+// CodeLoop work added, and the "autonomous" kind a Task's sessions are.
+const PINNED = { version: 5, fingerprint: "aec774ad0d06a98a18d589e780f739cb1b41ef109b7ddbaf7597fb71b42982d5" };
 
 const home = inProcessHome("pithagoras-schema-");
 
