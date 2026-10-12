@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import type { PortalEvent } from "../api";
 import { buildTranscript } from "../transcript";
-import { Streamdown } from "streamdown";
+import { Markdown } from "./Markdown";
 import { CompactionMarker, ThinkingBlock, ToolCall } from "./ChatActivity";
 import { CommandLine } from "./CommandLine";
 
@@ -66,15 +66,14 @@ export function TaskTranscript({
               )}
               {item.text && (
                 <div className="md text-sm leading-relaxed text-fg">
-                  <Streamdown
+                  <Markdown
                     parseIncompleteMarkdown
-                    animated={{ animation: "blurIn", duration: 240, sep: "word" }}
+                    animated={running && !item.done}
                     isAnimating={running && !item.done}
                     caret={running && !item.done ? "circle" : undefined}
-                    shikiTheme={["github-light", "github-dark"]}
                   >
                     {assistantText(item.text)}
-                  </Streamdown>
+                  </Markdown>
                 </div>
               )}
             </div>

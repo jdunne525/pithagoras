@@ -25,9 +25,6 @@ export function useSessionEvents(sessionId: string | null): {
     if (!sessionId) return;
     let cancelled = false;
 
-    // The latest live seq; the stream replays from 0 and continues from here.
-    let seq = 0;
-
     const es = new EventSource(`/api/sessions/${sessionId}/events?since=0`);
     es.onmessage = (m) => {
       const ev = JSON.parse(m.data) as PortalEvent & { seq: number };
@@ -35,9 +32,6 @@ export function useSessionEvents(sessionId: string | null): {
         const payload = ev.payload as { status: string; aborted?: boolean };
         setRunning(payload.status === "running" && !payload.aborted);
       }
-      // Live-only events carry a negative seq and must not advance the resume
-      // point, though none occur in a Task transcript.
-      if (ev.seq > 0) seq = ev.seq;
       setEvents((prev) => [...prev, ev]);
     };
     es.onerror = () => {

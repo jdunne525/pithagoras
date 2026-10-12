@@ -7,7 +7,7 @@ import { isEnter } from "../shortcuts";
 import { t } from "../i18n";
 import { api, type Task, type TaskAttempt } from "../api";
 import { local } from "../safe-storage";
-import { Streamdown } from "streamdown";
+import { Markdown } from "./Markdown";
 import { useSessionEvents } from "../use-session-events";
 import { useFollowBottom } from "../use-follow-bottom";
 import { TaskTranscript } from "./TaskTranscript";
@@ -83,17 +83,6 @@ const ANSWERS = [
   "Understood. Adjusting the plan to match.",
   "Got it — keeping that in mind as I go.",
 ];
-const REPLY = (prompt: string) =>
-  pick(
-    [
-      `Thanks — "${prompt.slice(0, 40)}${prompt.length > 40 ? "…" : ""}" noted. Continuing from here.`,
-      "Noted. Picking up where the last attempt left off.",
-      "Understood — I will fold that into the work now.",
-    ],
-    prompt,
-    Date.now(),
-  );
-
 /**
  * What a task looked like across its attempts: a prompt first, then a little
  * thinking, a tool call, and an answer, repeated per attempt. The final attempt
@@ -266,7 +255,6 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
     }
   }, [rows]);
 
-  const running = rows.some((x) => x.status === "running");
   const selected = useMemo(() => rows.find((x) => x.id === selectedId) ?? null, [rows, selectedId]);
   const viewedTask = useMemo(() => rows.find((x) => x.id === viewingMockId) ?? null, [rows, viewingMockId]);
   // The "View session" messages are seeded once per task and kept, rather than
@@ -890,7 +878,6 @@ ${base}
     There is intentionally no play/run (triangle) button here: Tasks are started
     by running the project's autonomous queue, never by a per-task triangle. */
 function RunControls({ task, onStart, onRerun, onComplete }: { task: MockTask; onStart: () => void; onRerun?: () => void; onComplete?: () => void }) {
-  const atMax = task.attempts >= task.maxAttempts;
   const canRerun = !!onRerun && ["failed", "stopped", "completed"].includes(task.status) && task.attempts > 0;
   return (
     <div className="inline-flex items-center gap-0.5">
@@ -1275,7 +1262,7 @@ function MessageItem({ item, running }: { item: MockMsg; running: boolean }) {
   return (
     <div className="max-w-[90%]">
       <div className="text-sm leading-relaxed text-fg">
-        <Streamdown parseIncompleteMarkdown>{item.text ?? ""}</Streamdown>
+        <Markdown parseIncompleteMarkdown>{item.text ?? ""}</Markdown>
       </div>
     </div>
   );
