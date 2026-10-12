@@ -1,7 +1,7 @@
 import { after } from "node:test";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -15,6 +15,57 @@ export const ENTRY = fileURLToPath(new URL("../dist/index.js", import.meta.url))
 
 const started = [];
 const homes = [];
+
+/**
+ * Git isolation for the whole test process, before any test runs git: a test
+ * that makes a repository before it makes its home (harness-home does) would
+ * otherwise read the developer's own configuration, whose init template can
+ * install hooks that stop the run with a dialog nobody came to answer. The
+ * homes set the same names again below, so nothing here changes what a test
+ * sees once it has made one.
+ */
+const gitScratch = mkdtempSync(path.join(tmpdir(), "pithagoras-git-"));
+homes.push(gitScratch);
+writeFileSync(path.join(gitScratch, "global-config"), "");
+mkdirSync(path.join(gitScratch, "template"), { recursive: true });
+process.env.GIT_CONFIG_GLOBAL = path.join(gitScratch, "global-config");
+process.env.GIT_CONFIG_NOSYSTEM = "1";
+process.env.GIT_TEMPLATE_DIR = path.join(gitScratch, "template");
+
+/**
+ * Removing a home, and saying whether it went. On Windows a directory cannot
+ * go while it still holds a file another handle has open, and a test that
+ * loads the server's modules leaves its database open until the process ends,
+ * so the removal is refused there; on the unix side it is not. What will not
+ * go is written down and taken by the next run, once the process that held
+ * those handles has gone and they are closed.
+ */
+const LEFTOVER = "pithagoras-home-";
+
+const removeHome = (home) => {
+  try {
+    rmSync(home, { recursive: true, force: true });
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+// What an earlier run could not remove: its handles are closed by now, so this
+// run can. Each process left a list of its own, named with its pid, so tests
+// running side by side never write over one another's list.
+for (const name of readdirSync(tmpdir())) {
+  if (!name.startsWith(LEFTOVER)) continue;
+  const list = path.join(tmpdir(), name);
+  try {
+    const still = readFileSync(list, "utf8").split("\n")
+      .filter((home) => home && !removeHome(home));
+    if (still.length) writeFileSync(list, still.join("\n") + "\n");
+    else unlinkSync(list);
+  } catch {
+    // Another run took it, or it is gone: nothing of this run's to do.
+  }
+}
 // On the root of whichever test file imports this.
 after(async () => {
   await Promise.all(started.map(async (child) => {
@@ -26,7 +77,13 @@ after(async () => {
 // The homes go when the process ends, not in a hook: a test that loads the server's modules
 // closes its database in a hook of its own, which may run after any hook here.
 process.on("exit", () => {
-  for (const home of homes) rmSync(home, { recursive: true, force: true });
+  const left = homes.filter((home) => !removeHome(home));
+  if (!left.length) return;
+  try {
+    writeFileSync(path.join(tmpdir(), `${LEFTOVER}${process.pid}.txt`), left.join("\n") + "\n");
+  } catch {
+    // The temp folder itself is gone: nothing left to write the list to.
+  }
 });
 
 /** A new folder in the system's temp directory, removed when the process ends: for what a test needs to put things in. */
@@ -58,6 +115,8 @@ const homeEnv = (home) => ({
   GIT_CEILING_DIRECTORIES: path.dirname(home),
   // A config of its own, empty: not the developer's, whose signing or hooks would run in a test that commits.
   GIT_CONFIG_GLOBAL: path.join(home, ".gitconfig"), GIT_CONFIG_NOSYSTEM: "1",
+  // No template of the developer's: their hooks would run in a test's repos.
+  GIT_TEMPLATE_DIR: path.join(gitScratch, "template"),
   DATA_DIR: home, BIN_DIR: path.join(home, "bin"), SESSION_DIR: path.join(home, "sessions"), CHANNELS_DIR: path.join(home, "channels"),
   AGENT_HOME: path.join(home, "agent-home"), WORKSPACE_ROOT: path.join(home, "ws"), PI_CODING_AGENT_DIR: path.join(home, "agent"),
 });

@@ -241,7 +241,9 @@ test("the example environment file ships no password for anyone to find", () => 
   // `cp .env.example .env` and `docker compose up` is the quick start: with a
   // password in the example, that is a portal everyone with the file can enter.
   const example = readFileSync(new URL("../../.env.example", import.meta.url), "utf8");
-  const line = example.split("\n").find((l) => l.startsWith("PORTAL_PASSWORD="));
+  // A Windows checkout keeps the file's own line endings, so the split takes
+  // both: the line is what it is, not what the file's carriage returns make it.
+  const line = example.split(/\r?\n/).find((l) => l.startsWith("PORTAL_PASSWORD="));
   assert.equal(line, "PORTAL_PASSWORD=");
 });
 

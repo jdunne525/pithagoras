@@ -725,7 +725,11 @@ test("without a folder to hold a read to, the private files are still refused by
 
 // --- what "always" permits ---
 
-const asked = (action, tool = "bash") => ({ id: "ab12", session_id: "chat", person_key: "priya", person_name: "Priya", channel_slug: "c", channel_key: "k", question: "?", asked_at: "", answered_at: null, answer: null, action_tool: tool, action });
+// A declaration, not a const: tests run as the module's top level yields, so
+// one registered above this line may call it before this line has run.
+function asked(action, tool = "bash") {
+  return { id: "ab12", session_id: "chat", person_key: "priya", person_name: "Priya", channel_slug: "c", channel_key: "k", question: "?", asked_at: "", answered_at: null, answer: null, action_tool: tool, action };
+}
 const rulesNow = () => listToolRules();
 const allows = (tool, input, role = "colleague", key = "priya") => ruleAllows(rulesNow(), role, tool, input, key);
 

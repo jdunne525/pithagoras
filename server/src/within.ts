@@ -10,7 +10,19 @@ import { below } from "./paths.js";
  * a sibling that only shares the start of the name (`/w/site-old`) is not
  * inside. Everything is inside `/`.
  */
-export const pathBelow = (dir: string, where: string): string | undefined => below(normal(dir), normal(where));
+export const pathBelow = (dir: string, where: string): string | undefined => below(slashes(normal(dir)), slashes(normal(where)));
+
+/**
+ * The same path read with `/` as its separator, which is what `below` knows.
+ * Only done where the system uses `\` (Windows): there `\` and `/` name the
+ * same step, so a folder given with backslashes and a file reached with
+ * forward ones are the same place, and a path that is inside stays inside.
+ * Nowhere else is touched: on a POSIX system a `\` is a letter that may appear
+ * in a name, and reading it as a separator would let `a\b` pass for `a/b`.
+ * The answer keeps `/` as the separator, which both the file calls and the
+ * page's paths read.
+ */
+const slashes = (p: string): string => (path.sep === "\\" ? p.replace(/\\/g, "/") : p);
 
 /** `path.normalize`, but "" stays "" — the web's `below` reads it as "/", and normalize would make it ".". */
 const normal = (p: string) => (p === "" ? "" : path.normalize(p));
