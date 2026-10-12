@@ -22,6 +22,15 @@ export function useSessionEvents(sessionId: string | null): {
   const [running, setRunning] = useState(false);
 
   useEffect(() => {
+    // The log belongs to one session alone. Whenever the session being followed
+    // changes — switching Tasks, or a Task reloading onto a newer attempt — the
+    // previous session's events and its running flag are dropped here before
+    // the new session's replay begins below. Without this the list keeps
+    // growing across sessions, and the transcript shows history that belongs
+    // to a session other than the one selected.
+    setEvents([]);
+    setRunning(false);
+
     if (!sessionId) return;
     let cancelled = false;
 

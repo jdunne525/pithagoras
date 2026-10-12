@@ -356,8 +356,20 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
   // our local copies so the status and chips stay honest without polling.
   useEffect(() => {
     if (!activeSessionId || sessionRunning || !selected || selected.status !== "running") return;
-    api.listTasks(projectName).then((tasks) => setRows(tasks.map(mapTask)));
-    api.getTaskAttempts(projectName, selected.id).then(setAttempts);
+    // These answers arrive asynchronously and belong to the Task that was open
+    // when the request went out. A Task picked while they were in flight must
+    // not be filled with this Task's rows or attempts — that would put another
+    // Task's session back on screen — so a result only lands while the same
+    // Task is still the loaded one and no newer load has started.
+    const taskId = selected.id;
+    const mySeq = loadSeqRef.current;
+    const settled = () => loadedTaskRef.current === taskId && mySeq === loadSeqRef.current;
+    api.listTasks(projectName).then((tasks) => {
+      if (settled()) setRows(tasks.map(mapTask));
+    });
+    api.getTaskAttempts(projectName, taskId).then((list) => {
+      if (settled()) setAttempts(list);
+    });
   }, [sessionRunning, activeSessionId]);
 
   // The loop drives Tasks on the server, so a Task can start (or finish) at any
@@ -387,10 +399,19 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
             // Already the selected Task but its attempt/session was not loaded
             // yet (it started while we were looking at it): load it now so the
             // session content begins streaming immediately.
+            const mySeq = loadSeqRef.current;
             api.getTaskAttempts(projectName, launched.id)
               .then((list) => {
+                // A late answer must not repopulate a view that has moved on.
+                if (mySeq !== loadSeqRef.current) return;
                 const latest = [...list].sort((a, b) => a.attempt_number - b.attempt_number).at(-1);
-                if (latest) setActiveAttemptId(latest.id);
+                // The attempt is only followed if it is in the list the panel
+                // holds, so the list arrives with it: naming an attempt nothing
+                // holds would fall back to another Task's last attempt.
+                if (latest) {
+                  setAttempts(list);
+                  setActiveAttemptId(latest.id);
+                }
               })
               .catch(() => {});
           }
