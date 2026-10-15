@@ -362,15 +362,16 @@ class SessionManager extends EventEmitter {
 
   /**
    * Whether any session is still busy — running, compacting, mid-turn in a
-   * compaction that will resume, or claimed at the gate but not yet started —
-   * so the single-active setting knows one is already holding the room. Only
-   * free when none of these hold.
+   * compaction that will resume, waiting in the gap before that resume lands,
+   * or claimed at the gate but not yet started — so the single-active setting
+   * knows one is already holding the room. Only free when none of these hold.
    */
   private isActive(sessionId: string): boolean {
     return (
       this.inRun.has(sessionId) ||
       this.compacting.has(sessionId) ||
       this.compactionInterruptedRun.has(sessionId) ||
+      this.compactionResumePending.has(sessionId) ||
       this.singleActiveClaiming.has(sessionId)
     );
   }
@@ -546,16 +547,19 @@ class SessionManager extends EventEmitter {
   }
 
   /**
-   * True when a compaction caught this session's turn mid-run, so the session
-   * reads idle only between the aborted turn and the resume that follows — a
-   * gap that is not a real end. The task-completion watcher (trackEnd) must not
-   * settle a run on such an idle, or it would drop the run from its registry
-   * while the session still works and let the queue loop launch a second session
-   * for the same Task. This is the single source of truth for that question,
-   * mirroring how ntfy suppresses the same idle from a "chat finished" alert.
+   * True when a compaction has this session's turn in hand — either the
+   * compaction itself is still going (it caught the run mid-turn), or the
+   * compaction has finished and the resume that carries the turn on has not
+   * landed yet. The session reads idle through that second half as well, and
+   * that idle is not a real end either: the task-completion watcher (trackEnd)
+   * must not settle a run on it, or it would drop the run from its registry
+   * while the session still works and let the queue loop launch a second
+   * session for the same Task. This is the single source of truth for that
+   * question, mirroring how ntfy suppresses the same idle from a "chat
+   * finished" alert.
    */
   isCompacting(sessionId: string): boolean {
-    return this.compactionInterruptedRun.has(sessionId);
+    return this.compactionInterruptedRun.has(sessionId) || this.compactionResumePending.has(sessionId);
   }
 
   /** Stream updates in memory; persist completed messages and lifecycle metadata. */
@@ -827,13 +831,25 @@ class SessionManager extends EventEmitter {
    */
   private scheduleResumeAfterCompaction(sessionId: string): void {
     setImmediate(() => {
+      // Cancelled in the meantime — a Stop, or the pi going away — so nothing
+      // is coming to carry the turn on, and the room was let go at the same
+      // time: going on here would start a run nobody asked for.
+      if (!this.compactionResumePending.has(sessionId)) return;
       const live = this.live.get(sessionId);
-      if (!live || this.stopping.has(live.client)) return;
+      if (!live || this.stopping.has(live.client)) {
+        // No pi to resume into: the pending marker is all that keeps the room
+        // held, so drop it here or the queue would wait on nothing.
+        this.compactionResumePending.delete(sessionId);
+        return;
+      }
       void this.prompt(sessionId, "Compaction detected, resume where you left off if needed.").catch((e) => {
         // Held behind another room-holder under the single-active setting: the
         // queue starts it once the room frees, so this is not a failure.
         if (e instanceof PromptQueuedForSingleActive) return;
         console.error(`[portal] could not resume a compaction-interrupted turn: ${e.message}`);
+        // The resume will not come: the turn is over as far as we know, so the
+        // room stops being held and the attempt settles like any ended run.
+        this.compactionResumePending.delete(sessionId);
       });
     });
   }
@@ -920,6 +936,21 @@ class SessionManager extends EventEmitter {
    * sent after the compaction so the turn can pick up where it stopped.
    */
   private compactionInterruptedRun = new Set<string>();
+
+  /**
+   * Sessions sitting in the gap between a compaction that caught their turn
+   * mid-run and the resume that carries the turn on: the compaction has
+   * finished, the aborted turn has `agent_settled`ed and marked the session
+   * idle, and the resume's own `agent_start` has not arrived yet. The session
+   * is not over — it is still holding the turn — so it must keep holding the
+   * room under the single-active setting (handing the room over inside that
+   * gap is what let a second session start beside it and two Tasks run at
+   * once), and the Task watcher must not settle the attempt on that idle.
+   * Handed over from compactionInterruptedRun in the same breath compaction_end
+   * clears it, so the room is never momentarily free, and cleared when the
+   * resumed run starts, or when the resume will not come at all.
+   */
+  private compactionResumePending = new Set<string>();
 
   /** The extensions whose failure has been said since the last run began, per session. */
   private failuresSaid = new Map<string, Set<string>>();
@@ -1326,6 +1357,10 @@ class SessionManager extends EventEmitter {
         // and the queue would never drain again.
         this.singleActiveClaiming.delete(sessionId);
         this.inRun.add(sessionId);
+        // A resume after a mid-turn compaction has landed: this run is the
+        // turn carrying on, so the gap it was holding the room through is over
+        // and the run itself holds it from here.
+        this.compactionResumePending.delete(sessionId);
         this.failuresSaid.delete(sessionId);
         this.mark(sessionId, "running");
       }
@@ -1342,9 +1377,13 @@ class SessionManager extends EventEmitter {
         this.singleActiveClaiming.delete(sessionId);
         this.settleWaiting(sessionId);
         if (!this.failed.delete(sessionId)) this.mark(sessionId, "idle");
-        // A run ends here — no retry, no compaction, no auto-resume left to
-        // land — so under the single-active setting the room may pass to the
-        // next request waiting its turn.
+        // A run ends here — no retry, no compaction left to land — so under
+        // the single-active setting the room may pass to the next request
+        // waiting its turn. The exception is a compaction that caught this
+        // session's turn mid-run: its aborted run settles exactly here, and
+        // the resume that carries the turn on has not started yet. That gap
+        // keeps the session active (compactionResumePending), so the hand-over
+        // below finds the room still held and starts nothing beside it.
         if (singleActiveSessionEnabled()) void this.processQueue();
       }
       // A compaction caught mid-turn — a run was still going when it began —
@@ -1362,7 +1401,14 @@ class SessionManager extends EventEmitter {
         }
       }
       if (msg.type === "compaction_end") {
-        if (this.compactionInterruptedRun.delete(sessionId) && msg.willRetry !== true) {
+        // Hand the interrupted marker to the resume-pending one in the same
+        // breath: the aborted turn's agent_settled can arrive on either side
+        // of this, and either way the session must still read as active and
+        // mid-compaction, or the queue would hand the room to another session
+        // (or settle this one's attempt) in the gap before the resume starts.
+        const interrupted = this.compactionInterruptedRun.delete(sessionId);
+        if (interrupted && msg.willRetry !== true) {
+          this.compactionResumePending.add(sessionId);
           this.scheduleResumeAfterCompaction(sessionId);
         }
       }
@@ -2828,6 +2874,11 @@ class SessionManager extends EventEmitter {
       // still going to run, and the session already shows as working with a
       // Stop button. Remembered so it is cancelled the moment it could begin.
       if (this.compacting.has(sessionId)) this.cancelPending.add(sessionId);
+      // A Stop taken in the gap between a mid-turn compaction and the resume
+      // that was going to carry the turn on: the Stop is the end of the work,
+      // so the resume is called off and the room it held is let go — leaving
+      // it would stall the queue on a session that is idle for good.
+      this.compactionResumePending.delete(sessionId);
       this.stops.set(sessionId, (this.stops.get(sessionId) ?? 0) + 1);
       // Then waited for, like the path below. Returning here reported the Stop
       // as done while the session went on showing itself as compacting until pi
@@ -2860,6 +2911,9 @@ class SessionManager extends EventEmitter {
       // against a detached session — it would run with nothing reaching the
       // transcript, which is the failure this whole area keeps producing.
       await this.settleCompaction(sessionId);
+      // Stopped for good here, so a resume waiting in the compaction gap will
+      // not come either: the turn is over, and the room is let go below.
+      this.compactionResumePending.delete(sessionId);
       updateSession(sessionId, { status: "idle" });
       this.record(sessionId, "portal_status", { status: "idle", aborted: true });
       // A claim left over from before the abort (a message queued into the run
@@ -2968,7 +3022,9 @@ class SessionManager extends EventEmitter {
     this.inRun.delete(sessionId);
     // The pi behind this session is gone, so any gate claim it held is done;
     // leave it, and the session reads as active forever and the queue stalls.
+    // So is a resume waiting in a compaction gap: its pi went away with it.
     this.singleActiveClaiming.delete(sessionId);
+    this.compactionResumePending.delete(sessionId);
     this.calls.delete(sessionId);
     this.callWindows.delete(sessionId);
     this.fresh.delete(sessionId);
