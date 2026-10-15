@@ -372,6 +372,7 @@ class SessionManager extends EventEmitter {
       this.compacting.has(sessionId) ||
       this.compactionInterruptedRun.has(sessionId) ||
       this.compactionResumePending.has(sessionId) ||
+      this.cutOffResumePending.has(sessionId) ||
       this.singleActiveClaiming.has(sessionId)
     );
   }
@@ -556,10 +557,17 @@ class SessionManager extends EventEmitter {
    * while the session still works and let the queue loop launch a second
    * session for the same Task. This is the single source of truth for that
    * question, mirroring how ntfy suppresses the same idle from a "chat
-   * finished" alert.
+   * finished" alert. The same question covers a run that ended with the model
+   * cut off at its output limit (cutOffResumePending): that idle is not a real
+   * end either, and settling on it is what made the Task start a brand-new
+   * session from nothing while the work was still in hand.
    */
   isCompacting(sessionId: string): boolean {
-    return this.compactionInterruptedRun.has(sessionId) || this.compactionResumePending.has(sessionId);
+    return (
+      this.compactionInterruptedRun.has(sessionId) ||
+      this.compactionResumePending.has(sessionId) ||
+      this.cutOffResumePending.has(sessionId)
+    );
   }
 
   /** Stream updates in memory; persist completed messages and lifecycle metadata. */
@@ -819,8 +827,23 @@ class SessionManager extends EventEmitter {
     }
   }
 
+  /** Let go of whatever resume a session was holding the room through — the
+   * gap before a compaction's resume, or the gap before a cut-off run's carry-on
+   * — so the room can pass on and the attempt settles like any ended run. */
+  private clearResumePending(sessionId: string): void {
+    this.compactionResumePending.delete(sessionId);
+    this.cutOffResumePending.delete(sessionId);
+  }
+
   /**
-   * Send a resume message after a compaction that left a mid-turn run unfinished.
+   * Send the message that carries an unfinished turn on in the same session.
+   *
+   * Two ends of a run leave a turn in hand that nothing resumes by itself: a
+   * compaction that caught the run mid-turn (pi stops it and goes quiet), and a
+   * run that ended with the model out of output tokens mid-answer. Both mark
+   * the session idle and let the run go; this is what sends the message that
+   * picks the turn back up, so the work keeps its context instead of the queue
+   * launching a fresh session that starts the Task again from nothing.
    *
    * Deferred to the next turn of the event loop so the compaction has fully
    * unwound first: compact() still marks the session idle on the way out, and a
@@ -829,27 +852,27 @@ class SessionManager extends EventEmitter {
    * for the aborted run's idle is suppressed separately — the resumed turn ends
    * naturally, and only that end is announced.
    */
-  private scheduleResumeAfterCompaction(sessionId: string): void {
+  private scheduleResumeAfterCompaction(sessionId: string, resumeText = "Compaction detected, resume where you left off if needed."): void {
     setImmediate(() => {
       // Cancelled in the meantime — a Stop, or the pi going away — so nothing
       // is coming to carry the turn on, and the room was let go at the same
       // time: going on here would start a run nobody asked for.
-      if (!this.compactionResumePending.has(sessionId)) return;
+      if (!this.compactionResumePending.has(sessionId) && !this.cutOffResumePending.has(sessionId)) return;
       const live = this.live.get(sessionId);
       if (!live || this.stopping.has(live.client)) {
         // No pi to resume into: the pending marker is all that keeps the room
         // held, so drop it here or the queue would wait on nothing.
-        this.compactionResumePending.delete(sessionId);
+        this.clearResumePending(sessionId);
         return;
       }
-      void this.prompt(sessionId, "Compaction detected, resume where you left off if needed.").catch((e) => {
+      void this.prompt(sessionId, resumeText).catch((e) => {
         // Held behind another room-holder under the single-active setting: the
         // queue starts it once the room frees, so this is not a failure.
         if (e instanceof PromptQueuedForSingleActive) return;
-        console.error(`[portal] could not resume a compaction-interrupted turn: ${e.message}`);
+        console.error(`[portal] could not carry an unfinished turn on: ${e.message}`);
         // The resume will not come: the turn is over as far as we know, so the
         // room stops being held and the attempt settles like any ended run.
-        this.compactionResumePending.delete(sessionId);
+        this.clearResumePending(sessionId);
       });
     });
   }
@@ -951,6 +974,35 @@ class SessionManager extends EventEmitter {
    * resumed run starts, or when the resume will not come at all.
    */
   private compactionResumePending = new Set<string>();
+
+  /**
+   * The stopReason the last assistant message pi wrote into a session ended on.
+   * `"length"` is the model running out of output tokens in mid-answer: pi ends
+   * the run there, but the turn is not over — the answer was cut off mid-sentence
+   * (seen last night in BlastRunHero, where the model rambled to its 16,384-token
+   * limit listing class names). Read at agent_settled to spot that end.
+   */
+  private lastStopReason = new Map<string, string>();
+
+  /**
+   * How many times a session's run has been carried on after the model was cut
+   * off, in a row. Bounded: a model that keeps rambling to its output limit must
+   * not keep the room open forever, so after this many carries the run is left
+   * to end like any other. Cleared when a run ends on its own terms.
+   */
+  private cutOffCarries = new Map<string, number>();
+
+  /**
+   * Sessions sitting in the gap between a run that ended with the model cut off
+   * at its output limit and the carry-on prompt that resumes it in the same
+   * session. The same shape as the compaction gap just above: the session reads
+   * idle, but the turn is unfinished, so it must keep holding the room (handing
+   * the room over inside that gap is what let a second session start beside it
+   * and two Tasks run at once) and the Task watcher must not settle the attempt
+   * on that idle. Cleared when the carried-on run starts, or when the carry-on
+   * will not come at all.
+   */
+  private cutOffResumePending = new Set<string>();
 
   /** The extensions whose failure has been said since the last run began, per session. */
   private failuresSaid = new Map<string, Set<string>>();
@@ -1357,19 +1409,51 @@ class SessionManager extends EventEmitter {
         // and the queue would never drain again.
         this.singleActiveClaiming.delete(sessionId);
         this.inRun.add(sessionId);
-        // A resume after a mid-turn compaction has landed: this run is the
-        // turn carrying on, so the gap it was holding the room through is over
-        // and the run itself holds it from here.
-        this.compactionResumePending.delete(sessionId);
+        // A resume after a mid-turn compaction, or the carry-on after a run the
+        // model cut itself off on, has landed: this run is the turn carrying on,
+        // so the gap it was holding the room through is over and the run itself
+        // holds it from here.
+        this.clearResumePending(sessionId);
+        // A fresh run: forget how the last one ended. The carry-on budget is
+        // kept, not reset here — the resume that carries a cut-off turn on is
+        // itself a run, and resetting it there would never count the carries.
+        this.lastStopReason.delete(sessionId);
         this.failuresSaid.delete(sessionId);
         this.mark(sessionId, "running");
       }
       if (msg.type === "message_start" && msg.message?.role === "user") this.takeIn(sessionId, msg.message.content);
+      // What a run ended on is read back at agent_settled: only an assistant
+      // message says it, and the last one says how the model stopped.
+      if (msg.type === "message_end" && msg.message?.role === "assistant") {
+        const reason = msg.message.stopReason;
+        if (typeof reason === "string") this.lastStopReason.set(sessionId, reason);
+      }
       // agent_settled, not agent_end: agent_end fires once per agent run, and
       // a run is followed by retries, auto-compaction and any queued message,
       // all of it still the model working. Settling on agent_end is what made
       // the Stop button disappear halfway through.
       if (msg.type === "agent_settled") {
+        // The model ran out of output tokens in mid-answer: pi ends the run, but
+        // the turn is not over — the answer was cut off. Carrying it on in the
+        // same session is what keeps the work: left as it is, this idle reads as
+        // a finished run, the Task watcher settles the attempt as failed, and
+        // the queue loop launches a brand-new session that starts the Task again
+        // from nothing. Held before the idle is published below, so neither the
+        // watcher nor the queue sees the room as free in the gap.
+        const carries = this.cutOffCarries.get(sessionId) ?? 0;
+        if (this.lastStopReason.get(sessionId) === "length" && carries < 3) {
+          this.cutOffCarries.set(sessionId, carries + 1);
+          this.cutOffResumePending.add(sessionId);
+          // The idle coming up is not a finished chat: a carry-on is following
+          // it, and only the end of that gets announced. Same suppression the
+          // compaction resume uses.
+          markCompactionResume(sessionId);
+          this.scheduleResumeAfterCompaction(sessionId, "Carry on where you left off. Your last answer was cut off at the model's output limit, mid-sentence, not at the end of the work.");
+        } else {
+          // Ended on its own terms: the carry-on budget is spent, so a later run
+          // in this session gets a fresh one.
+          this.cutOffCarries.delete(sessionId);
+        }
         this.inRun.delete(sessionId);
         // Any claim this session still held — a message queued into the run
         // going added one — ends with the run; drop it here too, or it would
@@ -1377,12 +1461,14 @@ class SessionManager extends EventEmitter {
         this.singleActiveClaiming.delete(sessionId);
         this.settleWaiting(sessionId);
         if (!this.failed.delete(sessionId)) this.mark(sessionId, "idle");
-        // A run ends here — no retry, no compaction left to land — so under
-        // the single-active setting the room may pass to the next request
-        // waiting its turn. The exception is a compaction that caught this
-        // session's turn mid-run: its aborted run settles exactly here, and
-        // the resume that carries the turn on has not started yet. That gap
-        // keeps the session active (compactionResumePending), so the hand-over
+        // A run ends here — no retry, no compaction left to land, no carry-on
+        // to follow — so under the single-active setting the room may pass to
+        // the next request waiting its turn. The exception is a compaction that
+        // caught this session's turn mid-run: its aborted run settles exactly
+        // here, and the resume that carries the turn on has not started yet. A
+        // run the model ended out of output tokens mid-answer sits in the same
+        // gap, waiting for its carry-on. That gap keeps the session active
+        // (compactionResumePending / cutOffResumePending), so the hand-over
         // below finds the room still held and starts nothing beside it.
         if (singleActiveSessionEnabled()) void this.processQueue();
       }
@@ -2874,11 +2960,12 @@ class SessionManager extends EventEmitter {
       // still going to run, and the session already shows as working with a
       // Stop button. Remembered so it is cancelled the moment it could begin.
       if (this.compacting.has(sessionId)) this.cancelPending.add(sessionId);
-      // A Stop taken in the gap between a mid-turn compaction and the resume
-      // that was going to carry the turn on: the Stop is the end of the work,
-      // so the resume is called off and the room it held is let go — leaving
+      // A Stop taken in the gap between a mid-turn compaction, or a run the
+      // model cut itself off on, and the resume that was going to carry the turn
+      // on: the Stop is the end of the work, so the resume is called off and the
+      // room it held is let go — leaving
       // it would stall the queue on a session that is idle for good.
-      this.compactionResumePending.delete(sessionId);
+      this.clearResumePending(sessionId);
       this.stops.set(sessionId, (this.stops.get(sessionId) ?? 0) + 1);
       // Then waited for, like the path below. Returning here reported the Stop
       // as done while the session went on showing itself as compacting until pi
@@ -2911,9 +2998,10 @@ class SessionManager extends EventEmitter {
       // against a detached session — it would run with nothing reaching the
       // transcript, which is the failure this whole area keeps producing.
       await this.settleCompaction(sessionId);
-      // Stopped for good here, so a resume waiting in the compaction gap will
-      // not come either: the turn is over, and the room is let go below.
-      this.compactionResumePending.delete(sessionId);
+      // Stopped for good here, so a resume waiting in the compaction gap, or a
+      // carry-on waiting after a run the model cut itself off on, will not come
+      // either: the turn is over, and the room is let go below.
+      this.clearResumePending(sessionId);
       updateSession(sessionId, { status: "idle" });
       this.record(sessionId, "portal_status", { status: "idle", aborted: true });
       // A claim left over from before the abort (a message queued into the run
@@ -3022,9 +3110,12 @@ class SessionManager extends EventEmitter {
     this.inRun.delete(sessionId);
     // The pi behind this session is gone, so any gate claim it held is done;
     // leave it, and the session reads as active forever and the queue stalls.
-    // So is a resume waiting in a compaction gap: its pi went away with it.
+    // So is a resume waiting in a compaction gap, or a carry-on waiting after a
+    // run the model cut itself off on: its pi went away with it.
     this.singleActiveClaiming.delete(sessionId);
-    this.compactionResumePending.delete(sessionId);
+    this.clearResumePending(sessionId);
+    this.lastStopReason.delete(sessionId);
+    this.cutOffCarries.delete(sessionId);
     this.calls.delete(sessionId);
     this.callWindows.delete(sessionId);
     this.fresh.delete(sessionId);
