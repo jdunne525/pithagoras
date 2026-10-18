@@ -1,12 +1,17 @@
 import { test, expect, type Page, type Locator } from '@playwright/test';
 
 /**
- * Mobile (touch) drag-to-reorder of Tasks in the workspace. On phones the
- * native `draggable` attribute never fires, so pressing and holding anywhere on
- * a row follows the pointer by hand and calls setTaskOrder. A deliberate
- * long-press-plus-drag engages (the finger holds a moment and moves past a small
- * threshold), so an ordinary tap still opens the task and the list still scrolls.
- * This pins that behaviour.
+ * Reordering Tasks by dragging, on a phone (touch) and on a desktop (mouse).
+ *
+ * A phone has no native `draggable`, so the grip beside a row is followed by
+ * hand: the grip carries `touch-action: none`, which is what keeps a phone's
+ * browser from taking the press into a pan of the list — without it no pointer
+ * move ever arrives and the reorder never fires — and the pointer is captured
+ * the moment the press lands (see followPointer). The rest of the row is left
+ * to the browser, so a tap still opens a task and a swipe still scrolls the
+ * list. A desktop mouse keeps driving the native `draggable`. Both paths drop
+ * into the same anchor primitive, so they agree about where a row lands.
+ * This pins all of it.
  */
 const AT = new Date().toISOString();
 
@@ -45,62 +50,237 @@ async function mockTasks(page: Page, order: string[]) {
   return { getLastOrder: () => lastOrder };
 }
 
-// Dispatch a hand-followed touch drag (pointerdown -> holds -> moves -> pointerup)
-// on a target element, emulating what a finger does on a phone. Events are
-// dispatched from within the element itself (as `this`) so they attach exactly
-// where React listens (via delegation) and bubble up to the window listeners.
-// The hold between down and moving exceeds the gesture's ~120ms gate, so the
-// drag engages rather than being read as a plain tap.
-async function touchDrag(page: Page, grip: Locator, toX: number, toY: number, steps = 8) {
-  const start = await grip.boundingBox();
-  const sx = start!.x + start!.width / 2;
-  const sy = start!.y + start!.height / 2;
+const orderOf = async (page: Page) =>
+  await page.evaluate(() =>
+    Array.from(document.querySelectorAll("li[data-task-id]")).map((el) => el.getAttribute("data-task-id")),
+  );
+
+const gripBox = async (page: Page, n: number) =>
+  await page.evaluate((n) => {
+    const grips = document.querySelectorAll('li[data-task-id] button[aria-label="Drag to reorder"]');
+    const r = grips[n].getBoundingClientRect();
+    return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+  }, n);
+
+// What a finger does on a phone: press, hold, move, let go. Events are
+// dispatched from within the grip itself so they attach exactly where React
+// listens (by delegation) and bubble up to the window.
+async function touchDrag(page: Page, n: number, toX: number, toY: number, steps = 8, mid?: () => Promise<void>) {
+  const from = await gripBox(page, n);
   const emit = async (type: string, x: number, y: number) => {
-    await grip.evaluate((el, arg) => {
-      el.dispatchEvent(new PointerEvent(type, {
+    await page.evaluate(({ n, type, x, y }) => {
+      const grips = document.querySelectorAll('li[data-task-id] button[aria-label="Drag to reorder"]');
+      (grips[n] as HTMLElement).dispatchEvent(new PointerEvent(type, {
         bubbles: true, cancelable: true, pointerId: 1,
-        pointerType: "touch", clientX: arg.x, clientY: arg.y,
+        pointerType: "touch", clientX: x, clientY: y,
       }));
-    }, { x, y });
+    }, { n, type, x, y });
   };
-  await emit("pointerdown", sx, sy);
-  await page.waitForTimeout(200);
+  await emit("pointerdown", from.x, from.y);
+  await page.waitForTimeout(150);
   for (let i = 1; i <= steps; i++) {
-    await emit("pointermove", sx + (toX - sx) * (i / steps), sy + (toY - sy) * (i / steps));
+    await emit("pointermove", from.x + (toX - from.x) * (i / steps), from.y + (toY - from.y) * (i / steps));
     await page.waitForTimeout(20);
   }
+  await page.waitForTimeout(20);
+  await mid?.();
   await page.waitForTimeout(20);
   await emit("pointerup", toX, toY);
 }
 
-test('phone: dragging a task grip upward reorders and persists', async ({ page }) => {
+// A press on the body of a row that the browser turns into a pan of the list:
+// it fires pointerdown and then takes the pointer over, so nothing of the
+// gesture is ours to hear.
+async function touchPan(page: Page, n: number, toY: number) {
+  const from = await gripBox(page, n);
+  await page.evaluate(({ n, x, y }) => {
+    const rows = document.querySelectorAll("li[data-task-id]");
+    (rows[n] as HTMLElement).dispatchEvent(new PointerEvent("pointerdown", {
+      bubbles: true, cancelable: true, pointerId: 2, pointerType: "touch", clientX: x, clientY: y,
+    }));
+  }, { n, x: from.x + 120, y: from.y });
+  await page.waitForTimeout(150);
+  await page.evaluate(({ n, y }) => {
+    const rows = document.querySelectorAll("li[data-task-id]");
+    (rows[n] as HTMLElement).dispatchEvent(new PointerEvent("pointercancel", {
+      bubbles: true, cancelable: true, pointerId: 2, pointerType: "touch", clientX: 0, clientY: y,
+    }));
+  }, { n, y: toY });
+}
+
+test('phone: the grip beside a row carries touch-action none', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mockTasks(page, ["t0", "t1", "t2"]);
+  await page.goto("/projects/Foo/tasks");
+  await expect(page.locator("li[data-task-id]")).toHaveCount(3, { timeout: 10000 });
+
+  // Without this the browser answers a press on the grip with a scroll of the
+  // list, and the reorder never gets a single move to follow.
+  await expect(
+    await page.evaluate(() => {
+      const grip = document.querySelector('li[data-task-id] button[aria-label="Drag to reorder"]');
+      return !!grip && getComputedStyle(grip).touchAction;
+    }),
+  ).toBe("none");
+});
+
+test('phone: dragging a task grip down its list reorders and persists', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const mock = await mockTasks(page, ["t0", "t1", "t2"]);
   await page.goto("/projects/Foo/tasks");
-
   await expect(page.locator("li[data-task-id]")).toHaveCount(3, { timeout: 10000 });
 
-  const grips = page.locator("li[data-task-id] button[aria-label=\"Drag to reorder\"]");
-  await expect(grips).toHaveCount(3);
-
-  // Grab the bottom row (t2) grip and drag it up to near the top of the list.
-  const box = await page.evaluate(() => {
-    const ul = document.querySelector("ul") as HTMLElement;
-    const r = ul.getBoundingClientRect();
-    return { x: r.left + 10, y: r.top + 5 };
+  const last = await page.evaluate(() => {
+    const rows = document.querySelectorAll("li[data-task-id]");
+    const r = (rows[rows.length - 1] as HTMLElement).getBoundingClientRect();
+    return { x: r.x + 40, y: r.top + r.height * 0.75 };
   });
-  await touchDrag(
-    page,
-    page.locator("li[data-task-id] button[aria-label=\"Drag to reorder\"]").nth(2),
-    box.x,
-    box.y,
-  );
 
-  // After the drag, the bottom row (t2) moved up one slot, ahead of t1.
-  await expect.poll(async () =>
-    page.locator("li[data-task-id]").evaluateAll((els) => els.map((e) => e.getAttribute("data-task-id"))),
-  ).toEqual(["t0", "t2", "t1"]);
+  // Grab the top row's grip and carry it below the middle of the last row.
+  await touchDrag(page, 0, last.x, last.y);
 
-  // And the new order was persisted via PUT /tasks/order.
+  await expect.poll(() => orderOf(page), { timeout: 5000 }).toEqual(["t1", "t2", "t0"]);
+  expect(await mock.getLastOrder()).toEqual(["t1", "t2", "t0"]);
+});
+
+test('phone: a line shows where the carried row will go, under the finger', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mockTasks(page, ["t0", "t1", "t2"]);
+  await page.goto("/projects/Foo/tasks");
+  await expect(page.locator("li[data-task-id]")).toHaveCount(3, { timeout: 10000 });
+
+  const last = await page.evaluate(() => {
+    const rows = document.querySelectorAll("li[data-task-id]");
+    const r = (rows[rows.length - 1] as HTMLElement).getBoundingClientRect();
+    return { x: r.x + 40, y: r.top + r.height * 0.75 };
+  });
+
+  // The finger hides the rows it carries a task through, so while it is still
+  // held the row beside draws a line where the carried row would land.
+  let lines = 0;
+  await touchDrag(page, 0, last.x, last.y, 8, async () => {
+    lines = Math.max(lines, await page.evaluate(() => document.querySelectorAll("div.task-drop").length));
+  });
+  expect(lines).toBe(1);
+
+  // And the line is gone once the finger lets go and the row has moved.
+  await expect.poll(() => page.evaluate(() => document.querySelectorAll("div.task-drop").length)).toBe(0);
+  await expect(await orderOf(page)).toEqual(["t1", "t2", "t0"]);
+});
+
+test('phone: a tap on the grip opens nothing and moves nothing', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const mock = await mockTasks(page, ["t0", "t1", "t2"]);
+  await page.goto("/projects/Foo/tasks");
+  await expect(page.locator("li[data-task-id]")).toHaveCount(3, { timeout: 10000 });
+
+  const from = await gripBox(page, 1);
+  await touchDrag(page, 1, from.x + 3, from.y + 3, 2);
+
+  // A press that never carried far enough is no drag at all.
+  await expect(await orderOf(page)).toEqual(["t0", "t1", "t2"]);
+  expect(await mock.getLastOrder()).toBe(null);
+});
+
+test('phone: the browser still scrolls the list past a row', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const mock = await mockTasks(page, ["t0", "t1", "t2"]);
+  await page.goto("/projects/Foo/tasks");
+  await expect(page.locator("li[data-task-id]")).toHaveCount(3, { timeout: 10000 });
+
+  // A press on the body of a row, taken over by the browser as a pan, is left
+  // alone: it reorders nothing.
+  await touchPan(page, 0, 400);
+  await expect(await orderOf(page)).toEqual(["t0", "t1", "t2"]);
+  expect(await mock.getLastOrder()).toBe(null);
+});
+
+test('desktop: dragging a task row with a mouse reorders and persists', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  const mock = await mockTasks(page, ["t0", "t1", "t2"]);
+  await page.goto("/projects/Foo/tasks");
+  await expect(page.locator("li[data-task-id]")).toHaveCount(3, { timeout: 10000 });
+
+  const rows = page.locator("li[data-task-id]");
+  const bottom = await rows.nth(2).boundingBox();
+  const top = await rows.nth(0).boundingBox();
+
+  // Drag the last row onto the lower half of the first one: it lands after it.
+  await page.mouse.move(bottom.x + bottom.width / 2, bottom.y + bottom.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(top.x + top.width / 2, top.y + top.height * 0.75, { steps: 10 });
+  await page.mouse.up();
+
+  await expect.poll(() => orderOf(page), { timeout: 5000 }).toEqual(["t0", "t2", "t1"]);
   expect(await mock.getLastOrder()).toEqual(["t0", "t2", "t1"]);
+});
+
+test.describe("on a phone, as the browser of one really sees it", () => {
+  test.use({ hasTouch: true, isMobile: true, viewport: { width: 390, height: 844 } });
+
+  // A phone reports no hover and a coarse pointer, which is what makes the grip
+  // a thumb-wide strip you can see: on a desktop it stays invisible until the
+  // cursor comes near it, and there it is only as wide as its icon.
+  test("the grip is a visible, thumb-wide strip that the browser will not pan", async ({ page }) => {
+    await mockTasks(page, ["t0", "t1", "t2"]);
+    await page.goto("/projects/Foo/tasks");
+    await expect(page.locator("li[data-task-id]")).toHaveCount(3, { timeout: 10000 });
+
+    const box = await page.evaluate(() => {
+      const grip = document.querySelector('li[data-task-id] button[aria-label="Drag to reorder"]');
+      const row = grip ? grip.closest("li[data-task-id]") : null;
+      const g = grip ? grip.getBoundingClientRect() : null;
+      const r = row ? row.getBoundingClientRect() : null;
+      return {
+        touchAction: grip ? getComputedStyle(grip).touchAction : "",
+        opacity: grip ? getComputedStyle(grip).opacity : "",
+        w: g ? g.width : 0,
+        h: g ? g.height : 0,
+        rowH: r ? r.height : 0,
+      };
+    });
+    expect(box.touchAction).toBe("none");
+    expect(box.opacity).toBe("1");
+    expect(box.w).toBeGreaterThanOrEqual(28);
+    // The grip reaches the row's own edges, past its padding: only its borders
+    // are left over, so a finger may land anywhere along the row's height.
+    expect(box.h).toBeGreaterThanOrEqual(box.rowH - 4);
+  });
+
+  // What a real finger does: the browser's own touch pipeline, not events fired
+  // at the page. Chromium answers a press on the grip with moves — its touch
+  // action is none, so the list is never panned — and the row follows them to
+  // the slot it lets go in. This is the phone the user has, end to end.
+  test("a real finger drag on the grip reorders and persists", async ({ page }) => {
+    const mock = await mockTasks(page, ["t0", "t1", "t2"]);
+    await page.goto("/projects/Foo/tasks");
+    await expect(page.locator("li[data-task-id]")).toHaveCount(3, { timeout: 10000 });
+
+    const from = await page.evaluate(() => {
+      const grips = document.querySelectorAll('li[data-task-id] button[aria-label="Drag to reorder"]');
+      const r = (grips[0] as HTMLElement).getBoundingClientRect();
+      return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+    });
+    const to = await page.evaluate(() => {
+      const rows = document.querySelectorAll("li[data-task-id]");
+      const r = (rows[rows.length - 1] as HTMLElement).getBoundingClientRect();
+      return { x: r.x + 40, y: r.top + r.height * 0.75 };
+    });
+
+    const client = await page.context().newCDPSession(page);
+    const touch = async (type: string, x: number, y: number) => {
+      await client.send("Input.dispatchTouchEvent", { type, touchPoints: [{ x, y }] });
+    };
+    await touch("touchStart", from.x, from.y);
+    await page.waitForTimeout(150);
+    for (let i = 1; i <= 10; i++) {
+      await touch("touchMove", from.x + (to.x - from.x) * (i / 10), from.y + (to.y - from.y) * (i / 10));
+      await page.waitForTimeout(30);
+    }
+    await page.waitForTimeout(60);
+    await touch("touchEnd", to.x, to.y);
+
+    await expect.poll(() => orderOf(page), { timeout: 5000 }).toEqual(["t1", "t2", "t0"]);
+    expect(await mock.getLastOrder()).toEqual(["t1", "t2", "t0"]);
+  });
 });

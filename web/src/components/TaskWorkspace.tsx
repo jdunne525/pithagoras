@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type React
 import { useNavigate } from "react-router-dom";
 import { StatusDot, type TaskStatus } from "./StatusDot";
 import { ThinkingBlock } from "./ChatActivity";
+import { followPointer } from "../pointer-drag";
 import { confirmDialog } from "./ConfirmDialog";
 import { isEnter } from "../shortcuts";
 import { t } from "../i18n";
@@ -216,6 +217,11 @@ export function TaskWorkspace({ projectName, onBack, onTaskActivity }: { project
       return next;
     });
   const [dragId, setDragId] = useState<string | null>(null);
+  // Where a carried row would go while a finger is still holding it: the row it
+  // lands beside and which edge of that row the line sits against. The row being
+  // carried measures it (its finger hides the list), and the row beside it draws
+  // the line, so the move can be seen before the finger lets go.
+  const [dropAt, setDropAt] = useState<null | { id: string; at: "before" | "after" }>(null);
   const [error, setError] = useState<string | null>(null);
   // Whether this project's server-owned autonomous queue loop is running.
   // Read once on open (Phase 5); recovery after a restart is Phase 8.
@@ -786,6 +792,8 @@ ${base}
                   task={task}
                   selected={selectedId === task.id}
                   dragging={dragId === task.id}
+                  dropBefore={dropAt !== null && dropAt.at === "before" && dropAt.id === task.id}
+                  dropAfter={dropAt !== null && dropAt.at === "after" && dropAt.id === task.id}
                   // Selecting a task only opens it: never move between tabs just because a
                   // row was picked, or clicking a finished task in Completed would jump home.
                   onSelect={() => {
@@ -796,6 +804,9 @@ ${base}
                     if (viewingMockId && viewingMockId !== task.id) setViewingMockId(null);
                   }}
                   onMove={moveTask}
+                  onDropLine={(anchorId, at) =>
+                    setDropAt(anchorId && at ? { id: anchorId, at } : null)
+                  }
                   onDragStart={() => { setDragId(task.id); lastMoveRef.current = null; }}
                   onDragEnd={() => { setDragId(null); lastMoveRef.current = null; }}
                   onOpenSession={() => {
@@ -972,8 +983,11 @@ function TaskRow({
   task,
   selected,
   dragging,
+  dropBefore,
+  dropAfter,
   onSelect,
   onMove,
+  onDropLine,
   onDragStart,
   onDragEnd,
   onOpenSession,
@@ -992,6 +1006,13 @@ function TaskRow({
   onMove: (draggedId: string, anchorId: string | null, position: "before" | "after") => void;
   onDragStart: () => void;
   onDragEnd: () => void;
+  /** Where a row being carried by a finger would go: the row beside it, and
+      which edge of it the line sits against. Reported by the row being carried,
+      which draws the line on the row beside it — a finger hides the list. */
+  onDropLine: (anchorId: string | null, at: "before" | "after" | null) => void;
+  /** Which edge of this row a carried row would land against, if any. */
+  dropBefore?: boolean;
+  dropAfter?: boolean;
   onOpenSession: () => void;
   onStart: () => void;
   onRerun?: () => void;
@@ -1054,107 +1075,93 @@ function TaskRow({
   }, [task.status, task.startedAt, clock]);
 
   // ---- Reorder by dragging -------------------------------------------------
-  // A phone has no native `draggable`, so the row is followed by hand and
-  // reordered through onMove. This mirrors the sidebar's folder reorder (see
-  // FolderTree): one pointer is captured with setPointerCapture the moment the
-  // drag engages, which is what keeps the moves arriving on touch — without it
-  // the browser takes the pointer into its own scroll and the reorder never
-  // fires. A mouse still drives the native draggable above.
+  // The grip beside a row is the handle, and it is the handle alone: it carries
+  // `touch-none`, so the browser never takes a press on it into a scroll of the
+  // list, and the pointer is captured the moment the press lands (see
+  // followPointer), which is what keeps the moves arriving on a phone. A press
+  // anywhere else on the row is left to the browser, because it has to be: the
+  // list scrolls on a phone, and a row that swallows every press cannot also
+  // be grabbed. This mirrors the sidebar's folder reorder (see FolderTree),
+  // which works on a phone exactly this way. A mouse keeps driving the native
+  // `draggable` above; this hand-followed path is for touch and pen, which have
+  // no drag of their own to give.
   //
-  // To keep this working alongside the scrolling list, a press only becomes a
-  // drag once it clearly means to: the finger has held for a moment AND moved
-  // past a small threshold. A quick tap still opens the task and a quick scroll
-  // still scrolls; grabbing anywhere on the row — not just the grip — is what
-  // makes it discoverable on a small screen.
-  const DRAG_HOLD_MS = 120;
-  const DRAG_THRESHOLD_PX = 12;
+  // The press counts as a drag once the finger has moved past a small slop, so
+  // tapping the grip does nothing at all, and a swipe sideways that never
+  // changed the row's slot moves nothing. Where the finger lets go decides the
+  // slot: the rows now above it are counted, and the task is moved through the
+  // same anchor primitive the desktop drop uses, so both agree. While the finger
+  // is still held the same measurement is reported to the row beside it, which
+  // draws a line where the carried row would go — a finger hides the list it is
+  // moving things through, so the move has to be seen before it is let go.
+  const DRAG_SLOP_PX = 8;
   const rowRef = useRef<HTMLLIElement>(null);
-  // The current pointer session, reset at the start of every press so a stale
-  // one cannot re-engage after a new press began.
-  const gestureRef = useRef<{
-    pid: number; startX: number; startY: number; startTime: number; engaged: boolean;
-  } | null>(null);
-  // Set once the drag engages, so the click that follows a release is not read
-  // as an open, and so we know a real move happened when the finger lifts.
-  const grabbedRef = useRef(false);
 
-  const carry = (e: ReactPointerEvent<HTMLLIElement>) => {
+  // Where a pointer's y would drop this row among the rows as drawn: which row
+  // it lands beside, which side of it, and the slot itself, so letting go in the
+  // row's own band can be seen to move nothing.
+  const slot = (y: number) => {
+    const rows: { el: Element; id: string }[] = [];
+    for (const el of Array.from(rowRef.current?.parentElement?.children ?? [])) {
+      const id = el.getAttribute("data-task-id");
+      if (id) rows.push({ el, id });
+    }
+    const rest = rows.filter((r) => r.id !== task.id);
+    if (rest.length === 0) return null;
+    const here = rows.findIndex((r) => r.el === rowRef.current);
+    const to = rest.filter((r) => {
+      const b = r.el.getBoundingClientRect();
+      return b.top + b.height / 2 < y;
+    }).length;
+    const append = to >= rest.length;
+    const anchor = rest[append ? rest.length - 1 : to];
+    if (!anchor) return null;
+    const position: "before" | "after" = append ? "after" : "before";
+    return { to, here, anchorId: anchor.id, position };
+  };
+
+  const carry = (e: ReactPointerEvent<HTMLButtonElement>) => {
     // Desktop mice drive the native draggable above; touch and pen use this.
     if (e.pointerType === "mouse" || e.button !== 0) return;
-    const pid = e.pointerId;
-    const startX = e.clientX;
-    const startY = e.clientY;
-    gestureRef.current = { pid, startX, startY, startTime: Date.now(), engaged: false };
-    grabbedRef.current = false;
-    // Kill text selection for the whole press so a long-press can never leave
-    // the dark grey highlight that used to block reordering.
-    const body = document.body;
-    const savedSelect = body.style.userSelect;
-    body.style.userSelect = "none";
-
-    const ul = rowRef.current?.parentElement;
-    // How many sibling rows sit entirely above the pointer, excluding ours. A
-    // fresh measurement at release gives the slot the dragged row would land in.
-    const above = (y: number) =>
-      Array.from(ul!.children)
-        .filter((el) => el !== rowRef.current)
-        .filter((el) => {
-          const r = el.getBoundingClientRect();
-          return r.top + r.height / 2 < y;
-        }).length;
-
-    const engage = () => {
-      if (gestureRef.current?.pid !== pid) return;
-      gestureRef.current.engaged = true;
-      grabbedRef.current = true;
-      // Capture the pointer so the moves keep coming once the finger leaves the
-      // row, and stop the page panning so the reorder does not fight the list.
-      try { rowRef.current?.setPointerCapture(pid); } catch { /* unsupported */ }
-      body.style.touchAction = "none";
-      onDragStart();
-    };
-
-    const onPointerMove = (ev: PointerEvent) => {
-      if (ev.pointerId !== pid) return;
-      const g = gestureRef.current;
-      if (!g) return;
-      if (!g.engaged) {
-        const held = Date.now() - g.startTime >= DRAG_HOLD_MS;
-        const moved = Math.hypot(ev.clientX - g.startX, ev.clientY - g.startY) >= DRAG_THRESHOLD_PX;
-        if (!held || !moved) return;
-        engage();
-      }
-      ev.preventDefault();
-    };
-
-    const end = (ev: PointerEvent) => {
-      if (ev.pointerId !== pid) return;
-      gestureRef.current = null;
-      try { rowRef.current?.releasePointerCapture(pid); } catch { /* unsupported */ }
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerup", end);
-      window.removeEventListener("pointercancel", end);
-      body.style.userSelect = savedSelect;
-      body.style.touchAction = "";
-      // onDragStart/onDragEnd own the dragging flag in the parent.
-      if (!grabbedRef.current) return;
-      grabbedRef.current = false;
-      const rest = Array.from(ul!.children)
-        .map((el) => el.getAttribute("data-task-id"))
-        .filter((id): id is string => !!id && id !== task.id);
-      if (rest.length === 0) return;
-      // Slot the dragged row would land in, measured from the pointer.
-      const to = above(ev.clientY);
-      // Insert before the first row now below the finger, else append at the end.
-      const append = to >= rest.length;
-      const anchorId = append ? rest[rest.length - 1] : rest[to];
-      if (!anchorId || anchorId === task.id) return;
-      onMove(task.id, anchorId, append ? "after" : "before");
-    };
-
-    window.addEventListener("pointermove", onPointerMove, { passive: false });
-    window.addEventListener("pointerup", end);
-    window.addEventListener("pointercancel", end);
+    // Refuse the browser its own gesture for this press: without this a touch
+    // that starts on the grip is taken into a pan of the list, no further
+    // pointermove ever comes, and the reorder never fires.
+    e.preventDefault();
+    const from = e.clientY;
+    let y = from;
+    let carried = false;
+    // The line as last drawn, so a finger that stays in one band does not keep
+    // asking for the same line again.
+    let shown = "";
+    followPointer(
+      e,
+      (ev) => {
+        if (!carried) {
+          if (Math.abs(ev.clientY - from) < DRAG_SLOP_PX) return;
+          carried = true;
+          onDragStart();
+        }
+        y = ev.clientY;
+        const s = slot(y);
+        const at = s && s.to !== s.here ? s : null;
+        const key = at ? `${at.anchorId}|${at.position}` : "";
+        if (key === shown) return;
+        shown = key;
+        onDropLine(at ? at.anchorId : null, at?.position ?? null);
+      },
+      (cancelled) => {
+        if (!carried) return;
+        onDropLine(null, null);
+        onDragEnd();
+        // The browser took the pointer over, or the row went away mid-drag and
+        // its capture with it: nothing was carried, so nothing moves.
+        if (cancelled) return;
+        const s = slot(y);
+        // Let go where it was: nothing moved, and the order is left as it is.
+        if (!s || s.to === s.here) return;
+        onMove(task.id, s.anchorId, s.position);
+      },
+    );
   };
 
   return (
@@ -1162,7 +1169,6 @@ function TaskRow({
       ref={rowRef}
       data-task-id={task.id}
       draggable
-      onPointerDown={carry}
       onDragStart={(e) => { onDragStart(); e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", task.id); }}
       onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; }}
       onDrop={(e) => {
@@ -1175,13 +1181,23 @@ function TaskRow({
         onMove(from, task.id, below ? "after" : "before");
       }}
       onDragEnd={onDragEnd}
-      className={`group flex items-end gap-2 rounded-xl border px-2.5 py-1.5 transition ${dragging ? "opacity-50" : ""} ${selected ? "border-accent/60 bg-accent/5" : "border-line bg-raised/40"}`}
+      className={`group relative flex items-end gap-2 rounded-xl border px-2.5 py-1.5 transition ${dragging ? "opacity-50" : ""} ${selected ? "border-accent/60 bg-accent/5" : "border-line bg-raised/40"}`}
     >
+      {/* Where a row carried by a finger would go: a line against the edge of
+          this row that it would land beside, drawn by the row beside the one
+          being carried, because the finger hides the list it moves through. */}
+      {dropBefore || dropAfter ? (
+        <div
+          aria-hidden
+          className={`task-drop pointer-events-none absolute left-0 h-0.5 w-full rounded-full bg-accent ${dropBefore ? "-top-0.5" : "-bottom-0.5"}`}
+        />
+      ) : null}
       <button
         type="button"
         aria-label={t("Drag to reorder")}
         title={t("Drag to reorder")}
-        className="shrink-0 p-0.5 text-fg-faint opacity-0 hover:text-fg-muted group-hover:opacity-100 focus:opacity-100 [@media(hover:none)]:opacity-100"
+        onPointerDown={carry}
+        className="shrink-0 self-stretch -my-1.5 rounded-md cursor-grab touch-none active:cursor-grabbing inline-flex items-center justify-center p-0.5 text-fg-faint opacity-0 transition-opacity hover:text-fg-muted group-hover:opacity-100 focus:opacity-100 [@media(hover:none)]:opacity-100 [@media(hover:none)]:w-8 [@media(hover:none)]:bg-fg/5"
       >
         <LuGripVertical className="h-3.5 w-3.5" />
       </button>
@@ -1199,7 +1215,7 @@ function TaskRow({
             className="w-full rounded-md border border-line bg-surface px-2 py-1 text-sm leading-relaxed text-fg outline-none focus:border-accent"
           />
         ) : (
-          <button onClick={() => { grabbedRef.current ? (grabbedRef.current = false) : onSelect(); }} draggable={false} className="min-w-0 w-full flex flex-col justify-center text-left">
+          <button onClick={onSelect} draggable={false} className="min-w-0 w-full flex flex-col justify-center text-left select-none">
             {/* A flex column wrapper fills the field width so it can clip its children
                 instead of sizing to the long prompt text, which would spill past
                 the frame edge on narrow screens. */}
