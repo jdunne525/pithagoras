@@ -83,6 +83,27 @@ test("rerun resets a task to pending without starting it (Phase 5)", () => {
   assert.equal(db.lastAttemptNumber(task.id), 1, "no fresh attempt row is opened");
 });
 
+// The state the Tasks view used to hide its Rerun control on: the spent budget
+// is cleared whenever a Task returns to pending (the queue's retry path does
+// that), so a Task stopped after such a reset reads 0 attempts while still
+// holding its history. Rerun must still be possible on it.
+test("a stopped task whose budget was cleared is still rerunnable", () => {
+  const project = ws();
+  const task = tasks.createTask({ workspace: project, title: "stop it" });
+  tasks.startAttempt(task.id);
+  tasks.finishAttempt(tasks.listAttemptsByTask(task.id)[0].id, "failed");
+  tasks.setTaskStatus(task.id, "pending");
+  assert.equal(tasks.getTask(task.id).attempts, 0, "the spent budget is cleared");
+
+  const stopped = tasks.setTaskStatus(task.id, "stopped");
+  assert.equal(stopped.status, "stopped");
+  assert.equal(stopped.attempts, 0, "stopping keeps the cleared budget");
+
+  const reset = tasks.rerunTask(task.id);
+  assert.equal(reset.status, "pending", "Rerun puts it back on the queue");
+  assert.equal(db.lastAttemptNumber(task.id), 1, "its attempt stays as history");
+});
+
 test("starting an attempt is sequential and marks both running", () => {
   const task = tasks.createTask({ workspace: ws("s"), title: "Run twice", maxAttempts: 5 });
 

@@ -934,7 +934,17 @@ ${base}
     There is intentionally no play/run (triangle) button here: Tasks are started
     by running the project's autonomous queue, never by a per-task triangle. */
 function RunControls({ task, onStart, onRerun, onComplete }: { task: MockTask; onStart: () => void; onRerun?: () => void; onComplete?: () => void }) {
-  const canRerun = !!onRerun && ["failed", "stopped", "completed"].includes(task.status) && task.attempts > 0;
+  // Rerun is offered to every Task that has settled — failed, stopped or
+  // completed — and to no others: a pending Task is already back on the queue
+  // with nothing to reset, and a running one is refused by the server.
+  //
+  // The attempt count is deliberately NOT part of this gate. `attempts` is the
+  // spent budget, which the server clears every time a Task returns to pending
+  // (the queue's own retry path does exactly that), so a stopped Task can
+  // honestly read 0 attempts while still holding its history as attempts. Gating
+  // the control on that count hid it on such a Task, leaving a stopped Task with
+  // no way back onto the queue.
+  const canRerun = !!onRerun && ["failed", "stopped", "completed"].includes(task.status);
   return (
     <div className="inline-flex items-center gap-0.5">
       {task.status === "running" ? (
