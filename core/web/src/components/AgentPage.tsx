@@ -3,7 +3,8 @@ import { useSearchParams } from "react-router-dom";
 import { OrbStudio } from "./OrbStudio";
 import { ActivityFeed, HeartbeatSettings } from "./AgentHeartbeat";
 import { AgentSkills } from "./AgentSkills";
-import { VoiceOrb, type VoiceLevels } from "./VoiceOrb";
+import type { VoiceLevels } from "./VoiceOrb";
+import { AgentAvatar } from "./AgentAvatar";
 import {
   LuBot,
   LuCheck,
@@ -163,10 +164,12 @@ function AgentCards({ agents, onOpen, onNew }: { agents: Agent[]; onOpen: (id: s
                 onClick={() => onOpen(a.id)}
                 className="group relative flex w-full flex-col items-center rounded-2xl border border-line bg-raised/40 px-3 pb-4 pt-5 text-center transition hover:border-accent/40 hover:bg-raised/70"
               >
-                {/* Room around the orb for its glow, and for a hat or a prop. */}
-                <div className="flex h-28 w-28 items-center justify-center rounded-2xl bg-[#0b1220]">
-                  <div className="voice-avatar w-[56%]">
-                    <VoiceOrb mode="idle" levels={still} look={a.orb} />
+                {/* Room around the orb for its glow, and for a hat or a prop. It is all the avatar's box. An
+                    extension's avatar, which may draw past its box on the stage, is cut at its edge here, where
+                    that would reach over the agent's name; so is the orb it falls back to, hat and all. */}
+                <div className="flex h-28 w-28 items-center justify-center rounded-2xl bg-[#0b1220] has-[.voice-avatar-x]:overflow-hidden">
+                  <div className="voice-avatar">
+                    <AgentAvatar look={a.orb} agent={a} mode="idle" levels={still} still />
                   </div>
                 </div>
                 {a.unread > 0 && (
@@ -386,7 +389,7 @@ function AgentView({
           {back}
           <PageHeader
             icon={<LuBot />}
-            media={<OrbStudio agent={agent.id} orb={agent.orb} voice={agent.voice} onSaved={() => void onChanged()} />}
+            media={<OrbStudio agent={agent.id} name={agent.name} orb={agent.orb} voice={agent.voice} onSaved={() => void onChanged()} />}
             title={
               renaming === "agent" ? (
                 <TitleInput value={agent.name} label={t("Agent name")} className="w-full" onCommit={renameAgent} onCancel={() => setRenaming(null)} />
