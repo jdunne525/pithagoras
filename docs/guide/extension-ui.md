@@ -154,6 +154,7 @@ with it either way.
 | `slots.register(slot, entry)` | Puts an entry into a [slot](#slots). Returns what takes it out |
 | `chats.use(chatId, pick?)` | A hook: [the chat as the page has it](#the-chat-s-events) |
 | `chats.on(chatId, handler)` | The same outside a component |
+| `chats.useEvents(chatId)` | A hook: any chat's events by its id, streamed while the component is drawn, as the page streams the chat on screen: `{ events, status, loading, missing }`. For drawing another chat beside the one on screen, such as a [child chat](#child-chats)'s run with `ui.Transcript`. The latest part of a long one; nothing without an id |
 | `panels` | [Any panel of the chat on screen](#panels-and-commands), by name |
 | `commands` | [What can be asked of an extension by name](#panels-and-commands) |
 | `api.json(url, init?)` | A request as the portal's own are made |
@@ -2337,16 +2338,29 @@ portal.chats.extend((pi, chat) => {
   or a mode it cannot have.
 - **It stands where its parent stands.** It takes its parent's role and the
   person the parent last heard from, so the guard holds each call to the person
-  who asked, and the tools the person switched off or on in the parent. A dialog
+  who asked, and the tools the person switched off or on in the parent. It is
+  held to them as they stand now: a tool switched off in the parent since is off
+  in the child before its next message, and one switched on in the parent later
+  is not given to it. A dialog
   it opens, and a question the guard asks, are drawn on its own page, where its
   parent's would be: for a child of a chat of the portal's pages (or of the
   agent's page) nobody may be looking, so say where it waits; for a child of a
   conversation on a channel or of a routine run, where nobody can answer, the
   guard refuses for the child too, as it does for its parent.
 - **`prompt(chatId, message, { steer? })`** resolves once the run that takes
-  the message in has ended, with `{ status, answer, error? }`: `status` is
+  the message in has ended, with `{ status, answer, marked?, error? }`: `status` is
   `"done"`, `"stopped"` (by `abort`, by the person's Stop, or because the chat
-  was deleted) or `"error"`. `answer` is the last thing it said. Sent while it
+  was deleted) or `"error"`. `answer` is the last thing it said. `marked` is
+  there when the guard had marked the child (it read something that looked like
+  a prompt injection): the parent is marked then too, so the guard's rules for a
+  marked chat hold what it does with the answer. The mark is in the guard that
+  runs now: to keep it when the guard is made again (the chat is reloaded or
+  the portal restarted), hand the answer on in a tool result or a message that
+  starts with `<<<untrusted:` and 16 hexadecimal digits, `>>> (suspected prompt
+  injection: ` and a sign in lowercase words, `)`, which the guard reads in the
+  chat's history as it reads a result it flagged itself (the subagent
+  extension's `flagged.ts` writes it, and the person can trust it like
+  that one). Sent while it
   works, a message waits for the run to end, as the person's does; with
   `steer`, it is taken after the step the run is on, and both prompts resolve
   as that run ends. A run that fails resolves as an error, and so does a
@@ -2367,6 +2381,11 @@ portal.chats.extend((pi, chat) => {
   or loaded again, and a message in it cannot be edited until the child is
   done. A portal that restarts marks a child it cut off *interrupted*, as any
   chat.
+- **Beside its parent**, a browser half draws a child's run from its own
+  events, `portal.chats.useEvents(child.id)` with `ui.Transcript`, and opens it
+  with `portal.navigate("/s/" + child.id)`. The subagent extension does, and
+  names the child on its [protocol](/guide/extensions#the-subagent-protocol)
+  start (`chat`).
 - **In a process of its own** (`"isolated": true`), `create` is answered at
   once (`children` too) and the others later, as the other calls are.
 

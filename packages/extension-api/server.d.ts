@@ -34,6 +34,8 @@ export interface Chat {
   /** The folder the chat works in, as the chat names it. */
   workspace: string;
   status: "idle" | "running" | "error" | "interrupted";
+  /** What kind of chat it is. Not there for a task, a chat made on the portal's pages. */
+  kind?: Exclude<ChatKind, "task">;
   /**
    * The mode it was started in, as it stores it: "<package>/<id>" for an extension's (`modes.provide`), "custom/<id>"
    * for one the person made, the portal's own by name ("code"). Not there for Standard.
@@ -71,6 +73,13 @@ export interface ChildChatOptions {
 export interface ChildRun {
   status: "done" | "stopped" | "error";
   answer: string;
+  /**
+   * Set when the child had read outside content that holds a chat back (the guard marked it). The portal has marked its
+   * parent with it already, so its rules for a marked chat hold what the parent does with this answer. That mark is in
+   * the guard that runs now: an answer handed on is written in the form of a flagged result for it to be found again
+   * when the guard is made again (see "Child chats" in the guide).
+   */
+  marked?: true;
   error?: string;
 }
 
@@ -311,6 +320,11 @@ export interface SubagentStart {
   detail?: string;
   /** It runs on after the tool call that started it has returned (in the background), so the end of that call is not its end. */
   detached?: boolean;
+  /**
+   * It works in a chat of the portal's (a child chat, `chats.create`), by that chat's id: its run is that chat's own
+   * transcript, which a page draws from there and opens at `/s/<chat>`, so it sends no `subagent:v1:event` of its own.
+   */
+  chat?: string;
 }
 
 export interface SubagentEvent {
