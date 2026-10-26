@@ -104,6 +104,61 @@ test("a subagent works in a child chat of its chat, which answers; kept, it is l
   assert.match(again, /^I said 42\./, "it knows what it answered before");
 });
 
+test("a subagent works in the mode of its chat, with its instructions; with the setting off, in Standard", { timeout: 60_000 }, async () => {
+  const mode = db.createCustomMode({ label: "Beacon", description: "Says something" });
+  db.updateCustomMode(mode.id, { instructions: "Always mention the BEACON word." });
+  const moded = `custom/${mode.id}`;
+  /** The system prompt of the child's first request, and the mode of the child chat. */
+  async function delegate(parent: string) {
+    db.createSession({ id: parent, title: parent, workspace: process.env.WORKSPACE_ROOT!, executor: "host", kind: "task", mode: moded });
+    const seen = childRequests.length;
+    await ask(parent, "Delegate it");
+    const [child] = db.childSessions(parent);
+    return { mode: child.mode, prompt: JSON.stringify(childRequests[seen].messages[0]) };
+  }
+  assert.equal((await put(`${portal.at}/settings`, { inheritMode: true })).status, 200);
+  const same = await delegate("moded-parent");
+  assert.equal(same.mode, moded);
+  assert.match(same.prompt, /BEACON/, "the child chat's pi is told the mode's instructions");
+
+  assert.equal((await put(`${portal.at}/settings`, { inheritMode: false })).status, 200);
+  const standard = await delegate("moded-parent-2");
+  assert.equal(standard.mode, null);
+  assert.doesNotMatch(standard.prompt, /BEACON/);
+  await put(`${portal.at}/settings`, { inheritMode: true });
+});
+
+test("a subagent does not get past the tools its chat's mode switched off, with the setting off or on, and works at its chat's effort", { timeout: 60_000 }, async () => {
+  const mode = db.createCustomMode({ label: "Review only", description: "Cannot change the folder" });
+  db.updateCustomMode(mode.id, { thinking_level: "high" });
+  db.setCustomModeTools(mode.id, { off: ["bash", "write"], on: [] });
+  const reviewing = `custom/${mode.id}`;
+  /** The child chat's row, and the tools its pi was told it has. */
+  async function delegate(parent: string) {
+    // The person lowered the chat's effort after it was put in the mode.
+    db.createSession({ id: parent, title: parent, workspace: process.env.WORKSPACE_ROOT!, executor: "host", kind: "task", mode: reviewing, thinking_level: "low" });
+    const seen = childRequests.length;
+    await ask(parent, "Delegate it");
+    const [child] = db.childSessions(parent);
+    return { child: db.getSession(child.id), tools: childRequests[seen].tools.map((tool: any) => tool.function?.name) };
+  }
+  try {
+    assert.equal((await put(`${portal.at}/settings`, { inheritMode: false })).status, 200);
+    const standard = await delegate("review-off");
+    assert.equal(standard.child.mode, null);
+    assert.ok(standard.tools.includes("read"), "the rest of Standard is declared");
+    assert.ok(!standard.tools.includes("bash") && !standard.tools.includes("write"), "what the chat's mode took away is not");
+
+    assert.equal((await put(`${portal.at}/settings`, { inheritMode: true })).status, 200);
+    const same = await delegate("review-on");
+    assert.equal(same.child.mode, reviewing);
+    assert.ok(!same.tools.includes("bash") && !same.tools.includes("write"));
+    assert.equal(same.child.thinking_level, "low", "the chat's effort, not the mode's");
+  } finally {
+    await put(`${portal.at}/settings`, { inheritMode: true });
+  }
+});
+
 test("a subagent that read outside content marks its chat for good: the mark is in the chat's history, and holds when the chat's guard is made again", { timeout: 60_000 }, async () => {
   for (const mode of ["interrupt", "background"]) {
     assert.equal((await put(`${portal.at}/settings`, { mode })).status, 200);
