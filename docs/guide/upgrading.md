@@ -1258,6 +1258,23 @@ straight from schema 13 has, also needs what
 says for it, and an older backup what
 [Chats can have child chats](#chats-can-have-child-chats) says.
 
+## Chats an extension makes for nobody to attend
+
+An extension's server half can make a chat that nobody attends: for work the
+person does not watch, such as the answer to a document's comment (see
+[Child chats](/guide/extension-ui#child-chats)). Such a chat asks nobody
+anything: it has no `ask_question`, a dialog an extension opens in it is
+answered at once, and the guard refuses a call it holds rather than asking. A
+child chat can also start from the tools a new chat of its folder has, rather
+than from its parent's switches. The upgrade (schema 16) keeps both with the
+chat. Every chat there was is one a person attends, and every child chat keeps
+its parent's switches, as before; nothing is left for an extension, and nothing
+needs doing.
+
+**Going back.** From `portal-v15-….db` it is only putting the backup in as
+under [Going back](#going-back), and an older backup needs what
+[Sub-chats in the chat list](#sub-chats-in-the-chat-list) says for it.
+
 ## Subagents work in chats of their own
 
 A subagent no longer runs as a separate `pi` process: it works in a

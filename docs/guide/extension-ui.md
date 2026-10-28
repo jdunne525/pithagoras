@@ -968,10 +968,12 @@ restart the portal.
 | `router` | An Express router: the package's routes, at `/api/x/<package>/…`, behind the portal's login |
 | `http.json()`, `http.raw()`, `http.text()` | Body parsers, for the routes that want one |
 | `http.upgrade(handler)` | WebSocket upgrades under the package's routes |
+| `http.person(req)` | [Who is behind a request](#who-is-behind-a-request) to its routes, or an upgrade: `{ id, name, role }`, from the login it came with |
 | `http.endWithLogin(end)` | Ends a long response, such as a stream, when the login it was opened under ends (the password changed, single sign-on was set up anew), so what it showed is not shown to whoever signs in next. Returns what stops the watching, for a response that ended by itself |
 | `http.send(req, res, file, options?)` | [Sends a file](#sending-a-file) opened by `files.open` as the portal sends its own: a version, the part a player asks for, or to be saved |
-| `chats.get(id)`, `chats.list()` | A chat: `{ id, title, workspace, status, mode?, parent?, listed? }`. `list` leaves out the [child chats](#child-chats) made to be found by their id alone |
+| `chats.get(id)`, `chats.list()` | A chat: `{ id, title, workspace, status, mode?, parent?, listed?, unattended? }`. `list` gives the task chats as the sidebar lists them, pinned first and then the most recently active (a run that started or ended, a new title) first, and leaves out the chats a server half [made](#child-chats) to be found by their id alone |
 | `chats.folder(id)` | The folder the chat's pi works in, on this disk |
+| `chats.owner(id)` | [Whose a chat is](#whose-a-chat-is): its agent's home or its project's folder, as `folders.list()` gives it |
 | `chats.inFolder(folder)` | The sessions of every kind that work in a folder: tasks, and also routine runs, Agent-page and channel conversations and heartbeats, which `chats.list()` leaves out and which have the package's tools in their pi. One for each agent that has some there (what an agent can reach is the same from each of its sessions; none is removed, and a stored path can be a link an agent made) |
 | `chats.send(chatId, data)`, `chats.onOpen(fn)` | [Telling the pages open on a chat](#telling-the-pages-open-on-a-chat) |
 | `chats.on("started" \| "stopped" \| "deleted" \| "finished", fn)` | A chat's pi started or stopped; the chat was deleted; or it is finished: the run it was started for is over, and the portal stopped its pi for good, as for a routine run in a session of its own. A person who goes on with the chat starts its pi again (`started`). A pi stopped for being idle is not finished: it starts again with the next message |
@@ -982,7 +984,7 @@ restart the portal.
 | `tools.exceptions(names)` | [Who has its tools](#who-has-its-tools): the chats and routines where those tools are not what the default says |
 | `chats.offers(chatId, tool)` | How the chat's model is offered a tool now: `"direct"`, `"lazy"` (through the `tools` tool) or nothing (switched off, out of reach, or the chat's pi not running here). In a chat whose mode works through the code tool ([Code mode](/guide/sessions#modes)), `"direct"` means that a script calls the tool by its name, with no streamed arguments of its own |
 | `chats.hold(chatId)` | Keeps the chat's pi from being let go for being idle, or reloaded, while work goes on; returns what lets it go |
-| `chats.create(options)`, `chats.children(parent)`, `chats.prompt(chatId, message, options?)`, `chats.abort(chatId)`, `chats.remove(chatId)` | [Child chats](#child-chats): a chat of a chat, to give part of its work to, run until it answers, stopped and deleted |
+| `chats.create(options)`, `chats.children(parent)`, `chats.start(options)`, `chats.prompt(chatId, message, options?)`, `chats.lastAnswer(chatId)`, `chats.abort(chatId)`, `chats.remove(chatId)` | [Child chats](#child-chats): a chat of a chat, to give part of its work to, or a chat of an agent's or a project's folder; run until it answers, stopped and deleted |
 | `sandbox.run(chatId, argv, options?)`, `sandbox.spawnAs(chatId)`, `sandbox.on()` | [Running things as the chat's agent](#running-things-as-the-chat-s-agent) |
 | `sandbox.personEnv()` | The portal's environment for a process the person starts, such as a shell of their own: without the mark the agent's processes carry, so it is not listed as a job the agent left running |
 | `files.inside(base, rel)` | A path checked to be inside a folder |
@@ -1131,6 +1133,29 @@ A route can stream as well: write `text/event-stream`, or take an upgrade with
 `portal.http.upgrade((req, socket, head) => …)`, which the portal has already
 checked for the login and for the page it comes from. An answer held open is
 ended when the portal's password changes, as the portal's own streams are.
+
+#### Who is behind a request
+
+`portal.http.person(req)` says who is behind a request to the package's
+routes, or an upgrade under them, from the login it came with:
+`{ id, name, role }`, and nothing for one that is not signed in (the portal's
+login refuses such a request before it gets there). Every login to the portal
+is its owner's for now: `{ id: "owner", name, role: "primary" }`, called what
+People (see [People are a separate layer](/guide/security#people-are-a-separate-layer)) calls the person marked primary, and "Owner" while
+nobody is. Check `role` where a route makes the agents do something on a
+person's behalf, such as starting a chat: once there are logins with fewer
+rights, they say theirs here.
+
+```js
+portal.router.post("/comments/:id/answer", (req, res) => {
+  if (portal.http.person(req)?.role !== "primary") return res.status(403).json({ error: "Only the owner can ask the agent here" });
+  /* … */
+});
+```
+
+In a server half in a process of its own it is the same call: the portal says
+who it is on each request it hands on, in a header of its own, and drops a
+header of that name the request came with.
 
 ### Where it keeps things
 
@@ -1473,20 +1498,39 @@ portal.router.get("/chats/:id/picture", (req, res) => {
 ### The folders the agents work in
 
 `folders.list()` is every folder the agents work in, each once by its real
-path: every agent's home (`kind: "agent"`, named after its agent, `home` for
-the first, which the sidebar calls Home), every project (`kind: "project"`,
-named by its place under the workspace root), and every other folder a chat
-of any kind works in (`kind: "chat"`). A gallery of what the agents made looks
-through these. `folders.allowed(path)` says whether a folder, by its real
-path, is one of the kind they work in, the only kind to serve what they made
-from.
+path: every agent's home (`kind: "agent"`, named after its agent), every
+project (`kind: "project"`, named by its place under the workspace root), and
+every other folder a chat of any kind works in (`kind: "chat"`). A gallery of
+what the agents made looks through these. `folders.allowed(path)` says whether
+a folder, by its real path, is one of the kind they work in, the only kind to
+serve what they made from.
+
+Two agents' homes are marked:
+
+- `home: true` is the default agent's home: the first agent, which cannot be
+  deleted, and the one a chat, a channel or a routine goes to when none is
+  named (a chat that is in no agent's home runs as its user when the
+  [sandbox](/guide/sandbox) is on).
+- `newChats: true` is the home of the agent the **New** button starts the
+  person's chats with: the first one, unless the person turned on **New chats
+  start here** on another agent's page. The sidebar's house icon marks it.
+  Something new of the person's that belongs to no chat, such as a document
+  made from a tab of the extension's, goes here, as a new chat would.
+
+```js
+const folders = portal.folders.list();
+const where = folders.find((one) => one.newChats) ?? folders.find((one) => one.home);
+```
+
+The second find is for the moment the home is out of reach (a home that is not
+there is not listed).
 
 `folders.label(folder)` is what the person calls a folder, by its real path,
-whether or not `list` has it now: `{ name, home? }`, its agent's name for an
-agent's home (`home` for the first), its place under the workspace root for a
-folder inside it, and its last part otherwise. It is for a folder something
-was kept for after the last chat in it went: Media's gallery names the folder
-of a deleted chat's pictures so.
+whether or not `list` has it now: `{ name, home?, newChats? }`, its agent's name
+for an agent's home (with the marks above), its place under the workspace root
+for a folder inside it, and its last part otherwise. It is for a folder
+something was kept for after the last chat in it went: Media's gallery names the
+folder of a deleted chat's pictures so.
 
 `folders.on("removed", (folder) => …)` is told when the portal deletes one: a
 project with its folder, or an agent with its home. `folder` is where it really
@@ -1495,6 +1539,28 @@ was not running then, because it was switched off, removed and installed again,
 or failed to start, is told when it next starts, once for each folder, as soon
 as its default export is done. One that starts for the first time is told of
 none deleted before: it kept nothing of them.
+
+#### Whose a chat is
+
+`chats.owner(id)` says whose a chat is, for any chat (a person's, a child, a
+routine run, a channel conversation): the agent whose home it works in
+(`kind: "agent"`), else the project it works in, a folder inside the project
+included (`kind: "project"`). The answer is that folder as `folders.list()`
+gives it: `{ path, name, kind, home?, newChats? }`. An agent's chat is told by
+the same rule the [sandbox](/guide/sandbox) picks the user a chat runs as by:
+the folder stored for the chat, not where a link in it leads. Its project is
+found as the project's settings are, by where its folder really leads. A chat
+in a project is the project's, whichever agent the project is linked to. There
+is nothing for a chat that is in neither (the workspace root itself, or the
+folder kept from a deleted agent, which the sandbox runs as the first agent),
+for one whose agent's home or project folder is gone, and for an id no chat
+has.
+
+```js
+// A document a chat asked for goes where the chat's agent or project keeps its things.
+const owner = portal.chats.owner(chatId);
+const folder = owner?.path ?? portal.folders.list().find((one) => one.home)?.path;
+```
 
 ### Telling the pages open on a chat
 
@@ -2320,7 +2386,7 @@ portal.chats.extend((pi, chat) => {
 });
 ```
 
-- **`create({ parent, title, mode?, model?, listed? })`** makes it and returns
+- **`create({ parent, title, mode?, model?, listed?, unattended?, tools? })`** makes it and returns
   it as a `Chat`, with `parent` set. Listed, it shows under its parent's row in
   the sidebar and on the Sessions page, as a
   [sub-chat](/guide/sessions#sub-chats), and its parent's row says when it
@@ -2345,12 +2411,36 @@ portal.chats.extend((pi, chat) => {
   who asked, and the tools the person switched off or on in the parent. It is
   held to them as they stand now: a tool switched off in the parent since is off
   in the child before its next message, and one switched on in the parent later
-  is not given to it. A dialog
+  is not given to it. With **`tools: "defaults"`** it has the tools a new chat
+  of its folder has in its mode instead (what Settings → Tools, its agent and
+  its project say), and none of its parent's switches: for work of the
+  package's that is not the conversation the person switched them for. Its mode
+  is its parent's unless `mode` names another, and that mode's layer holds as
+  in any chat: left in a parent's mode that switches the shell off, it has no
+  shell either; put in another mode, the tools its parent's mode took away are
+  not taken from it. An `unattended` child starts from
+  the defaults unless it is given `tools: "parent"`. A dialog
   it opens, and a question the guard asks, are drawn on its own page, where its
   parent's would be: for a child of a chat of the portal's pages (or of the
   agent's page) nobody may be looking, so say where it waits; for a child of a
   conversation on a channel or of a routine run, where nobody can answer, the
   guard refuses for the child too, as it does for its parent.
+- **`unattended: true`** makes a chat nobody attends, wherever its parent is:
+  for work the person does not watch, such as an answer the extension posts
+  elsewhere. It is not offered `ask_question`; every dialog an extension opens
+  in it is answered at once with its no-answer value (a confirm with `false`, a
+  select or an input with nothing), as in a routine run; and a call the guard
+  holds after a suspected prompt injection is refused rather than put to the
+  person. The agent gets each refusal as the tool's result and goes on, where a
+  dialog on a page nobody opens would hold its run for good. It has no routine
+  tools either, as a routine run has none, and it starts from the folder's
+  tools (`tools: "defaults"`) unless told otherwise. It is kept with the chat, so a pi
+  started for it after a restart is started the same way, and the `Chat` says
+  `unattended: true`. A child of an unattended chat (one
+  [started](#a-chat-of-a-folder) so) is unattended itself, whoever makes it and
+  whether or not it says so, as the subagent tool does not: its dialogs would go
+  to its parent's page, which nobody opens. A child of a chat that is not listed
+  is not listed either, or it would stand in the lists on its own.
 - **`prompt(chatId, message, { steer? })`** resolves once the run that takes
   the message in has ended, with `{ status, answer, marked?, error? }`: `status` is
   `"done"`, `"stopped"` (by `abort`, by the person's Stop, or because the chat
@@ -2368,11 +2458,29 @@ portal.chats.extend((pi, chat) => {
   works, a message waits for the run to end, as the person's does; with
   `steer`, it is taken after the step the run is on, and both prompts resolve
   as that run ends. A run that fails resolves as an error, and so does a
-  command the child's speaker may not run; `prompt` throws only for a chat that
-  is not a child the package made, or a message with no words. A command the
+  command the child's speaker may not run; `prompt` throws only for a chat the
+  package did not make (a child, or one it [started](#a-chat-of-a-folder)), or a
+  message with no words. A command the
   speaker may run (`/compact`) is no message of the chat: `prompt` resolves as
   `done` at once, with no answer, when it started no run, or when the run it
   started ends.
+- **`lastAnswer(chatId)`** says where the last run stands, from what the
+  portal keeps of the chat: `{ status, answer, marked?, error? }`, with
+  `status` `"running"` while it goes on and else as for `prompt` (a run the
+  portal's restart cut off is `"stopped"`, with an `error` that says so), and
+  nothing for a chat that never ran. It throws for a chat the package did
+  not make, and, saying "There is no chat …", for one that is gone (the person
+  deleted it, or it went with its project or agent while the half was away),
+  as `prompt`, `abort` and `remove` do. It holds across a restart of the server
+  half or of the portal: a half that lost the `prompt` it waited on tells a
+  run that goes on from one that ended while it was away, and has its answer.
+  `marked` is there while the guard holds the chat as marked, by a result it
+  flagged that the person has not trusted, also when no pi runs for it now:
+  hold such an answer back as outside content. For a child, its parent is
+  marked with it, as `prompt` marks it, in the guard that runs for the parent
+  now. After a restart none does until the parent's pi starts again, and that
+  mark is not kept: hand a marked answer on in the flagged form described under
+  `prompt`, which the parent's guard finds again in its history.
 - **`abort(chatId)`** stops its run, as the person's Stop does.
   **`remove(chatId)`** deletes it, its run stopped first; its transcript and
   files go, and `chats.on("deleted")` hears it once. While its parent is being
@@ -2391,7 +2499,45 @@ portal.chats.extend((pi, chat) => {
   names the child on its [protocol](/guide/extensions#the-subagent-protocol)
   start (`chat`).
 - **In a process of its own** (`"isolated": true`), `create` is answered at
-  once (`children` too) and the others later, as the other calls are.
+  once (`children`, `start` and `lastAnswer` too) and the others later, as the other calls are.
+
+#### A chat of a folder
+
+Work of the package's own that belongs to no chat of the person's, such as
+the answer to a comment in a document, gets a chat of its own:
+**`start({ folder, title, listed?, unattended? })`** makes a task chat of an
+agent's or a project's folder (`folder` is its path as `folders.list()` gives
+it), with no parent, as one the person starts there with "+": in the primary
+role, in Standard mode on the default model, with the tools a new chat there
+has. It throws for a folder that is not an agent's or a project's (one inside
+them included) and for no title. `listed` and `unattended` are as for a child,
+except that `listed: false` needs `unattended: true`: a child that waits on the
+person says so on its parent's row, and a chat with no parent that is in no
+list has no row to say it on. It is the package's as a child is: only it sends
+it messages (`prompt`, as the primary user), stops it (`abort`) and deletes it
+(`remove`). Deleting the project or the agent deletes it with the folder's
+other chats, listed or not. A listed one that is working keeps the delete from
+going through until the person stops it, as any chat does; an unlisted one,
+which the person cannot find, is stopped with the delete.
+
+```js
+const [folder] = portal.folders.list().filter((one) => one.kind === "agent");
+const chat = portal.chats.start({ folder: folder.path, title: "A comment on report.docx", listed: false, unattended: true });
+const run = await portal.chats.prompt(chat.id, "Answer the comment comment-7 in report.docx: read it with read_comment.");
+```
+
+Keep the chat's id where the half keeps its own data: an unlisted chat is in
+no list, and `children` finds children only, so the id is how the half reaches
+it again after a restart, for `lastAnswer` or to `remove` it.
+
+What the chat is sent is the primary user's own words, and nothing marks the
+chat for them. So words from a document or from another person, such as the
+comment itself, do not go into the message: they are outside content, which
+the agent reads through a tool of the package's with `guard: { outside: true }`
+(as in the example), and the guard wraps and flags it as it does a web page. A
+pi tool that starts or prompts a chat declares `guard: { acts: ["delegate"] }`,
+as the subagent tool does, so that a chat that read something suspicious
+cannot hand its work to a fresh chat the guard holds nothing in.
 
 ## Panels and commands
 
