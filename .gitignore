@@ -29,3 +29,5 @@ xscm.scm
 core/server/test/fixtures/*.db-shm
 core/server/test/fixtures/*.db-wal
 __pycache__/
+tmp/
+core/tmp_probe_folders.mjs
