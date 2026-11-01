@@ -18,6 +18,37 @@ const P = await import("../dist/projects.js");
 const fresh = (name) => { const dir = path.join(home, name); mkdirSync(dir, { recursive: true }); return dir; };
 const left = (dir) => readdirSync(dir).filter((n) => n.endsWith(".tmp"));
 const mode = (file) => statSync(file).mode & 0o777;
+// Windows has no file modes of its own, and makes links only with a privilege the machine it runs on commonly
+// does not have: the tests that are proved with those are skipped where they are not.
+const MODES = process.platform !== "win32";
+const LINKS = (() => {
+  const probe = path.join(home, "link-probe");
+  mkdirSync(probe, { recursive: true });
+  try {
+    writeFileSync(path.join(probe, "a-file"), "");
+    mkdirSync(path.join(probe, "a-folder"));
+    symlinkSync(path.join(probe, "a-file"), path.join(probe, "file-link"));
+    symlinkSync(path.join(probe, "a-folder"), path.join(probe, "folder-link"), "junction");
+    return true;
+  } catch {
+    return false;
+  }
+})();
+/** A link, in the shape this machine makes one: a junction for a folder, where a link of a folder wants a privilege. */
+function linkTo(target, link) {
+  let kind = "file";
+  try {
+    if (statSync(target).isDirectory()) kind = "junction";
+  } catch {
+    kind = "file";
+  }
+  try {
+    symlinkSync(target, link, kind);
+  } catch (e) {
+    if (e.code !== "EPERM") throw e;
+    symlinkSync(target, link);
+  }
+}
 
 /**
  * Runs `code` as a program that may write no file larger than `bytes`: a full
@@ -35,7 +66,7 @@ function underLimit(bytes, code) {
 const FAILS = `try { RUN; console.log("wrote"); } catch (e) { console.log(e.code ?? e.message); }`;
 const big = "x".repeat(200_000);
 
-test("a file is put in place whole, with the mode asked for or the one it had", () => {
+test("a file is put in place whole, with the mode asked for or the one it had", { skip: !MODES && 'the modes a file has are a POSIX thing' }, () => {
   const dir = fresh("atomic");
   const file = path.join(dir, "a.txt");
   writeFileAtomic(file, "one");
@@ -49,11 +80,11 @@ test("a file is put in place whole, with the mode asked for or the one it had", 
   assert.deepEqual(left(dir), []);
 });
 
-test("a link at the name is replaced, not written through", () => {
+test("a link at the name is replaced, not written through", { skip: !LINKS && 'no links are made on this machine' }, () => {
   const dir = fresh("atomic-link");
   const target = path.join(dir, "elsewhere");
   writeFileSync(target, "not yours");
-  symlinkSync(target, path.join(dir, "linked"));
+  linkTo(target, path.join(dir, "linked"));
   writeFileAtomic(path.join(dir, "linked"), "new");
   assert.equal(readFileSync(target, "utf8"), "not yours");
   assert.equal(readFileSync(path.join(dir, "linked"), "utf8"), "new");
@@ -129,18 +160,18 @@ test("a file the page saw as missing is made, unless the agent has made it since
   assert.throws(() => writeAgentFile("WATCH.md", "again", dir, 0), (e) => e instanceof FileError && e.code === "conflict");
 });
 
-test("a link in place of an agent's file is neither read nor written through", () => {
+test("a link in place of an agent's file is neither read nor written through", { skip: !LINKS && 'no links are made on this machine' }, () => {
   const dir = fresh("agent-link");
   const secret = path.join(home, "portal-secret.db");
   writeFileSync(secret, "the database");
-  symlinkSync(secret, path.join(dir, "SOUL.md"));
+  linkTo(secret, path.join(dir, "SOUL.md"));
   assert.equal(readAgentFile("SOUL.md", dir), "");
   assert.equal(agentFileStatus(dir).files.find((f) => f.name === "SOUL.md").content, "");
   assert.throws(() => writeAgentFile("SOUL.md", "overwritten", dir), (e) => e instanceof FileError && e.code === "invalid");
   assert.equal(readFileSync(secret, "utf8"), "the database");
   // One inside the folder is no better: writing "through" it would change what it leads to.
   writeFileSync(path.join(dir, "MEMORY.md"), "memory\n");
-  symlinkSync(path.join(dir, "MEMORY.md"), path.join(dir, "WATCH.md"));
+  linkTo(path.join(dir, "MEMORY.md"), path.join(dir, "WATCH.md"));
   assert.throws(() => writeAgentFile("WATCH.md", "overwritten", dir), (e) => e instanceof FileError && e.code === "invalid");
   assert.equal(readFileSync(path.join(dir, "MEMORY.md"), "utf8"), "memory\n");
   // The wizard leaves it too, and does not write through it.
@@ -149,10 +180,10 @@ test("a link in place of an agent's file is neither read nor written through", (
   assert.equal(readFileSync(secret, "utf8"), "the database");
 });
 
-test("a link that leads nowhere is something there: the wizard keeps it, and so the agent counts as set up", () => {
+test("a link that leads nowhere is something there: the wizard keeps it, and so the agent counts as set up", { skip: !LINKS && 'no links are made on this machine' }, () => {
   // An agent under the container executor leaves SOUL.md as a link by the container's path, which is no path here.
   const dir = fresh("agent-dangling");
-  for (const name of ["SOUL.md", "PrimaryUser.md", "MEMORY.md"]) symlinkSync("/home/agent/notes/missing.md", path.join(dir, name));
+  for (const name of ["SOUL.md", "PrimaryUser.md", "MEMORY.md"]) linkTo("/home/agent/notes/missing.md", path.join(dir, name));
   assert.equal(isInitialised(dir), true, "the wizard cannot write through the links, so it cannot be asked for");
   assert.equal(agentFileStatus(dir).initialised, true);
   // Said of each, so that the page shows a link as one and not as an empty editor that cannot be saved.
@@ -266,11 +297,11 @@ test("a project folder is out of the way at once and removed after, and a stop i
   assert.deepEqual(readdirSync(root).sort(), [".deleting-0123456789abc", ".deleting-later", "kept"]);
 });
 
-test("deleting and renaming refuse the same places", async () => {
+test("deleting and renaming refuse the same places", { skip: !LINKS && 'no links are made on this machine' }, async () => {
   const dir = fresh("entry-place");
   const outside = fresh("entry-place-outside");
   writeFileSync(path.join(outside, "precious"), "keep");
-  symlinkSync(outside, path.join(dir, "out"));
+  linkTo(outside, path.join(dir, "out"));
   writeFileSync(path.join(dir, "file"), "x");
   const bad = ["", ".", "..", "../x", "out/precious", "file\0", "missing", "sub/../.."];
   for (const rel of bad) {

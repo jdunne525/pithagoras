@@ -3,6 +3,41 @@ import { existsSync, linkSync, mkdirSync, readFileSync, symlinkSync, writeFileSy
 import path from 'node:path';
 import test from 'node:test';
 import { scratch } from './server-harness.mjs';
+import * as gateFs from "node:fs";
+import gatePath from "node:path";
+import gateOs from "node:os";
+/**
+ * Links are made to prove these tests, and Windows lets them be made only with a privilege the machine it
+ * runs on commonly does not have: where they cannot be made, the tests proved with them are skipped.
+ */
+const LINKS = (() => {
+  const probe = gateFs.mkdtempSync(gatePath.join(gateOs.tmpdir(), "links-probe-"));
+  try {
+    gateFs.writeFileSync(gatePath.join(probe, "a-file"), "");
+    gateFs.mkdirSync(gatePath.join(probe, "a-folder"));
+    gateFs.symlinkSync(gatePath.join(probe, "a-file"), gatePath.join(probe, "file-link"));
+    gateFs.symlinkSync(gatePath.join(probe, "a-folder"), gatePath.join(probe, "folder-link"), "junction");
+    return true;
+  } catch {
+    return false;
+  }
+})();
+/** A link, in the shape this machine makes one: a junction for a folder, where a link of a folder wants a privilege. */
+function linkTo(target, link) {
+  let kind = "file";
+  try {
+    if (gateFs.statSync(target).isDirectory()) kind = "junction";
+  } catch {
+    kind = "file";
+  }
+  try {
+    gateFs.symlinkSync(target, link, kind);
+  } catch (e) {
+    if (e.code !== "EPERM") throw e;
+    gateFs.symlinkSync(target, link);
+  }
+}
+
 const P = await import('../dist/projects.js');
 
 const root = () => scratch('projects-');
@@ -47,11 +82,11 @@ test('names that are taken, reserved or unusable are refused', () => {
   assert.ok(!existsSync(path.join(path.dirname(r), 'escape')));
 });
 
-test('a name from outside cannot reach beyond the root', () => {
+test('a name from outside cannot reach beyond the root', { skip: !LINKS && 'no links are made on this machine' }, () => {
   const r = root();
   const outside = scratch('outside-');
   writeFileSync(path.join(outside, 'precious'), 'keep');
-  symlinkSync(outside, path.join(r, 'link'));
+  linkTo(outside, path.join(r, 'link'));
   mkdirSync(path.join(r, 'real'));
   for (const bad of ['../x', 'a/b', '..', '.', '.hidden', 'a\\b', '']) {
     assert.equal(code(() => P.getProject(r, bad)), 'invalid', `getProject(${JSON.stringify(bad)})`);
@@ -92,10 +127,10 @@ test('a chat is named after its first line, briefly, and never after a command',
   assert.equal(P.NEW_CHAT_TITLE, 'New chat');
 });
 
-test('a link in the root is not listed as a project, since every operation on it would refuse', () => {
+test('a link in the root is not listed as a project, since every operation on it would refuse', { skip: !LINKS && 'no links are made on this machine' }, () => {
   const r = root(); const outside = root();
   mkdirSync(path.join(r, 'real'));
-  symlinkSync(outside, path.join(r, 'linked'));
+  linkTo(outside, path.join(r, 'linked'));
   assert.deepEqual(P.listProjects(r).map((p) => p.name), ['real']);
 });
 
@@ -122,12 +157,12 @@ test('saving a long run of blanks is quick', () => {
   assert.ok(Date.now() - started < 1000);
 });
 
-test('a link in place of AGENTS.md is neither read nor written through', () => {
+test('a link in place of AGENTS.md is neither read nor written through', { skip: !LINKS && 'no links are made on this machine' }, () => {
   const r = root(); const outside = root();
   P.createProject(r, 'linked');
   const target = path.join(outside, 'secret');
   writeFileSync(target, 'not yours');
-  symlinkSync(target, path.join(r, 'linked', 'AGENTS.md'));
+  linkTo(target, path.join(r, 'linked', 'AGENTS.md'));
   assert.equal(code(() => P.readInstructions(r, 'linked')), 'invalid');
   assert.equal(code(() => P.writeInstructions(r, 'linked', 'overwritten')), 'invalid');
   assert.equal(readFileSync(target, 'utf8'), 'not yours');

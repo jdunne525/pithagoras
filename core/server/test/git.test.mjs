@@ -3,10 +3,48 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { scratch } from "./server-harness.mjs";
+import { scratch, fakeProgram } from "./server-harness.mjs";
 
 // A home of its own: who commits, what a new repository's branch is called,
 // and no config of the person running the tests.
+import * as gateFs from "node:fs";
+import gatePath from "node:path";
+import gateOs from "node:os";
+/**
+ * Links are made to prove these tests, and Windows lets them be made only with a privilege the machine it
+ * runs on commonly does not have: where they cannot be made, the tests proved with them are skipped.
+ */
+/** The sandbox's agents are users, and users are a POSIX thing: where the machine has none, the tests about them are skipped. */
+const POSIX = process.platform !== "win32" && typeof process.getuid === "function";
+
+const LINKS = (() => {
+  const probe = gateFs.mkdtempSync(gatePath.join(gateOs.tmpdir(), "links-probe-"));
+  try {
+    gateFs.writeFileSync(gatePath.join(probe, "a-file"), "");
+    gateFs.mkdirSync(gatePath.join(probe, "a-folder"));
+    gateFs.symlinkSync(gatePath.join(probe, "a-file"), gatePath.join(probe, "file-link"));
+    gateFs.symlinkSync(gatePath.join(probe, "a-folder"), gatePath.join(probe, "folder-link"), "junction");
+    return true;
+  } catch {
+    return false;
+  }
+})();
+/** A link, in the shape this machine makes one: a junction for a folder, where a link of a folder wants a privilege. */
+function linkTo(target, link) {
+  let kind = "file";
+  try {
+    if (gateFs.statSync(target).isDirectory()) kind = "junction";
+  } catch {
+    kind = "file";
+  }
+  try {
+    gateFs.symlinkSync(target, link, kind);
+  } catch (e) {
+    if (e.code !== "EPERM") throw e;
+    gateFs.symlinkSync(target, link);
+  }
+}
+
 const home = scratch("pithagoras-git-");
 process.env.HOME = home;
 process.env.GIT_CONFIG_GLOBAL = path.join(home, ".gitconfig");
@@ -18,23 +56,33 @@ writeFileSync(process.env.GIT_CONFIG_GLOBAL, "[user]\n\tname = Tester\n\temail =
 const bin = path.join(home, "bin");
 mkdirSync(bin);
 const ghLog = path.join(home, "gh.log");
-writeFileSync(
-  path.join(bin, "gh"),
-  `#!/bin/sh
-input=$(cat)
-printf '%s\\n' "$*" >> "${ghLog}"
-printf 'STDIN:%s\\n' "$input" >> "${ghLog}"
-case "$1 $2" in
-  "repo view") echo '{"nameWithOwner":"me/demo","url":"https://github.com/me/demo","defaultBranchRef":{"name":"main"}}' ;;
-  "pr create") echo "https://github.com/me/demo/pull/7" ;;
-  "pr list") echo '[{"number":7,"title":"Add a thing","state":"OPEN"}]' ;;
-  "pr view") if [ -z "$3" ] || [ "$3" = "--json" ]; then echo "no pull requests found for branch \\"main\\"" >&2; exit 1; fi; echo '{"number":'"$3"',"title":"Add a thing"}' ;;
-  *) echo "unknown: $*" >&2; exit 1 ;;
-esac
-`,
-);
-chmodSync(path.join(bin, "gh"), 0o755);
-process.env.PATH = `${bin}:${process.env.PATH}`;
+// The answers GitHub's own CLI would give, in a Node program that writes down what it was asked.
+fakeProgram(bin, "gh", `
+const { appendFileSync, readFileSync } = require("node:fs");
+const log = ${JSON.stringify(ghLog)};
+const args = process.argv.slice(2);
+let input = "";
+if (!process.stdin.isTTY) { try { input = readFileSync(0, "utf8"); } catch { input = ""; } }
+appendFileSync(log, args.join(" ") + "\\n");
+appendFileSync(log, "STDIN:" + input + "\\n");
+const key = args.slice(0, 2).join(" ");
+if (key === "repo view") process.stdout.write('{"nameWithOwner":"me/demo","url":"https://github.com/me/demo","defaultBranchRef":{"name":"main"}}\\n');
+else if (key === "pr create") process.stdout.write("https://github.com/me/demo/pull/7\\n");
+else if (key === "pr list") process.stdout.write('[{"number":7,"title":"Add a thing","state":"OPEN"}]\\n');
+else if (key === "pr view") {
+  const third = args[2];
+  if (!third || third === "--json") {
+    process.stderr.write('no pull requests found for branch "main"\\n');
+    process.exit(1);
+  }
+  process.stdout.write('{"number":' + third + ',"title":"Add a thing"}\\n');
+} else {
+  process.stderr.write("unknown: " + args.join(" ") + "\\n");
+  process.exit(1);
+}
+`);
+process.env.GH_STUB_LOG = ghLog;
+process.env.PATH = `${bin}${path.delimiter}${process.env.PATH}`;
 
 const g = await import("../dist/git.js");
 
@@ -72,7 +120,7 @@ test("what changed: staged and not, new files, renames and names with spaces, wi
   assert.deepEqual(by["staged.txt"].staged, { added: 1, removed: 0, binary: false });
 });
 
-test("a status too long to read whole is cut, says so, keeps what is changed, and lists no half of a file", async () => {
+test("a status too long to read whole is cut, says so, keeps what is changed, and lists no half of a file", { skip: process.platform === "win32" && "paths 500 characters long are past what Windows lets git see" }, async () => {
   const dir = repo();
   writeFileSync(path.join(dir, "a.txt"), "one\nTWO\nthree\n");
   // Paths of 750 characters: fewer files than are ever listed, and more than a refresh should read.
@@ -118,12 +166,22 @@ test("a refresh reads what to turn off once, not before every command", async ()
   // A git that writes down how it was called, first on the PATH.
   const logged = path.join(home, `calls${n}`);
   const wrap = path.join(home, `wrap${n}`);
-  mkdirSync(wrap);
-  const real = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
-  writeFileSync(path.join(wrap, "git"), `#!/bin/sh\necho "$*" >> ${logged}\nexec ${real} "$@"\n`);
-  chmodSync(path.join(wrap, "git"), 0o755);
+  // The git this machine has, found before the stand-in goes first on the PATH.
+  const real = (process.platform === "win32" ? execFileSync("where", ["git"], { encoding: "utf8" }) : execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }))
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+  fakeProgram(wrap, "git", `
+const { appendFileSync, spawnSync } = require("node:fs");
+const args = process.argv.slice(2);
+appendFileSync(process.env.GIT_STUB_LOG, args.join(" ") + "\\n");
+const r = spawnSync(process.env.GIT_STUB_REAL, args, { stdio: "inherit" });
+process.exit(r.status === null ? 1 : r.status);
+`);
   const saved = process.env.PATH;
-  process.env.PATH = `${wrap}:${saved}`;
+  process.env.PATH = `${wrap}${path.delimiter}${process.env.PATH}`;
+  process.env.GIT_STUB_LOG = logged;
+  process.env.GIT_STUB_REAL = real;
   try {
     const r = await open(dir);
     await g.status(r);
@@ -131,6 +189,8 @@ test("a refresh reads what to turn off once, not before every command", async ()
     assert.equal(calls.filter((c) => c.includes("--get-regexp ^filter")).length, 1, calls.join("\n"));
   } finally {
     process.env.PATH = saved;
+    delete process.env.GIT_STUB_LOG;
+    delete process.env.GIT_STUB_REAL;
   }
 });
 
@@ -353,7 +413,7 @@ test("unsaved work: a folder inside a repository counts what that repository wou
   assert.equal(await g.unsavedWork(loose), null);
 });
 
-test("unsaved work: a folder that cannot be listed is not taken for an empty one", { skip: process.getuid?.() === 0 && "root reads any folder" }, async () => {
+test("unsaved work: a folder that cannot be listed is not taken for an empty one", { skip: (process.getuid?.() === 0 && "root reads any folder") || (!POSIX && 'users, the modes and the owners a file has are a POSIX thing') }, async () => {
   const folder = path.join(home, `locked${++n}`);
   const shut = path.join(folder, "shut");
   mkdirSync(shut, { recursive: true });
@@ -365,7 +425,7 @@ test("unsaved work: a folder that cannot be listed is not taken for an empty one
   }
 });
 
-test("unsaved work in a delete from the Files panel: a file or a link goes as it is, a clone's commits are asked about", async () => {
+test("unsaved work in a delete from the Files panel: a file or a link goes as it is, a clone's commits are asked about", { skip: !LINKS && 'no links are made on this machine' }, async () => {
   const folder = path.join(home, `panel${++n}`);
   mkdirSync(folder);
   const api = path.join(folder, "api");
@@ -382,7 +442,7 @@ test("unsaved work in a delete from the Files panel: a file or a link goes as it
   // What is picked is what goes: a file with changes, a link to the clone.
   writeFileSync(path.join(api, "a.txt"), "edited again\n");
   assert.equal(await g.unsavedIn(home, path.join(api, "a.txt")), null);
-  symlinkSync(api, path.join(folder, "link"));
+  linkTo(api, path.join(folder, "link"));
   assert.equal(await g.unsavedIn(home, path.join(folder, "link")), null);
   // A folder in the clone: only what is changed in it, and the commits stay with the repository.
   assert.deepEqual(await g.unsavedIn(home, path.join(api, "src")), { changed: 0, unpushed: 0, stashes: 0 });

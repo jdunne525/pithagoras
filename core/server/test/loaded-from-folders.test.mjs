@@ -10,6 +10,41 @@ import { IN_PLACE, IN_PROJECTS, LOADED_IN_FOLDERS, allowed, conversation, folder
 // What pi, the MCP adapter, the heartbeat and the portal load out of a folder is said once, in
 // pi/loaded-from-folders.ts (see loaded-from-folders-harness.mjs for how the tests walk it). The walk of the links is
 // in loaded-from-folders-links.test.mjs and loaded-from-folders-capitals.test.mjs.
+import * as gateFs from "node:fs";
+import gatePath from "node:path";
+import gateOs from "node:os";
+/**
+ * Links are made to prove these tests, and Windows lets them be made only with a privilege the machine it
+ * runs on commonly does not have: where they cannot be made, the tests proved with them are skipped.
+ */
+const LINKS = (() => {
+  const probe = gateFs.mkdtempSync(gatePath.join(gateOs.tmpdir(), "links-probe-"));
+  try {
+    gateFs.writeFileSync(gatePath.join(probe, "a-file"), "");
+    gateFs.mkdirSync(gatePath.join(probe, "a-folder"));
+    gateFs.symlinkSync(gatePath.join(probe, "a-file"), gatePath.join(probe, "file-link"));
+    gateFs.symlinkSync(gatePath.join(probe, "a-folder"), gatePath.join(probe, "folder-link"), "junction");
+    return true;
+  } catch {
+    return false;
+  }
+})();
+/** A link, in the shape this machine makes one: a junction for a folder, where a link of a folder wants a privilege. */
+function linkTo(target, link) {
+  let kind = "file";
+  try {
+    if (gateFs.statSync(target).isDirectory()) kind = "junction";
+  } catch {
+    kind = "file";
+  }
+  try {
+    gateFs.symlinkSync(target, link, kind);
+  } catch (e) {
+    if (e.code !== "EPERM") throw e;
+    gateFs.symlinkSync(target, link);
+  }
+}
+
 test("every name on the list is held, in every folder a conversation or a look runs in, whoever else is speaking there", () => {
   assert.ok(LOADED_IN_FOLDERS.length >= 10);
   for (const role of ["colleague", "guest"]) {
@@ -51,7 +86,7 @@ test("what the rule is for goes through: notes, the shared file, and names that 
   }
 });
 
-test("a link inside a folder that is loaded whole leads to a place that is loaded as well, link in link, wherever that folder is", () => {
+test("a link inside a folder that is loaded whole leads to a place that is loaded as well, link in link, wherever that folder is", { skip: !LINKS && 'no links are made on this machine' }, () => {
   let n = 0;
   const made = [];
   for (const [label, dir] of Object.entries(folders)) {
@@ -64,8 +99,8 @@ test("a link inside a folder that is loaded whole leads to a place that is loade
       const inside = path.join(dir, entry.name);
       rmSync(inside, { force: true, recursive: true }); // a link there from the test before, which leads nowhere yet
       mkdirSync(inside, { recursive: true });
-      symlinkSync(path.relative(inside, behind), path.join(inside, "skills"));
-      symlinkSync(lib, path.join(behind, "deploy"));
+      linkTo(path.relative(inside, behind), path.join(inside, "skills"));
+      linkTo(lib, path.join(behind, "deploy"));
       made.push({ label: `${entry.name} in ${label}`, written: path.join(behind, "release", "SKILL.md"), nested: path.join(lib, "SKILL.md"), beside: path.join(path.dirname(behind), "notes.md") });
     }
   }
@@ -82,7 +117,7 @@ test("a link inside a folder that is loaded whole leads to a place that is loade
     const project = path.join(folder, "lib", `${n++}`);
     mkdirSync(path.join(project, "foo"), { recursive: true });
     mkdirSync(path.join(place, "skills"), { recursive: true });
-    symlinkSync(path.join(project, "foo"), path.join(place, "skills", "foo"));
+    linkTo(path.join(project, "foo"), path.join(place, "skills", "foo"));
     for (const role of ["colleague", "guest"]) {
       assert.equal(refused(guardAs(role, conversation), "write", path.join(project, "foo", "SKILL.md")), true, `${role}: a link inside ${place}`);
       assert.equal(allowed(guardAs(role, conversation), "write", path.join(project, "notes.md")), true, `${role}: beside it`);
@@ -95,7 +130,7 @@ const manyFolders = (dir, count) => {
   for (let i = 0; i < count; i++) mkdirSync(path.join(dir, `d${i}`), { recursive: true });
 };
 
-test("a big package in one place does not hide a link beside it, in that place or in another", () => {
+test("a big package in one place does not hide a link beside it, in that place or in another", { skip: !LINKS && 'no links are made on this machine' }, () => {
   let n = 0;
   const behind = () => path.join(folder, "starve", `${n++}`);
   const made = [];
@@ -105,7 +140,7 @@ test("a big package in one place does not hide a link beside it, in that place o
     const ext = behind();
     mkdirSync(ext, { recursive: true });
     mkdirSync(path.join(agentDir, "extensions"), { recursive: true });
-    symlinkSync(ext, path.join(agentDir, "extensions", "my-ext"));
+    linkTo(ext, path.join(agentDir, "extensions", "my-ext"));
     manyFolders(path.join(agentDir, "git", "example.test", "big-repo"), IN_PLACE + 100);
     made.push({ label: "a link in pi's agent folder, beside a big git package", written: path.join(ext, "index.ts"), beside: path.join(path.dirname(ext), "notes.md") });
 
@@ -113,13 +148,13 @@ test("a big package in one place does not hide a link beside it, in that place o
     const a = path.join(root, "starve-a");
     mkdirSync(path.join(a, "tools", "ext"), { recursive: true });
     mkdirSync(path.join(a, ".pi", "extensions"), { recursive: true });
-    symlinkSync("../../tools/ext", path.join(a, ".pi", "extensions", "ext"));
+    linkTo("../../tools/ext", path.join(a, ".pi", "extensions", "ext"));
     manyFolders(path.join(a, ".pi", "git", "example.test", "big-repo"), IN_PLACE + 100);
     made.push({ label: "a link in a project's .pi, beside a big git package", written: path.join(a, "tools", "ext", "x.ts"), beside: path.join(a, "tools", "notes.md") });
     const b = path.join(root, "starve-b");
     mkdirSync(path.join(b, ".claude", "skills"), { recursive: true });
     mkdirSync(path.join(b, ".agents"), { recursive: true });
-    symlinkSync("../.claude/skills", path.join(b, ".agents", "skills"));
+    linkTo("../.claude/skills", path.join(b, ".agents", "skills"));
     made.push({ label: "a link in the .agents of a later project", written: path.join(b, ".claude", "skills", "release", "SKILL.md"), beside: path.join(b, ".claude", "notes.md") });
 
     for (const role of ["colleague", "guest"]) {
@@ -136,14 +171,14 @@ test("a big package in one place does not hide a link beside it, in that place o
   }
 });
 
-test("a write by the name of a link at a loaded name is refused where the walk gave up before it reached the link", () => {
+test("a write by the name of a link at a loaded name is refused where the walk gave up before it reached the link", { skip: !LINKS && 'no links are made on this machine' }, () => {
   // A project with a big folder of runtime files (a venv, a target) in front of the package that has the link: the walk over the projects is spent there.
   const app = path.join(root, "spent");
   try {
     manyFolders(path.join(app, ".venv"), IN_PROJECTS + 100);
     mkdirSync(path.join(app, "packages", "api", "web"), { recursive: true });
     writeFileSync(path.join(app, "notes.md"), "notes");
-    symlinkSync("../../../notes.md", path.join(app, "packages", "api", "web", "AGENTS.md"));
+    linkTo("../../../notes.md", path.join(app, "packages", "api", "web", "AGENTS.md"));
     for (const role of ["colleague", "guest"]) {
       const as = guardAs(role, conversation);
       // The premise: the link was not found, so what it leads to is a note as far as the walk can tell.
@@ -157,7 +192,7 @@ test("a write by the name of a link at a loaded name is refused where the walk g
   }
 });
 
-test("a link in ~/.agents, or ~/.agents as a link, is followed: pi and the adapter load it for every conversation", () => {
+test("a link in ~/.agents, or ~/.agents as a link, is followed: pi and the adapter load it for every conversation", { skip: !LINKS && 'no links are made on this machine' }, () => {
   const was = process.env.HOME;
   try {
     for (const layout of ["skills", "mcp.json", "the folder itself"]) {
@@ -168,11 +203,11 @@ test("a link in ~/.agents, or ~/.agents as a link, is followed: pi and the adapt
       mkdirSync(behind, { recursive: true });
       let written;
       if (layout === "the folder itself") {
-        symlinkSync(behind, path.join(home, ".agents"));
+        linkTo(behind, path.join(home, ".agents"));
         written = path.join(behind, "skills", "x", "SKILL.md");
       } else {
         mkdirSync(path.join(home, ".agents"));
-        symlinkSync(layout === "skills" ? behind : path.join(behind, "mcp.json"), path.join(home, ".agents", layout));
+        linkTo(layout === "skills" ? behind : path.join(behind, "mcp.json"), path.join(home, ".agents", layout));
         written = layout === "skills" ? path.join(behind, "release", "SKILL.md") : path.join(behind, "mcp.json");
       }
       for (const role of ["colleague", "guest"]) {
@@ -185,11 +220,11 @@ test("a link in ~/.agents, or ~/.agents as a link, is followed: pi and the adapt
   }
 });
 
-test("pi reads the instructions from every folder above the workspace root, so a link at a name there is followed", () => {
+test("pi reads the instructions from every folder above the workspace root, so a link at a name there is followed", { skip: !LINKS && 'no links are made on this machine' }, () => {
   const above = path.dirname(root);
   const behind = path.join(folder, "above", "ai.md");
   mkdirSync(path.dirname(behind), { recursive: true });
-  symlinkSync(behind, path.join(above, "CLAUDE.md"));
+  linkTo(behind, path.join(above, "CLAUDE.md"));
   try {
     for (const role of ["colleague", "guest"]) {
       assert.equal(refused(guardAs(role, conversation), "write", behind), true, `${role}: what a link above the root leads to`);
@@ -200,7 +235,7 @@ test("pi reads the instructions from every folder above the workspace root, so a
   }
 });
 
-test("the portal's own folder is read by the MCP adapter, and a link there is followed", () => {
+test("the portal's own folder is read by the MCP adapter, and a link there is followed", { skip: !LINKS && 'no links are made on this machine' }, () => {
   const names = [".mcp.json", ".vscode/mcp.json"];
   for (const name of names) assert.ok(loadedPlaces().some((place) => place.path === path.join(process.cwd(), ...name.split("/")) && place.by === "mcp"), `${name} in the folder the portal runs in is a place`);
   const was = process.cwd();
@@ -208,7 +243,7 @@ test("the portal's own folder is read by the MCP adapter, and a link there is fo
   process.chdir(where);
   try {
     const behind = path.join(folder, "behind-cwd", "tools.json");
-    symlinkSync(behind, path.join(where, ".mcp.json"));
+    linkTo(behind, path.join(where, ".mcp.json"));
     for (const role of ["colleague", "guest"]) {
       assert.equal(refused(guardAs(role, conversation), "write", path.join(os.tmpdir(), path.basename(where), ".mcp.json")), true, `${role}: the file`);
       assert.equal(refused(guardAs(role, conversation), "write", behind), true, `${role}: what a link there leads to`);
@@ -236,12 +271,12 @@ test("the folders and files the portal hands pi or loads itself are held where t
   assert.equal(refused(guardAs("colleague", conversation), "write", installed), true);
 });
 
-test("a place the environment points at through a link is held by the path it really has, as it is by the path it was given", () => {
+test("a place the environment points at through a link is held by the path it really has, as it is by the path it was given", { skip: !LINKS && 'no links are made on this machine' }, () => {
   for (const variable of ["PI_CODING_AGENT_DIR", "CHANNELS_DIR"]) {
     const real = path.join(folder, `real-${variable}`);
     const via = path.join(folder, `via-${variable}`);
     mkdirSync(real, { recursive: true });
-    symlinkSync(real, via);
+    linkTo(real, via);
     const was = process.env[variable];
     process.env[variable] = via;
     try {

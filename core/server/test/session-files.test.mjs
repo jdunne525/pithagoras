@@ -3,6 +3,44 @@ import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 
 import path from 'node:path';
 import test from 'node:test';
 import { scratch } from './server-harness.mjs';
+import * as gateFs from "node:fs";
+import gatePath from "node:path";
+import gateOs from "node:os";
+/**
+ * Links are made to prove these tests, and Windows lets them be made only with a privilege the machine it
+ * runs on commonly does not have: where they cannot be made, the tests proved with them are skipped.
+ */
+/** The sandbox's agents are users, and users are a POSIX thing: where the machine has none, the tests about them are skipped. */
+const POSIX = process.platform !== "win32" && typeof process.getuid === "function";
+
+const LINKS = (() => {
+  const probe = gateFs.mkdtempSync(gatePath.join(gateOs.tmpdir(), "links-probe-"));
+  try {
+    gateFs.writeFileSync(gatePath.join(probe, "a-file"), "");
+    gateFs.mkdirSync(gatePath.join(probe, "a-folder"));
+    gateFs.symlinkSync(gatePath.join(probe, "a-file"), gatePath.join(probe, "file-link"));
+    gateFs.symlinkSync(gatePath.join(probe, "a-folder"), gatePath.join(probe, "folder-link"), "junction");
+    return true;
+  } catch {
+    return false;
+  }
+})();
+/** A link, in the shape this machine makes one: a junction for a folder, where a link of a folder wants a privilege. */
+function linkTo(target, link) {
+  let kind = "file";
+  try {
+    if (gateFs.statSync(target).isDirectory()) kind = "junction";
+  } catch {
+    kind = "file";
+  }
+  try {
+    gateFs.symlinkSync(target, link, kind);
+  } catch (e) {
+    if (e.code !== "EPERM") throw e;
+    gateFs.symlinkSync(target, link);
+  }
+}
+
 const { removeSessionFiles } = await import('../dist/session-files.js');
 
 const root = () => scratch('session-files-');
@@ -32,16 +70,16 @@ test('nothing outside the root can be reached through an id', () => {
   assert.equal(existsSync(path.join(outside, 'precious')), true);
 });
 
-test('a link in the place of the folder is removed as a link, and what it pointed at stays', () => {
+test('a link in the place of the folder is removed as a link, and what it pointed at stays', { skip: !LINKS && 'no links are made on this machine' }, () => {
   const r = root(); const outside = root();
   writeFileSync(path.join(outside, 'precious'), 'x');
-  symlinkSync(outside, path.join(r, 'linked'));
+  linkTo(outside, path.join(r, 'linked'));
   assert.equal(removeSessionFiles(r, 'linked'), true);
   assert.equal(existsSync(path.join(r, 'linked')), false);
   assert.equal(readFileSync(path.join(outside, 'precious'), 'utf8'), 'x');
 });
 
-test('only "not there" means nothing to do; a folder that cannot be looked at is an error', () => {
+test('only "not there" means nothing to do; a folder that cannot be looked at is an error', { skip: !POSIX && 'users, the modes and the owners a file has are a POSIX thing' }, () => {
   const r = root();
   assert.equal(removeSessionFiles(path.join(r, 'no-such-root'), 'abc'), false);
   // A root that is a file: the folder under it cannot be looked at, and that is not "absent".

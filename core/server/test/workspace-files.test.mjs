@@ -8,6 +8,39 @@ import test from 'node:test';
 import { scratch } from './server-harness.mjs';
 // Windows has no file modes of its own: the modes the portal asked for are only seen where there are modes.
 const MODES = process.platform !== "win32";
+/**
+ * Links are made to prove these tests, and Windows lets them be made only with a privilege the machine it
+ * runs on commonly does not have: where they cannot be made, the tests proved with them are skipped.
+ */
+const LINKS = (() => {
+  const probe = scratch("wsfiles-links-");
+  try {
+    writeFileSync(path.join(probe, "a-file"), "");
+    mkdirSync(path.join(probe, "a-folder"));
+    symlinkSync(path.join(probe, "a-file"), path.join(probe, "file-link"));
+    symlinkSync(path.join(probe, "a-folder"), path.join(probe, "folder-link"), "junction");
+    return true;
+  } catch {
+    return false;
+  }
+})();
+/** The sandbox's agents are users, and users are a POSIX thing: where the machine has none, the tests about them are skipped. */
+const POSIX = process.platform !== "win32" && typeof process.getuid === "function";
+/** A link, in the shape this machine makes one: a junction for a folder, where a link of a folder wants a privilege. */
+function linkTo(target, link) {
+  let kind = "file";
+  try {
+    if (statSync(target).isDirectory()) kind = "junction";
+  } catch {
+    kind = "file";
+  }
+  try {
+    symlinkSync(target, link, kind);
+  } catch (e) {
+    if (e.code !== "EPERM") throw e;
+    symlinkSync(target, link);
+  }
+}
 const files = await import('../dist/workspace-files.js');
 const { FileError, baseDir, listDir, readText, writeText, removeEntry, removeFile, renameEntry, renameFile, folderPath, folderIdentity, setAgentAccess, resolveInside, openDownload, openFile, readBytes, saveNewFile, uploadTarget, makeFolder, sweepTemp, MAX_EDIT_BYTES } = files;
 const { folderFiles } = await import('../dist/folder-files.js');
@@ -66,10 +99,10 @@ test('an absolute-looking path is taken as inside the folder, not as the root of
   done();
 });
 
-test('a link that leads out is refused for every operation, and what it points at is untouched', () => {
+test('a link that leads out is refused for every operation, and what it points at is untouched', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const { dir, base, outside, done } = setup();
-  symlinkSync(outside, path.join(dir, 'escape'));
-  symlinkSync(path.join(outside, 'secret'), path.join(dir, 'peek'));
+  linkTo(outside, path.join(dir, 'escape'));
+  linkTo(path.join(outside, 'secret'), path.join(dir, 'peek'));
   for (const p of ['escape', 'escape/secret', 'peek']) {
     assert.equal(code(() => readText(base, p)), 'invalid', p);
     assert.equal(code(() => writeText(base, p, 'x')), 'invalid', p);
@@ -80,31 +113,31 @@ test('a link that leads out is refused for every operation, and what it points a
   done();
 });
 
-test('a link to nowhere is refused rather than written through', () => {
+test('a link to nowhere is refused rather than written through', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const { dir, base, outside, done } = setup();
-  symlinkSync(path.join(outside, 'not-yet'), path.join(dir, 'dangling'));
+  linkTo(path.join(outside, 'not-yet'), path.join(dir, 'dangling'));
   assert.equal(code(() => writeText(base, 'dangling', 'planted')), 'invalid');
   assert.equal(existsSync(path.join(outside, 'not-yet')), false);
   done();
 });
 
-test('links are listed as what they lead to when that is inside, and as links when it is not', () => {
+test('links are listed as what they lead to when that is inside, and as links when it is not', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const { dir, base, outside, done } = setup();
   writeFileSync(path.join(dir, 'real.txt'), 'real'); mkdirSync(path.join(dir, 'sub'));
-  symlinkSync(path.join(dir, 'real.txt'), path.join(dir, 'to-file'));
-  symlinkSync(path.join(dir, 'sub'), path.join(dir, 'to-dir'));
-  symlinkSync(outside, path.join(dir, 'out'));
-  symlinkSync(path.join(dir, 'missing'), path.join(dir, 'broken'));
+  linkTo(path.join(dir, 'real.txt'), path.join(dir, 'to-file'));
+  linkTo(path.join(dir, 'sub'), path.join(dir, 'to-dir'));
+  linkTo(outside, path.join(dir, 'out'));
+  linkTo(path.join(dir, 'missing'), path.join(dir, 'broken'));
   const type = Object.fromEntries(listDir(base, '').entries.map((e) => [e.name, e.type]));
   assert.deepEqual(type, { sub: 'dir', 'to-dir': 'dir', out: 'link', broken: 'link', 'real.txt': 'file', 'to-file': 'file' });
   assert.equal(readText(base, 'to-file').content, 'real');
   done();
 });
 
-test('a link to something inside the folder can be read', () => {
+test('a link to something inside the folder can be read', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const { dir, base, done } = setup();
   mkdirSync(path.join(dir, 'sub')); writeFileSync(path.join(dir, 'sub', 'a.txt'), 'in sub');
-  symlinkSync(path.join(dir, 'sub'), path.join(dir, 'alias'));
+  linkTo(path.join(dir, 'sub'), path.join(dir, 'alias'));
   assert.equal(readText(base, 'alias/a.txt').content, 'in sub');
   done();
 });
@@ -172,16 +205,16 @@ test('a file too large to edit is refused, and a file with a second name is left
   done();
 });
 
-test('a folder is removed with what is in it; a link goes, and what it led to stays', async () => {
+test('a folder is removed with what is in it; a link goes, and what it led to stays', { skip: (!LINKS && 'no links are made on this machine') }, async () => {
   const { dir, base, outside, done } = setup();
   mkdirSync(path.join(dir, 'sub')); writeFileSync(path.join(dir, 'sub', 'a.txt'), 'x');
   await removeEntry(base, 'sub');
   assert.equal(existsSync(path.join(dir, 'sub')), false);
-  symlinkSync(outside, path.join(dir, 'escape'));
+  linkTo(outside, path.join(dir, 'escape'));
   await removeEntry(base, 'escape');
   assert.equal(existsSync(path.join(dir, 'escape')), false);
   assert.equal(readFileSync(path.join(outside, 'secret'), 'utf8'), 'top secret');
-  symlinkSync(path.join(dir, 'gone'), path.join(dir, 'broken'));
+  linkTo(path.join(dir, 'gone'), path.join(dir, 'broken'));
   await removeEntry(base, 'broken');
   assert.equal(await codeOf(() => removeEntry(base, 'broken')), 'missing');
   done();
@@ -199,7 +232,7 @@ test('the folder itself cannot be removed, however it is spelled', async () => {
 /** Everything a download hands over, read from its descriptor. */
 const drain = ({ fd, size }) => { const buf = Buffer.alloc(size); readSync(fd, buf, 0, size, 0); closeSync(fd); return buf.toString(); };
 
-test('a download is a plain file opened once, dotfiles included, and nothing else', () => {
+test('a download is a plain file opened once, dotfiles included, and nothing else', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const { dir, base, outside, done } = setup();
   writeFileSync(path.join(dir, 'a.txt'), 'hello'); writeFileSync(path.join(dir, '.env'), 'SECRET=1'); mkdirSync(path.join(dir, 'sub'));
   const file = openDownload(base, 'a.txt');
@@ -208,22 +241,22 @@ test('a download is a plain file opened once, dotfiles included, and nothing els
   assert.equal(dot.name, '.env'); assert.equal(drain(dot), 'SECRET=1');
   assert.equal(code(() => openDownload(base, 'sub')), 'invalid');
   assert.equal(code(() => openDownload(base, 'gone')), 'missing');
-  symlinkSync(path.join(outside, 'secret'), path.join(dir, 'peek'));
+  linkTo(path.join(outside, 'secret'), path.join(dir, 'peek'));
   assert.equal(code(() => openDownload(base, 'peek')), 'invalid');
   done();
 });
 
-test('a download from a folder that sits under a dot-folder is not refused for it', () => {
+test('a download from a folder that sits under a dot-folder is not refused for it', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const top = scratch('wsfiles-');
   const dir = path.join(top, '.hidden', 'home'); mkdirSync(dir, { recursive: true });
   writeFileSync(path.join(dir, 'a.txt'), 'x');
   assert.equal(drain(openDownload(baseDir(dir), 'a.txt')), 'x');
 });
 
-test('a folder that is itself a link is followed once, up front, and checked against where it leads', () => {
+test('a folder that is itself a link is followed once, up front, and checked against where it leads', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const { top, outside, done } = setup();
   const linked = path.join(top, 'linked');
-  symlinkSync(outside, linked);
+  linkTo(outside, linked);
   // The chat's folder is what its link leads to; from there nothing else is reachable.
   const base = baseDir(linked);
   assert.equal(base, realpathSync(outside));
@@ -233,10 +266,10 @@ test('a folder that is itself a link is followed once, up front, and checked aga
   done();
 });
 
-test('resolveInside returns the canonical path, so what is used is what was checked', () => {
+test('resolveInside returns the canonical path, so what is used is what was checked', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const { dir, base, done } = setup();
   mkdirSync(path.join(dir, 'sub'));
-  symlinkSync(path.join(dir, 'sub'), path.join(dir, 'alias'));
+  linkTo(path.join(dir, 'sub'), path.join(dir, 'alias'));
   assert.equal(resolveInside(base, 'alias'), path.join(base, 'sub'));
   done();
 });
@@ -286,25 +319,25 @@ test('only what is in the folder is renamed: not the folder, not a way out, not 
   done();
 });
 
-test('a link is renamed as the link, and what it leads to keeps its name; nothing is renamed through one', () => {
+test('a link is renamed as the link, and what it leads to keeps its name; nothing is renamed through one', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const { dir, base, outside, done } = setup();
-  symlinkSync(outside, path.join(dir, 'escape'));
+  linkTo(outside, path.join(dir, 'escape'));
   assert.equal(renameEntry(base, 'escape', 'moved-link'), 'moved-link');
   assert.equal(existsSync(path.join(outside, 'secret')), true);
-  symlinkSync(outside, path.join(dir, 'door'));
+  linkTo(outside, path.join(dir, 'door'));
   assert.equal(code(() => renameEntry(base, 'door/secret', 'x')), 'invalid');
   assert.equal(existsSync(path.join(outside, 'secret')), true);
   done();
 });
 
-test('a folder is found for archiving, and a file, a missing place and a way out are not', () => {
+test('a folder is found for archiving, and a file, a missing place and a way out are not', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const { dir, base, outside, done } = setup();
   mkdirSync(path.join(dir, 'sub')); writeFileSync(path.join(dir, 'a.txt'), 'x');
   assert.equal(folderPath(base, 'sub'), path.join(base, 'sub'));
   assert.equal(folderPath(base, ''), base);
   assert.equal(code(() => folderPath(base, 'a.txt')), 'invalid');
   assert.equal(code(() => folderPath(base, 'nope')), 'missing');
-  symlinkSync(outside, path.join(dir, 'escape'));
+  linkTo(outside, path.join(dir, 'escape'));
   assert.equal(code(() => folderPath(base, 'escape')), 'invalid');
   assert.equal(code(() => folderPath(base, '../outside')), 'invalid');
   done();
@@ -357,7 +390,7 @@ test('a save is put in place whole: the mode stays, and no temporary file is lef
   done();
 });
 
-test('a save that cannot be made leaves the file as it was, and the next save is not a conflict', { skip: process.getuid?.() === 0 && 'root can write anywhere' }, () => {
+test('a save that cannot be made leaves the file as it was, and the next save is not a conflict', { skip: (process.getuid?.() === 0 && 'root can write anywhere') || (!POSIX && 'the refusals of the system, the modes and the owners, are a POSIX thing') }, () => {
   const { dir, base, done } = setup();
   const file = path.join(dir, 'a.txt');
   writeFileSync(file, 'precious');
@@ -397,7 +430,7 @@ test('a read-only file in a folder that can be written is saved, and stays read-
   done();
 });
 
-test('what the system refuses on a delete or a rename is said, not a 500', { skip: process.getuid?.() === 0 && 'root can write anywhere' }, async () => {
+test('what the system refuses on a delete or a rename is said, not a 500', { skip: (process.getuid?.() === 0 && 'root can write anywhere') || (!POSIX && 'the refusals of the system, the modes and the owners, are a POSIX thing') }, async () => {
   const { dir, base, done } = setup();
   mkdirSync(path.join(dir, 'sub')); writeFileSync(path.join(dir, 'sub', 'a.txt'), 'x');
   chmodSync(path.join(dir, 'sub'), 0o500);
@@ -417,13 +450,13 @@ test('a delete of something that has gone in the meantime is not an error', asyn
   done();
 });
 
-test('a link is marked as one, also when it leads to a folder that is listed as a folder', () => {
+test('a link is marked as one, also when it leads to a folder that is listed as a folder', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const { dir, base, outside, done } = setup();
   mkdirSync(path.join(dir, 'sub')); writeFileSync(path.join(dir, 'a.txt'), 'x');
-  symlinkSync(path.join(dir, 'sub'), path.join(dir, 'to-sub'));
-  symlinkSync(path.join(dir, 'a.txt'), path.join(dir, 'to-a'));
-  symlinkSync(outside, path.join(dir, 'out'));
-  symlinkSync(path.join(dir, 'gone'), path.join(dir, 'broken'));
+  linkTo(path.join(dir, 'sub'), path.join(dir, 'to-sub'));
+  linkTo(path.join(dir, 'a.txt'), path.join(dir, 'to-a'));
+  linkTo(outside, path.join(dir, 'out'));
+  linkTo(path.join(dir, 'gone'), path.join(dir, 'broken'));
   const by = Object.fromEntries(listDir(base, '').entries.map((e) => [e.name, e]));
   assert.deepEqual([by['to-sub'].type, by['to-sub'].link], ['dir', true]);
   assert.deepEqual([by['to-a'].type, by['to-a'].link], ['file', true]);
@@ -538,7 +571,13 @@ test('a save answers with the change of the file it wrote, which is what opening
   done();
 });
 
-test('an open file is the one the name had then: what is put in its place after is not read through it', () => {
+/**
+ * The promise this proves is the one of links and inodes: a save puts a new file in the name's place, and
+ * what was opened before keeps reading the file it opened. Windows lets no file be put in the place of one
+ * somebody has open, so there the save goes through the file's own door (see writeText) and the handle
+ * reads the new text — the check against what the save began with is what keeps it safe.
+ */
+test('an open file is the one the name had then: what is put in its place after is not read through it', { skip: (!POSIX && 'an open handle keeping the file it opened is a link-and-inode promise') }, () => {
   const { dir, base, done } = setup();
   writeFileSync(path.join(dir, 'a.md'), 'the first');
   const opened = openFile(base, 'a.md');
@@ -553,11 +592,11 @@ test('an open file is the one the name had then: what is put in its place after 
   done();
 });
 
-test('direct: a name in the folder itself, never one that a link led to, for reading and for saving', () => {
+test('direct: a name in the folder itself, never one that a link led to, for reading and for saving', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const { dir, base, outside, done } = setup();
   writeFileSync(path.join(dir, 'real.md'), 'real');
-  symlinkSync('real.md', path.join(dir, 'inside-link.md'));
-  symlinkSync(path.join(outside, 'secret'), path.join(dir, 'out-link.md'));
+  linkTo('real.md', path.join(dir, 'inside-link.md'));
+  linkTo(path.join(outside, 'secret'), path.join(dir, 'out-link.md'));
   mkdirSync(path.join(dir, 'sub'));
   writeFileSync(path.join(dir, 'sub', 'deep.md'), 'deep');
   const direct = { direct: true };
@@ -622,7 +661,7 @@ test('a folder that is made has the mode of the folder it is made in', () => {
   done();
 });
 
-test('a folder that is made is given its mode through itself: a link put in its place meanwhile gets nothing', () => {
+test('a folder that is made is given its mode through itself: a link put in its place meanwhile gets nothing', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const { dir, base, outside, done } = setup();
   const victim = path.join(outside, 'secret');
   chmodSync(victim, 0o600);
@@ -633,7 +672,7 @@ test('a folder that is made is given its mode through itself: a link put in its 
   fs.mkdirSync = (target, ...rest) => {
     const made = real(target, ...rest);
     rmSync(target, { recursive: true });
-    symlinkSync(victim, target);
+    linkTo(victim, target);
     return made;
   };
   syncBuiltinESMExports();
@@ -648,12 +687,12 @@ test('a folder that is made is given its mode through itself: a link put in its 
   done();
 });
 
-test('a folder is found as a name in the folder itself, and a link to a folder is none', () => {
+test('a folder is found as a name in the folder itself, and a link to a folder is none', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const { dir, base, outside, done } = setup();
   mkdirSync(path.join(dir, 'documents'));
   mkdirSync(path.join(dir, 'real'));
-  symlinkSync('real', path.join(dir, 'inside-link'));
-  symlinkSync(outside, path.join(dir, 'out-link'));
+  linkTo('real', path.join(dir, 'inside-link'));
+  linkTo(outside, path.join(dir, 'out-link'));
   writeFileSync(path.join(dir, 'file'), 'x');
   assert.equal(folderPath(base, 'documents', { direct: true }), path.join(base, 'documents'));
   assert.equal(folderPath(base, 'inside-link'), path.join(base, 'real'), 'followed, as ever');
@@ -664,7 +703,7 @@ test('a folder is found as a name in the folder itself, and a link to a folder i
   done();
 });
 
-test('the temporary files of saves that were cut off are swept, and one of a save that is under way is not', () => {
+test('the temporary files of saves that were cut off are swept, and one of a save that is under way is not', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const { dir, base, done } = setup();
   const old = new Date(Date.now() - 5 * 60_000);
   const left = (name, when) => { writeFileSync(path.join(dir, name), 'half'); utimesSync(path.join(dir, name), when, when); };
@@ -677,7 +716,7 @@ test('the temporary files of saves that were cut off are swept, and one of a sav
   left('.c.md.0123456789ab.upload', old);
   mkdirSync(path.join(dir, '.d.md.0123456789ab.tmp'));
   utimesSync(path.join(dir, '.d.md.0123456789ab.tmp'), old, old);
-  symlinkSync('/nowhere', path.join(dir, '.e.md.0123456789ab.tmp'));
+  linkTo('/nowhere', path.join(dir, '.e.md.0123456789ab.tmp'));
   lutimesSync(path.join(dir, '.e.md.0123456789ab.tmp'), recent, recent);
   const swept = sweepTemp(base, '');
   // The two that are ten seconds old wait.
@@ -726,7 +765,7 @@ test('the folder is synced after a save, a made file and an upload, so the renam
   done();
 });
 
-test('a failure of the disk is a refusal that still says which: the system\'s code is on it', () => {
+test('a failure of the disk is a refusal that still says which: the system\'s code is on it', { skip: (!POSIX && 'the refusals of the system, the modes and the owners, are a POSIX thing') }, () => {
   const { dir, base, done } = setup();
   writeFileSync(path.join(dir, 'a.txt'), 'x');
   chmodSync(dir, 0o555);
@@ -744,10 +783,10 @@ test('a failure of the disk is a refusal that still says which: the system\'s co
   }
 });
 
-test('portal.files has them: the options reach the functions, and the old calls are as they were', () => {
+test('portal.files has them: the options reach the functions, and the old calls are as they were', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const { dir, base, done } = setup();
   writeFileSync(path.join(dir, 'real.md'), 'real');
-  symlinkSync('real.md', path.join(dir, 'link.md'));
+  linkTo('real.md', path.join(dir, 'link.md'));
   const portalFiles = folderFiles;
   assert.equal(portalFiles.readBytes(base, 'real.md', { head: 2 }).bytes.toString(), 're');
   assert.equal(code(() => portalFiles.readBytes(base, 'link.md', { direct: true })), 'invalid');
@@ -797,7 +836,7 @@ function swappable() {
   /** What the agent does: the folder goes aside, a link to the folder outside stands in its place. */
   const swap = () => {
     renameSync(sub, aside);
-    symlinkSync(outside, sub);
+    linkTo(outside, sub);
   };
   return { ...made, sub, aside, swap };
 }
@@ -829,7 +868,7 @@ function swappedAt(point, swap, fn) {
 /** What is in a folder, sorted. */
 const names = (folder) => readdirSync(folder).sort();
 
-test('a folder swapped for a link before it is used is refused: a made folder is not made where the link leads', () => {
+test('a folder swapped for a link before it is used is refused: a made folder is not made where the link leads', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const { base, outside, aside, swap, done } = swappable();
   const before = names(outside);
   let outcome;
@@ -840,7 +879,7 @@ test('a folder swapped for a link before it is used is refused: a made folder is
   done();
 });
 
-test('a folder is made in the folder that was checked, however the path is changed after: the link gets nothing, owner or mode', () => {
+test('a folder is made in the folder that was checked, however the path is changed after: the link gets nothing, owner or mode', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const { dir, base, outside, aside, swap, done } = swappable();
   const before = names(outside);
   chmodSync(path.join(dir, 'sub'), 0o775);
@@ -853,7 +892,7 @@ test('a folder is made in the folder that was checked, however the path is chang
   done();
 });
 
-test('a file that is made is made in the folder that was checked: a link put there before the walk is refused, one put there after is not followed', () => {
+test('a file that is made is made in the folder that was checked: a link put there before the walk is refused, one put there after is not followed', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   for (const [point, outcome] of [[FIRST, 'invalid'], [creating, 'none']]) {
     const { base, outside, aside, swap, done } = swappable();
     const before = names(outside);
@@ -867,7 +906,7 @@ test('a file that is made is made in the folder that was checked: a link put the
   }
 });
 
-test('a file that is replaced is replaced in the folder that was checked, and not the one of that name that the link leads to', () => {
+test('a file that is replaced is replaced in the folder that was checked, and not the one of that name that the link leads to', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   for (const [point, outcome] of [[FIRST, 'invalid'], [creating, 'none']]) {
     const { base, outside, aside, swap, done } = swappable();
     let got;
@@ -880,7 +919,7 @@ test('a file that is replaced is replaced in the folder that was checked, and no
   }
 });
 
-test('an upload is made and put in place in the folder that was checked', () => {
+test('an upload is made and put in place in the folder that was checked', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   for (const point of [FIRST, creating]) {
     const { base, outside, aside, swap, done } = swappable();
     const before = names(outside);
@@ -897,7 +936,7 @@ test('an upload is made and put in place in the folder that was checked', () => 
   }
 });
 
-test('an upload that is long in coming goes in place in the folder it began in, not where the path leads by then', () => {
+test('an upload that is long in coming goes in place in the folder it began in, not where the path leads by then', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const { base, outside, aside, swap, done } = swappable();
   const before = names(outside);
   const target = uploadTarget(base, 'sub', 'up.txt');
@@ -910,7 +949,7 @@ test('an upload that is long in coming goes in place in the folder it began in, 
   done();
 });
 
-test('a file is read from the folder that was checked: a link put in the folder\'s place gives the contents of what it leads to to nobody', () => {
+test('a file is read from the folder that was checked: a link put in the folder\'s place gives the contents of what it leads to to nobody', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const readers = {
     readBytes: (base) => readBytes(base, 'sub/doc.md').bytes.toString(),
     readText: (base) => readText(base, 'sub/doc.md').content,
@@ -930,7 +969,7 @@ test('a file is read from the folder that was checked: a link put in the folder\
   }
 });
 
-test('the temporary files of cut-off saves are swept in the folder that was checked, not in the one a link leads to', () => {
+test('the temporary files of cut-off saves are swept in the folder that was checked, not in the one a link leads to', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   for (const [point, swept] of [[FIRST, []], [{ names: ['unlinkSync'], when: () => true }, ['.a.md.0123456789ab.tmp']]]) {
     const { sub, aside, outside, base, swap, done } = swappable();
     const old = new Date(Date.now() - 5 * 60_000);
@@ -947,7 +986,7 @@ test('the temporary files of cut-off saves are swept in the folder that was chec
   }
 });
 
-test('every folder on the way is held, not only the first: a deep one swapped for a link is refused too', () => {
+test('every folder on the way is held, not only the first: a deep one swapped for a link is refused too', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   for (const [point, outcome] of [[FIRST, 'invalid'], [creating, 'none']]) {
     const { sub, base, outside, done } = swappable();
     mkdirSync(path.join(sub, 'deep'));
@@ -955,7 +994,7 @@ test('every folder on the way is held, not only the first: a deep one swapped fo
     const deep = path.join(sub, 'deep');
     const swapDeep = () => {
       renameSync(deep, `${deep}.aside`);
-      symlinkSync(outside, deep);
+      linkTo(outside, deep);
     };
     let got;
     assert.ok(swappedAt(point, swapDeep, () => { got = code(() => writeText(base, 'sub/deep/notes.txt', 'x', undefined, true)); }));
@@ -990,7 +1029,7 @@ async function swappedWhile(point, swap, fn) {
   return swapped;
 }
 
-test('a folder on the way swapped for a link while git is asked about a delete: the delete is refused, and nothing where the link leads goes', async () => {
+test('a folder on the way swapped for a link while git is asked about a delete: the delete is refused, and nothing where the link leads goes', { skip: (!LINKS && 'no links are made on this machine') }, async () => {
   const { sub, aside, outside, base, swap, done } = swappable();
   mkdirSync(path.join(sub, 'victim'));
   writeFileSync(path.join(sub, 'victim', 'kept.txt'), 'ours');
@@ -1005,7 +1044,7 @@ test('a folder on the way swapped for a link while git is asked about a delete: 
   done();
 });
 
-test('a delete goes on in the folder that was checked once it is held: the folder a link put in its place leads to stays', { skip: process.platform !== 'linux' && 'a folder is held by its path where descriptors cannot be named' }, async () => {
+test('a delete goes on in the folder that was checked once it is held: the folder a link put in its place leads to stays', { skip: (process.platform !== 'linux' && 'a folder is held by its path where descriptors cannot be named') || (!LINKS && 'no links are made on this machine') }, async () => {
   const { sub, aside, outside, base, swap, done } = swappable();
   mkdirSync(path.join(sub, 'victim', 'deeper'), { recursive: true });
   writeFileSync(path.join(sub, 'victim', 'deeper', 'a.txt'), 'ours');
@@ -1017,7 +1056,7 @@ test('a delete goes on in the folder that was checked once it is held: the folde
   done();
 });
 
-test('a folder in what is deleted swapped for a link as it is reached: the link goes, and what it leads to stays', async () => {
+test('a folder in what is deleted swapped for a link as it is reached: the link goes, and what it leads to stays', { skip: (!LINKS && 'no links are made on this machine') }, async () => {
   const { dir, base, outside, done } = setup();
   const inner = path.join(dir, 'tree', 'inner');
   mkdirSync(inner, { recursive: true });
@@ -1025,7 +1064,7 @@ test('a folder in what is deleted swapped for a link as it is reached: the link 
   writeFileSync(path.join(outside, 'a.txt'), 'theirs');
   const swapInner = () => {
     renameSync(inner, path.join(dir, 'inner.aside'));
-    symlinkSync(outside, inner);
+    linkTo(outside, inner);
   };
   assert.ok(await swappedWhile(reaching('/inner'), swapInner, () => removeEntry(base, 'tree', true)));
   assert.ok(!existsSync(path.join(dir, 'tree')), 'the folder went, with the link in it');
@@ -1035,7 +1074,7 @@ test('a folder in what is deleted swapped for a link as it is reached: the link 
   done();
 });
 
-test('a delete takes what fs.rm took: a name that is not UTF-8, an empty folder the portal may not read, and a folder that went while it was deleted', { skip: process.platform === 'darwin' && 'APFS takes no name that is not UTF-8' }, async () => {
+test('a delete takes what fs.rm took: a name that is not UTF-8, an empty folder the portal may not read, and a folder that went while it was deleted', { skip: (process.platform === 'darwin' && 'APFS takes no name that is not UTF-8') || (!POSIX && 'the refusals of the system, the modes and the owners, are a POSIX thing') }, async () => {
   const { dir, base, done } = setup();
   const tree = path.join(dir, 'tree');
   mkdirSync(path.join(tree, 'a'), { recursive: true });
@@ -1098,7 +1137,7 @@ test('a folder deeper than a delete goes is refused, and what the portal held on
   }
 });
 
-test('a rename is done in the folder that was checked: refused when a link took its place before it is held, and in the folder that is held after', () => {
+test('a rename is done in the folder that was checked: refused when a link took its place before it is held, and in the folder that is held after', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   // Once it is held, only where a folder is held by its descriptor: elsewhere by its path.
   const points = [[FIRST, 'invalid'], ...(process.platform === 'linux' ? [[{ names: ['renameSync'], when: () => true }, 'none']] : [])];
   for (const [point, outcome] of points) {
@@ -1113,10 +1152,10 @@ test('a rename is done in the folder that was checked: refused when a link took 
   }
 });
 
-test('a link to a folder inside the chat\'s folder is still written through: the path is checked, and the folder held is the one it leads to', () => {
+test('a link to a folder inside the chat\'s folder is still written through: the path is checked, and the folder held is the one it leads to', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const { dir, base, done } = setup();
   mkdirSync(path.join(dir, 'real'));
-  symlinkSync('real', path.join(dir, 'inside-link'));
+  linkTo('real', path.join(dir, 'inside-link'));
   writeText(base, 'inside-link/a.txt', 'a');
   saveNewFile(base, 'inside-link', 'b.txt', Buffer.from('b'));
   assert.equal(makeFolder(base, 'inside-link', 'c'), path.join('real', 'c'));
@@ -1127,7 +1166,7 @@ test('a link to a folder inside the chat\'s folder is still written through: the
   done();
 });
 
-test('a folder above the chat\'s folder that was swapped is found when the folder is held: nothing is made in what the link leads to', () => {
+test('a folder above the chat\'s folder that was swapped is found when the folder is held: nothing is made in what the link leads to', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const { top, dir, done } = setup();
   // The chat's folder is `top/work`; the check saw it there, and by the time of the call `top` leads elsewhere.
   const base = baseDir(dir);
@@ -1136,7 +1175,7 @@ test('a folder above the chat\'s folder that was swapped is found when the folde
   const before = names(path.join(elsewhere, 'work'));
   const swapTop = () => {
     renameSync(top, `${top}.aside`);
-    symlinkSync(elsewhere, top);
+    linkTo(elsewhere, top);
   };
   try {
     let got;
@@ -1149,7 +1188,7 @@ test('a folder above the chat\'s folder that was swapped is found when the folde
   }
 });
 
-test('where descriptors cannot be named as paths the portal still works, and gives nothing away', () => {
+test('where descriptors cannot be named as paths the portal still works, and gives nothing away', { skip: (!POSIX && 'the refusals of the system, the modes and the owners, are a POSIX thing') }, () => {
   const { dir, base, done } = setup();
   chmodSync(dir, 0o775);
   if (root) chownSync(dir, AGENT, AGENT);
@@ -1290,7 +1329,7 @@ function swappedBeforeOpeningTheNewFolder(swap, fn) {
   return swapped;
 }
 
-test('a folder that took the name of a made one meanwhile is not given away: the agent cannot have a closed folder relabelled to itself', () => {
+test('a folder that took the name of a made one meanwhile is not given away: the agent cannot have a closed folder relabelled to itself', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const { dir, base, done } = setup();
   const { secret, was } = withSecret(dir);
   chmodSync(dir, 0o775);
@@ -1330,7 +1369,7 @@ test('a folder is made closed until it has its mode, and an ordinary one is give
   done();
 });
 
-test('a folder is made and given away on a file system that gives a new folder another owner than the one who made it', () => {
+test('a folder is made and given away on a file system that gives a new folder another owner than the one who made it', { skip: (!POSIX && 'the refusals of the system, the modes and the owners, are a POSIX thing') }, () => {
   const { dir, base, done } = setup();
   chmodSync(dir, 0o775);
   // What NFS with root_squash, a CIFS or vfat mount with a uid, or a FUSE mount with a fixed owner does: the folder that was just
@@ -1433,9 +1472,9 @@ test('removeFile takes away a plain file, and nothing else', () => {
   done();
 });
 
-test('removeFile refuses a link, a folder and a file with a second name, and leaves each as it was', () => {
+test('removeFile refuses a link, a folder and a file with a second name, and leaves each as it was', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const { dir, base, outside, done } = setup();
-  symlinkSync(path.join(outside, 'secret'), path.join(dir, 'link.md'));
+  linkTo(path.join(outside, 'secret'), path.join(dir, 'link.md'));
   mkdirSync(path.join(dir, 'folder.md')); writeFileSync(path.join(dir, 'folder.md', 'inner'), 'kept');
   writeFileSync(path.join(dir, 'one.md'), 'one'); linkSync(path.join(dir, 'one.md'), path.join(dir, 'two.md'));
   for (const rel of ['link.md', 'folder.md']) assert.equal(code(() => removeFile(base, rel)), 'invalid', rel);
@@ -1481,9 +1520,9 @@ test('renameFile gives a plain file another name in its folder, the file itself 
   done();
 });
 
-test('renameFile refuses a link, a folder and (with alone) a file with a second name, and leaves each as it was', () => {
+test('renameFile refuses a link, a folder and (with alone) a file with a second name, and leaves each as it was', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const { dir, base, outside, done } = setup();
-  symlinkSync(path.join(outside, 'secret'), path.join(dir, 'link.md'));
+  linkTo(path.join(outside, 'secret'), path.join(dir, 'link.md'));
   mkdirSync(path.join(dir, 'folder.md')); writeFileSync(path.join(dir, 'folder.md', 'inner'), 'kept');
   writeFileSync(path.join(dir, 'one.md'), 'one'); linkSync(path.join(dir, 'one.md'), path.join(dir, 'two.md'));
   for (const rel of ['link.md', 'folder.md']) assert.equal(code(() => renameFile(base, rel, 'new.md')), 'invalid', rel);
@@ -1491,7 +1530,7 @@ test('renameFile refuses a link, a folder and (with alone) a file with a second 
   assert.deepEqual(names(dir), ['folder.md', 'link.md', 'one.md', 'two.md']);
   assert.equal(readFileSync(path.join(outside, 'secret'), 'utf8'), 'top secret');
   // Not through a link on the way either.
-  symlinkSync(outside, path.join(dir, 'door'));
+  linkTo(outside, path.join(dir, 'door'));
   assert.equal(code(() => renameFile(base, 'door/secret', 'x')), 'invalid');
   assert.equal(readFileSync(path.join(outside, 'secret'), 'utf8'), 'top secret');
   assert.equal(code(() => renameFile(base, 'folder.md', 'x.md', { direct: true })), 'invalid');
@@ -1509,7 +1548,7 @@ test('portal.files has removeFile and renameFile, with their options', () => {
   done();
 });
 
-test('a documents folder swapped for a link before it is held is refused: nothing outside is removed or renamed', () => {
+test('a documents folder swapped for a link before it is held is refused: nothing outside is removed or renamed', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   for (const [what, point, run] of [
     ['removeFile', FIRST, (docs) => removeFile(docs, 'doc.md')],
     ['renameFile', FIRST, (docs) => renameFile(docs, 'doc.md', 'new.md')],
@@ -1525,7 +1564,7 @@ test('a documents folder swapped for a link before it is held is refused: nothin
   }
 });
 
-test('a documents folder swapped for a link after it is held: the file goes from the folder that was checked, and what the link leads to stays', () => {
+test('a documents folder swapped for a link after it is held: the file goes from the folder that was checked, and what the link leads to stays', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   {
     const { docs, aside, outside, swap, done } = documents();
     assert.ok(swappedAt({ names: ['unlinkSync'], when: () => true }, swap, () => removeFile(docs, 'doc.md')));
@@ -1545,7 +1584,7 @@ test('a documents folder swapped for a link after it is held: the file goes from
   }
 });
 
-test('a folder above the documents folder that was swapped is found: nothing is removed or renamed in what the link leads to', () => {
+test('a folder above the documents folder that was swapped is found: nothing is removed or renamed in what the link leads to', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   for (const run of [(docs) => removeFile(docs, 'doc.md'), (docs) => renameFile(docs, 'doc.md', 'new.md')]) {
     const { top, dir, done } = setup();
     mkdirSync(path.join(dir, 'documents')); writeFileSync(path.join(dir, 'documents', 'doc.md'), 'ours');
@@ -1555,7 +1594,7 @@ test('a folder above the documents folder that was swapped is found: nothing is 
     writeFileSync(path.join(elsewhere, 'work', 'documents', 'doc.md'), 'theirs');
     try {
       let got;
-      assert.ok(swappedAt(FIRST, () => { renameSync(top, `${top}.aside`); symlinkSync(elsewhere, top); }, () => { got = code(() => run(docs)); }));
+      assert.ok(swappedAt(FIRST, () => { renameSync(top, `${top}.aside`); linkTo(elsewhere, top); }, () => { got = code(() => run(docs)); }));
       assert.equal(got, 'invalid');
       assert.deepEqual(names(path.join(elsewhere, 'work', 'documents')), ['doc.md']);
       assert.equal(readFileSync(path.join(elsewhere, 'work', 'documents', 'doc.md'), 'utf8'), 'theirs');
@@ -1566,7 +1605,7 @@ test('a folder above the documents folder that was swapped is found: nothing is 
   }
 });
 
-test('a name swapped for a folder between the look and the removal is not removed, with all that is in it', () => {
+test('a name swapped for a folder between the look and the removal is not removed, with all that is in it', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const { docs, sub, leaf, done } = documents();
   let got;
   assert.ok(swappedAt({ names: ['unlinkSync'], when: () => true }, () => {
@@ -1580,18 +1619,18 @@ test('a name swapped for a folder between the look and the removal is not remove
   done();
 });
 
-test('a name swapped for a link between the look and the removal: the link goes, and what it leads to stays', () => {
+test('a name swapped for a link between the look and the removal: the link goes, and what it leads to stays', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const { docs, sub, leaf, outside, done } = documents();
   assert.ok(swappedAt({ names: ['unlinkSync'], when: () => true }, () => {
     rmSync(leaf);
-    symlinkSync(path.join(outside, 'doc.md'), leaf);
+    linkTo(path.join(outside, 'doc.md'), leaf);
   }, () => removeFile(docs, 'doc.md')));
   assert.equal(readFileSync(path.join(outside, 'doc.md'), 'utf8'), 'theirs');
   assert.deepEqual(names(sub), []);
   done();
 });
 
-test('a file made at the new name between the look and the rename is not replaced', () => {
+test('a file made at the new name between the look and the rename is not replaced', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const { docs, sub, leaf, done } = documents();
   let got;
   assert.ok(swappedAt({ names: ['linkSync'], when: () => true }, () => writeFileSync(path.join(sub, 'new.md'), 'the agent\'s'), () => { got = code(() => renameFile(docs, 'doc.md', 'new.md')); }));
@@ -1602,10 +1641,10 @@ test('a file made at the new name between the look and the rename is not replace
   done();
 });
 
-test('the old name swapped for a folder or a link between the look and the rename: nothing is renamed, and nothing is left at the new name', () => {
+test('the old name swapped for a folder or a link between the look and the rename: nothing is renamed, and nothing is left at the new name', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   for (const [what, swap] of [
     ['a folder', (leaf) => { rmSync(leaf); mkdirSync(leaf); writeFileSync(path.join(leaf, 'inner'), 'precious'); }],
-    ['a link', (leaf, outside) => { rmSync(leaf); symlinkSync(path.join(outside, 'doc.md'), leaf); }],
+    ['a link', (leaf, outside) => { rmSync(leaf); linkTo(path.join(outside, 'doc.md'), leaf); }],
   ]) {
     const { docs, sub, leaf, outside, done } = documents();
     let got;
@@ -1619,7 +1658,7 @@ test('the old name swapped for a folder or a link between the look and the renam
   }
 });
 
-test('where hard links cannot be made the file is renamed after a look, and a taken name or a changed one is still refused', () => {
+test('where hard links cannot be made the file is renamed after a look, and a taken name or a changed one is still refused', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   {
     const { docs, sub, done } = documents();
     assert.ok(swappedAt({ names: ['linkSync'], when: () => true }, failing('EPERM'), () => assert.equal(renameFile(docs, 'doc.md', 'new.md'), 'new.md')));
@@ -1648,7 +1687,7 @@ test('where hard links cannot be made the file is renamed after a look, and a ta
   }
 });
 
-test('a rename that cannot remove the old name leaves the file as it was: the new name is taken away again', () => {
+test('a rename that cannot remove the old name leaves the file as it was: the new name is taken away again', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const { docs, sub, done } = documents();
   let got;
   assert.ok(swappedAt({ names: ['unlinkSync'], when: () => true }, failing('EACCES'), () => { got = code(() => renameFile(docs, 'doc.md', 'new.md')); }));
@@ -1674,7 +1713,7 @@ function expecting() {
   return { ...made, other, expect: { dev: stat.dev, ino: stat.ino }, swapFolders };
 }
 
-test('removeFile and renameFile with expect act in the folder named by its device and inode, in whatever form they are told, and in no other', () => {
+test('removeFile and renameFile with expect act in the folder named by its device and inode, in whatever form they are told, and in no other', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   for (const form of [(id) => id, (id) => ({ dev: String(id.dev), ino: String(id.ino) }), (id) => ({ dev: Number(id.dev), ino: String(id.ino) })]) {
     const { docs, sub, expect, done } = expecting();
     assert.equal(renameFile(docs, 'doc.md', 'a.md', { expect: form(expect) }), 'a.md');
@@ -1703,7 +1742,7 @@ test('removeFile and renameFile with expect act in the folder named by its devic
   }
 });
 
-test('a folder moved onto the documents folder\'s place before it is held is not acted in when the folder is expected: what is in it stays; without it, it is acted in', () => {
+test('a folder moved onto the documents folder\'s place before it is held is not acted in when the folder is expected: what is in it stays; without it, it is acted in', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   for (const [what, run] of [
     ['removeFile', (docs, options) => removeFile(docs, 'doc.md', options)],
     ['renameFile', (docs, options) => renameFile(docs, 'doc.md', 'new2.md', options)],
@@ -1731,7 +1770,7 @@ test('a folder moved onto the documents folder\'s place before it is held is not
   }
 });
 
-test('a folder moved onto the documents folder\'s place after it is held is no matter: the file goes from the folder that was checked, and what is at the place stays', () => {
+test('a folder moved onto the documents folder\'s place after it is held is no matter: the file goes from the folder that was checked, and what is at the place stays', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   for (const [what, run, point] of [
     ['removeFile', (docs, expect) => removeFile(docs, 'doc.md', { expect }), { names: ['unlinkSync'], when: () => true }],
     ['renameFile', (docs, expect) => renameFile(docs, 'doc.md', 'new2.md', { expect }), { names: ['linkSync'], when: () => true }],
@@ -1745,7 +1784,7 @@ test('a folder moved onto the documents folder\'s place after it is held is no m
   }
 });
 
-test('a rename whose old name is taken by a folder just before it is removed keeps the new name: the file is not deleted for it', () => {
+test('a rename whose old name is taken by a folder just before it is removed keeps the new name: the file is not deleted for it', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const { docs, sub, leaf, done } = documents();
   let got;
   // The agent removes the file's old name and makes a folder of that name, in the time between the new name and the removal of the old one.
@@ -1756,7 +1795,7 @@ test('a rename whose old name is taken by a folder just before it is removed kee
   done();
 });
 
-test('a rename whose old name is taken by a folder while the file has a name elsewhere gives the new name up, and says the file changed', () => {
+test('a rename whose old name is taken by a folder while the file has a name elsewhere gives the new name up, and says the file changed', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const { docs, sub, leaf, outside, done } = documents();
   linkSync(leaf, path.join(outside, 'second'));
   let got;
@@ -1767,7 +1806,7 @@ test('a rename whose old name is taken by a folder while the file has a name els
   done();
 });
 
-test('a rename that cannot remove the old name does not take away a new name that is another file\'s by then', () => {
+test('a rename that cannot remove the old name does not take away a new name that is another file\'s by then', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const { docs, sub, leaf, done } = documents();
   let got;
   assert.ok(swappedAt({ names: ['unlinkSync'], when: () => true }, () => {
@@ -1781,7 +1820,7 @@ test('a rename that cannot remove the old name does not take away a new name tha
   done();
 });
 
-test('too many links to the file is the system\'s refusal of a rename, said as one', () => {
+test('too many links to the file is the system\'s refusal of a rename, said as one', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   const { docs, sub, done } = documents();
   let got;
   try {
@@ -1795,7 +1834,7 @@ test('too many links to the file is the system\'s refusal of a rename, said as o
   done();
 });
 
-test('the swaps above are what a path-based removal and rename are fooled by: they take what is outside, a folder, a file that was made', () => {
+test('the swaps above are what a path-based removal and rename are fooled by: they take what is outside, a folder, a file that was made', { skip: (!LINKS && 'no links are made on this machine') }, () => {
   {
     const { docs, outside, swap, done } = documents();
     swappedAt({ names: ['rmSync'], when: () => true }, swap, () => naive.remove(docs, 'doc.md'));
@@ -1876,7 +1915,7 @@ const LIKE = { likeParent: true, chats: CHATS };
 const AS_DOCUMENT = { direct: true, alone: true, ...LIKE };
 const AT_DOCUMENTS = { direct: true, ...LIKE };
 
-test('a folder the sandbox closed to the agent is not used under another name, whoever owns it: not given an identity, listed, read, written, swept, removed in or renamed in', async () => {
+test('a folder the sandbox closed to the agent is not used under another name, whoever owns it: not given an identity, listed, read, written, swept, removed in or renamed in', { skip: (!POSIX && 'the sandbox and its agents are a POSIX thing') }, async () => {
   const { base, documents, swap, done } = closable();
   const own = () => ({ dev: String(statSync(documents).dev), ino: String(statSync(documents).ino) });
   // The agent's own folder is used as ever.
@@ -1906,7 +1945,7 @@ test('a folder the sandbox closed to the agent is not used under another name, w
   done();
 });
 
-test('a file the sandbox closed to the agent, moved into the documents folder, is not read or replaced; the others are', async () => {
+test('a file the sandbox closed to the agent, moved into the documents folder, is not read or replaced; the others are', { skip: (!POSIX && 'the sandbox and its agents are a POSIX thing') }, async () => {
   const { dir, documents, done } = closable();
   renameSync(path.join(dir, 'creds.md'), path.join(documents, 'creds.md'));
   assert.equal(readBytes(documents, 'plan.md', AS_DOCUMENT).bytes.toString(), '# ours', 'the folder is the agent\'s, and its file too');
@@ -1923,7 +1962,7 @@ test('a file the sandbox closed to the agent, moved into the documents folder, i
   done();
 });
 
-test('what the agent could use itself is used as ever: a folder of the sandbox\'s group, files of its own and of the other agents, files open to everyone, and a folder it can read but not change is read and not changed in', async () => {
+test('what the agent could use itself is used as ever: a folder of the sandbox\'s group, files of its own and of the other agents, files open to everyone, and a folder it can read but not change is read and not changed in', { skip: (!POSIX && 'the sandbox and its agents are a POSIX thing') }, async () => {
   const { base, dir, documents, done } = closable();
   const plan = path.join(documents, 'plan.md');
   // The usual layout: group-writable, the portal's files the same.
@@ -1957,7 +1996,7 @@ test('what the agent could use itself is used as ever: a folder of the sandbox\'
   done();
 });
 
-test('what the agent could use is told as the kernel tells it: the owner\'s bits and no others for the owner, the groups it is in, and everyone\'s', { skip: !root }, async () => {
+test('what the agent could use is told as the kernel tells it: the owner\'s bits and no others for the owner, the groups it is in, and everyone\'s', { skip: (!root) || (!POSIX && 'the sandbox and its agents are a POSIX thing') }, async () => {
   const { base, documents, done } = closable();
   const plan = path.join(documents, 'plan.md');
   const readable = (...options) => code(() => readBytes(documents, 'plan.md', AS_DOCUMENT)) === 'none';
@@ -1993,7 +2032,7 @@ test('what the agent could use is told as the kernel tells it: the owner\'s bits
   done();
 });
 
-test('a folder is checked as it is held: one swapped for the closed one between the look and the call is refused, and is not given an identity', async () => {
+test('a folder is checked as it is held: one swapped for the closed one between the look and the call is refused, and is not given an identity', { skip: (!POSIX && 'the sandbox and its agents are a POSIX thing') }, async () => {
   {
     const { base, documents, swap, done } = closable();
     // Looked at and found the agent's, then swapped before it is used: what is used is asked again of the folder it holds.
@@ -2023,7 +2062,7 @@ test('a folder is checked as it is held: one swapped for the closed one between 
   }
 });
 
-test('without a sandbox nothing is closed, and when it is not known who the agent is, everything is: the identity is the folder\'s own', async () => {
+test('without a sandbox nothing is closed, and when it is not known who the agent is, everything is: the identity is the folder\'s own', { skip: (!LINKS && 'no links are made on this machine') || (!POSIX && 'the sandbox and its agents are a POSIX thing') }, async () => {
   const { base, dir, documents, swap, done } = closable();
   swap();
   // The agent is the portal's own user: what the portal may use is used, however closed its mode.
@@ -2039,7 +2078,7 @@ test('without a sandbox nothing is closed, and when it is not known who the agen
   assert.deepEqual(folderIdentity(base, ''), { dev: String(own.dev), ino: String(own.ino) });
   assert.equal(code(() => folderIdentity(base, 'nope', { direct: true })), 'missing');
   assert.equal(code(() => folderIdentity(base, 'documents/secret.md')), 'invalid');
-  symlinkSync(documents, path.join(dir, 'link'));
+  linkTo(documents, path.join(dir, 'link'));
   assert.equal(code(() => folderIdentity(base, 'link', AT_DOCUMENTS)), 'invalid', 'a link is none');
   // Who the agent is not being told is not "no sandbox": it is refused, for every call that asks, and the calls that do not are as ever.
   setAgentAccess(() => { throw new Error('the sandbox did not say'); });
@@ -2052,7 +2091,7 @@ test('without a sandbox nothing is closed, and when it is not known who the agen
   done();
 });
 
-test('portal.files passes likeParent on: list, read, readBytes, open, write, folder, identity, removeFile, renameFile and sweepTemp refuse the closed folder', async () => {
+test('portal.files passes likeParent on: list, read, readBytes, open, write, folder, identity, removeFile, renameFile and sweepTemp refuse the closed folder', { skip: (!POSIX && 'the sandbox and its agents are a POSIX thing') }, async () => {
   const { base, documents, swap, done } = closable();
   swap();
   const use = { direct: true, alone: true, ...LIKE };
@@ -2103,7 +2142,7 @@ function nested() {
   return { dir, outer, proj, documents, inner, base: baseDir(proj), at: baseDir(documents), reopen: () => chmodSync(outer, 0o755), done: () => { setAgentAccess(() => undefined); done(); } };
 }
 
-test('a folder below a closed folder is closed too, though every folder in it has the rights the wider rule gave it: base, and what is reached through it, for every call', async () => {
+test('a folder below a closed folder is closed too, though every folder in it has the rights the wider rule gave it: base, and what is reached through it, for every call', { skip: (!POSIX && 'the sandbox and its agents are a POSIX thing') }, async () => {
   const { base, at, documents, proj, reopen, done } = nested();
   // The kernel refuses the agent every one of these: it cannot search the folder above. Whatever the folders below have.
   const refused = [
@@ -2138,7 +2177,7 @@ test('a folder below a closed folder is closed too, though every folder in it ha
   done();
 });
 
-test('a folder below base that is closed closes what is under it, for a path that is more than a name', async () => {
+test('a folder below base that is closed closes what is under it, for a path that is more than a name', { skip: (!POSIX && 'the sandbox and its agents are a POSIX thing') }, async () => {
   const { proj, base, reopen, done } = nested();
   reopen();
   // `inner` is root\'s alone; `deep` in it is the group\'s as ever.
@@ -2157,7 +2196,7 @@ test('a folder below base that is closed closes what is under it, for a path tha
   done();
 });
 
-test('no folder on the way to base is followed as a link: one swapped for a link after the path was checked, at the first open or on the way down, is refused, and nothing is read through it', async () => {
+test('no folder on the way to base is followed as a link: one swapped for a link after the path was checked, at the first open or on the way down, is refused, and nothing is read through it', { skip: (!LINKS && 'no links are made on this machine') || (!POSIX && 'the sandbox and its agents are a POSIX thing') }, async () => {
   // The link is put in place inside the call, after `resolveInside` has looked at the path (which would refuse a link that was there before): what
   // keeps it from being followed is the walk from `/`, one part at a time with O_NOFOLLOW. A walk that began at `base` would open `base` by its path.
   const calls = [
@@ -2181,7 +2220,7 @@ test('no folder on the way to base is followed as a link: one swapped for a link
       chmodSync(path.join(copy, 'documents', 'plan.md'), 0o666);
       const swap = () => {
         renameSync(proj, `${proj}.aside`);
-        symlinkSync(copy, proj);
+        linkTo(copy, proj);
       };
       let got;
       assert.ok(swappedAt(point, swap, () => { got = code(() => call(at)); }), `call ${n}: the link was put in place inside the call`);
@@ -2193,7 +2232,7 @@ test('no folder on the way to base is followed as a link: one swapped for a link
   }
 });
 
-test('the agents are the ones of the chats named, every one of which must be able to use the folder: no chat, an unknown chat, and one that cannot are refused', { skip: !root }, async () => {
+test('the agents are the ones of the chats named, every one of which must be able to use the folder: no chat, an unknown chat, and one that cannot are refused', { skip: (!root) || (!POSIX && 'the sandbox and its agents are a POSIX thing') }, async () => {
   const { base, documents, done } = closable();
   const OTHER = { uid: AGENT + 5, groups: [AGENT + 5] };
   const asked = [];
@@ -2221,7 +2260,7 @@ test('the agents are the ones of the chats named, every one of which must be abl
   done();
 });
 
-test('in a sticky folder the agents take away, rename or replace only what is their own, unless the folder is: write and search on it is not enough', async () => {
+test('in a sticky folder the agents take away, rename or replace only what is their own, unless the folder is: write and search on it is not enough', { skip: (!POSIX && 'the sandbox and its agents are a POSIX thing') }, async () => {
   const { documents, done } = closable();
   const plan = path.join(documents, 'plan.md');
   const sticky = (mode) => chmodSync(documents, mode);
@@ -2249,7 +2288,7 @@ test('in a sticky folder the agents take away, rename or replace only what is th
   done();
 });
 
-test('in a sticky folder what is the agent\'s own, or in a folder that is, is changed as ever', { skip: !root }, async () => {
+test('in a sticky folder what is the agent\'s own, or in a folder that is, is changed as ever', { skip: (!root) || (!POSIX && 'the sandbox and its agents are a POSIX thing') }, async () => {
   const { documents, done } = closable();
   chmodSync(documents, 0o3777);
   const own = path.join(documents, 'own.md');

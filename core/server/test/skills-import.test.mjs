@@ -5,6 +5,7 @@ import { once } from "node:events";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import express from "express";
 import { inProcessHome } from "./server-harness.mjs";
 
@@ -16,13 +17,50 @@ import { inProcessHome } from "./server-harness.mjs";
  * that leads into the portal's own files, an address that goes up out of the
  * clone, and one that has changed between the look and the import.
  */
+import * as gateFs from "node:fs";
+import gatePath from "node:path";
+import gateOs from "node:os";
+/**
+ * Links are made to prove these tests, and Windows lets them be made only with a privilege the machine it
+ * runs on commonly does not have: where they cannot be made, the tests proved with them are skipped.
+ */
+const LINKS = (() => {
+  const probe = gateFs.mkdtempSync(gatePath.join(gateOs.tmpdir(), "links-probe-"));
+  try {
+    gateFs.writeFileSync(gatePath.join(probe, "a-file"), "");
+    gateFs.mkdirSync(gatePath.join(probe, "a-folder"));
+    gateFs.symlinkSync(gatePath.join(probe, "a-file"), gatePath.join(probe, "file-link"));
+    gateFs.symlinkSync(gatePath.join(probe, "a-folder"), gatePath.join(probe, "folder-link"), "junction");
+    return true;
+  } catch {
+    return false;
+  }
+})();
+/** A link, in the shape this machine makes one: a junction for a folder, where a link of a folder wants a privilege. */
+function linkTo(target, link) {
+  let kind = "file";
+  try {
+    if (gateFs.statSync(target).isDirectory()) kind = "junction";
+  } catch {
+    kind = "file";
+  }
+  try {
+    gateFs.symlinkSync(target, link, kind);
+  } catch (e) {
+    if (e.code !== "EPERM") throw e;
+    gateFs.symlinkSync(target, link);
+  }
+}
+
 const home = inProcessHome("pithagoras-skills-import-");
 const agent = process.env.PI_CODING_AGENT_DIR;
 const skills = path.join(agent, "skills");
 const remote = path.join(home, "remote");
 const config = path.join(home, "gitconfig");
 // This machine's own git config, credential helpers and askpass are not part of the test.
-writeFileSync(config, `[url "file://${remote}/"]\n\tinsteadOf = https://github.com/\n[protocol "file"]\n\tallow = always\n`);
+// The folder as git writes an address: on Windows `file://C:/...`, on unix `file:///...`.
+const remoteUrl = pathToFileURL(remote).href.replace(/\/$/, "") + "/";
+writeFileSync(config, `[url "${remoteUrl}"]\n\tinsteadOf = https://github.com/\n[protocol "file"]\n\tallow = always\n`);
 process.env.GIT_CONFIG_GLOBAL = config;
 process.env.GIT_CONFIG_NOSYSTEM = "1";
 delete process.env.GIT_ASKPASS;
@@ -52,7 +90,7 @@ function commit(dir, files, message = "change") {
     const file = path.join(dir, rel);
     mkdirSync(path.dirname(file), { recursive: true });
     rmSync(file, { force: true });
-    if (typeof content === "object") symlinkSync(content.link, file);
+    if (typeof content === "object") linkTo(content.link, file);
     else writeFileSync(file, content);
   }
   git(dir, "add", "-A");
@@ -135,7 +173,7 @@ test("an address with a login in it is refused, and an ssh user is not a login",
   assert.equal(withoutLogin("see https://oauth2:tok@github.com/o/r.git and ssh://git:pw@h/x and git@h:o/r"), "see https://github.com/o/r.git and ssh://git@h/x and git@h:o/r");
 });
 
-test("a skill whose name is a place is not installed, and nothing outside the skills folder is touched", async () => {
+test("a skill whose name is a place is not installed, and nothing outside the skills folder is touched", { skip: !LINKS && 'no links are made on this machine' }, async () => {
   const user = fresh({ "auth.json": '{"key":"secret"}', "escaped/keep.txt": "keep", "settings.json": "{}" });
   repo(`${user}/bad`, {
     "up/SKILL.md": skillMd(".."),
@@ -163,7 +201,7 @@ test("a skill whose name is a place is not installed, and nothing outside the sk
   assert.deepEqual(Object.keys(after).filter((f) => !(f in before)).sort(), ["skills/fine/.source.json", "skills/fine/SKILL.md"]);
 });
 
-test("a repository's own .source.json, a link that leads into the portal's files, is not written through", async () => {
+test("a repository's own .source.json, a link that leads into the portal's files, is not written through", { skip: !LINKS && 'no links are made on this machine' }, async () => {
   const user = fresh();
   const victim = path.join(home, "victim");
   writeFileSync(victim, "the portal's database");
@@ -182,7 +220,7 @@ test("a repository's own .source.json, a link that leads into the portal's files
   assert.equal(readFileSync(path.join(skills, "pdf", "notes"), "utf8"), victim);
 });
 
-test("a link to a skill the user has is not a skill of the repository, and the user's is not deleted by it", async () => {
+test("a link to a skill the user has is not a skill of the repository, and the user's is not deleted by it", { skip: !LINKS && 'no links are made on this machine' }, async () => {
   const user = fresh({ "skills/foo/SKILL.md": skillMd("foo", "mine, and edited") });
   repo(`${user}/trap`, {
     "foo": { link: path.join(skills, "foo") },
@@ -195,14 +233,14 @@ test("a link to a skill the user has is not a skill of the repository, and the u
   assert.match(readFileSync(path.join(skills, "foo", "SKILL.md"), "utf8"), /mine, and edited/);
 });
 
-test("a SKILL.md that is a link to a device is looked at at once, and not read", async () => {
+test("a SKILL.md that is a link to a device is looked at at once, and not read", { skip: !LINKS && 'no links are made on this machine' }, async () => {
   const user = fresh();
   repo(`${user}/zero`, { "x/SKILL.md": { link: "/dev/zero" }, "ok/SKILL.md": skillMd("ok") });
   const looked = await previewFromGit(`${user}/zero`, skills);
   assert.ok(looked.found.some((f) => f.name === "ok"));
 });
 
-test("a skill at the top of the repository with no name of its own is named for the repository", async () => {
+test("a skill at the top of the repository with no name of its own is named for the repository", { skip: !LINKS && 'no links are made on this machine' }, async () => {
   const user = fresh();
   repo(`${user}/solo`, { "SKILL.md": skillMd(undefined, "A whole repository that is one skill"), "README.md": "readme" });
   const looked = await previewFromGit(`${user}/solo`, skills);
@@ -214,7 +252,7 @@ test("a skill at the top of the repository with no name of its own is named for 
   assert.equal(existsSync(path.join(skills, "solo", ".git")), false, "the repository's own git files do not come along");
 });
 
-test("a repository's .github and .gitignore come along with a skill, and its .git does not", async () => {
+test("a repository's .github and .gitignore come along with a skill, and its .git does not", { skip: !LINKS && 'no links are made on this machine' }, async () => {
   const user = fresh();
   repo(`${user}/dots`, { "SKILL.md": skillMd("dots"), ".github/ci.yml": "ci", ".gitignore": "x" });
   await importFromGit(`${user}/dots`, skills, {});
@@ -223,7 +261,7 @@ test("a repository's .github and .gitignore come along with a skill, and its .gi
   assert.equal(existsSync(path.join(skills, "dots", ".git")), false);
 });
 
-test("a name asked for that the repository does not have is said, not dropped", async () => {
+test("a name asked for that the repository does not have is said, not dropped", { skip: !LINKS && 'no links are made on this machine' }, async () => {
   const user = fresh();
   repo(`${user}/some`, { "pdf/SKILL.md": skillMd("pdf") });
   const result = await importFromGit(`${user}/some`, skills, { only: ["pdf", "gone"], overwrite: true });
@@ -231,7 +269,7 @@ test("a name asked for that the repository does not have is said, not dropped", 
   assert.deepEqual(result.skipped, [{ name: "gone", reason: "not in the repository any more" }]);
 });
 
-test("two skills of one repository with the same name are not installed over one another", async () => {
+test("two skills of one repository with the same name are not installed over one another", { skip: !LINKS && 'no links are made on this machine' }, async () => {
   const user = fresh();
   repo(`${user}/twins`, { "a/SKILL.md": skillMd("same"), "b/SKILL.md": skillMd("same") });
   const looked = await previewFromGit(`${user}/twins`, skills);
@@ -239,7 +277,7 @@ test("two skills of one repository with the same name are not installed over one
   assert.equal(looked.skipped.length, 1);
 });
 
-test("the address of a folder on a branch with a slash in its name is taken apart where the branch ends", async () => {
+test("the address of a folder on a branch with a slash in its name is taken apart where the branch ends", { skip: !LINKS && 'no links are made on this machine' }, async () => {
   const user = fresh();
   const dir = repo(`${user}/branches`, { "README.md": "main has no skills" });
   git(dir, "checkout", "-q", "-b", "release/2.0");
@@ -250,7 +288,7 @@ test("the address of a folder on a branch with a slash in its name is taken apar
   assert.equal(looked.sha, head);
 });
 
-test("a folder on a plain branch still is the branch and the folder", async () => {
+test("a folder on a plain branch still is the branch and the folder", { skip: !LINKS && 'no links are made on this machine' }, async () => {
   const user = fresh();
   repo(`${user}/plain`, { "skills/pdf/SKILL.md": skillMd("pdf"), "other/SKILL.md": skillMd("other") });
   const looked = await previewFromGit(`https://github.com/${user}/plain/tree/main/skills/pdf`, skills);
@@ -275,7 +313,7 @@ test("a repository that asks for a login fails at once, saying it is private, in
   }
 });
 
-test("what is installed is what was looked at, also when the branch has moved on", async () => {
+test("what is installed is what was looked at, also when the branch has moved on", { skip: !LINKS && 'no links are made on this machine' }, async () => {
   const user = fresh();
   const dir = repo(`${user}/moving`, { "pdf/SKILL.md": skillMd("pdf", "version one") });
   const looked = await previewFromGit(`${user}/moving`, skills);
@@ -290,14 +328,14 @@ test("what is installed is what was looked at, also when the branch has moved on
   assert.match(readFileSync(path.join(skills, "pdf", "SKILL.md"), "utf8"), /version two/);
 });
 
-test("a commit that is not there any more is said, and nothing is installed", async () => {
+test("a commit that is not there any more is said, and nothing is installed", { skip: !LINKS && 'no links are made on this machine' }, async () => {
   const user = fresh();
   repo(`${user}/gone`, { "pdf/SKILL.md": skillMd("pdf") });
   await assert.rejects(importFromGit(`${user}/gone`, skills, { sha: "0".repeat(40) }), /changed since you looked at it/);
   assert.equal(existsSync(path.join(skills, "pdf")), false);
 });
 
-test("a folder is fetched on its own, and links are not checked out, as the clone is made", async () => {
+test("a folder is fetched on its own, and links are not checked out, as the clone is made", { skip: !LINKS && 'no links are made on this machine' }, async () => {
   const user = fresh();
   repo(`${user}/mono`, { "skills/pdf/SKILL.md": skillMd("pdf"), "big/blob.bin": "x".repeat(1000) });
   // A git that says how it was called, in front of the real one.
@@ -325,7 +363,7 @@ test("a folder is fetched on its own, and links are not checked out, as the clon
   assert.match(readFileSync(log, "utf8"), /sparse-checkout set -- skills\/pdf/);
 });
 
-test("a skill that cannot be put in place leaves the installed one as it was, and says so", { skip: process.getuid?.() === 0 && "root is not held to a folder's permissions" }, async () => {
+test("a skill that cannot be put in place leaves the installed one as it was, and says so", { skip: (process.getuid?.() === 0 && "root is not held to a folder's permissions") || (!LINKS && 'no links are made on this machine') }, async () => {
   const user = fresh({ "skills/pdf/SKILL.md": skillMd("pdf", "mine"), "skills/pdf/extra.txt": "kept" });
   repo(`${user}/blocked`, { "pdf/SKILL.md": skillMd("pdf", "theirs") });
   chmodSync(skills, 0o555);
@@ -342,7 +380,7 @@ test("a skill that cannot be put in place leaves the installed one as it was, an
   assert.equal(readFileSync(path.join(skills, "pdf", "extra.txt"), "utf8"), "kept");
 });
 
-test("a copy made on the way is not left behind, and is not a skill to pi", async () => {
+test("a copy made on the way is not left behind, and is not a skill to pi", { skip: !LINKS && 'no links are made on this machine' }, async () => {
   const user = fresh({ "skills/pdf/SKILL.md": skillMd("pdf", "mine") });
   repo(`${user}/tidy`, { "pdf/SKILL.md": skillMd("pdf", "theirs") });
   await importFromGit(`${user}/tidy`, skills, { overwrite: true });
@@ -350,7 +388,7 @@ test("a copy made on the way is not left behind, and is not a skill to pi", asyn
   assert.match(readFileSync(path.join(skills, "pdf", "SKILL.md"), "utf8"), /theirs/);
 });
 
-test("the origin is kept without a login, and one an older import kept is shown and written again without", async () => {
+test("the origin is kept without a login, and one an older import kept is shown and written again without", { skip: !LINKS && 'no links are made on this machine' }, async () => {
   const user = fresh();
   repo(`${user}/old`, { "old/SKILL.md": skillMd("old") });
   mkdirSync(path.join(skills, "old"), { recursive: true });
@@ -371,14 +409,14 @@ test("the origin is kept without a login, and one an older import kept is shown 
   assert.doesNotMatch(readFileSync(path.join(skills, "old", ".source.json"), "utf8"), /ghp_token|oauth2/);
 });
 
-test("a source file that is a link is not read", () => {
+test("a source file that is a link is not read", { skip: !LINKS && 'no links are made on this machine' }, () => {
   fresh();
   mkdirSync(path.join(skills, "linked"), { recursive: true });
-  symlinkSync("/dev/zero", path.join(skills, "linked", ".source.json"));
+  linkTo("/dev/zero", path.join(skills, "linked", ".source.json"));
   assert.equal(readSource(path.join(skills, "linked")), null);
 });
 
-test("the routes: a look says which commit it saw, an import takes it, and what cannot be asked is refused", async () => {
+test("the routes: a look says which commit it saw, an import takes it, and what cannot be asked is refused", { skip: !LINKS && 'no links are made on this machine' }, async () => {
   const user = fresh();
   repo(`${user}/routes`, { "pdf/SKILL.md": skillMd("pdf") });
 
@@ -405,7 +443,7 @@ test("the routes: a look says which commit it saw, an import takes it, and what 
   assert.deepEqual((await done.json()).imported, ["pdf"]);
 });
 
-test("an update that finds nothing says so, and one that finds the skill changes it", async () => {
+test("an update that finds nothing says so, and one that finds the skill changes it", { skip: !LINKS && 'no links are made on this machine' }, async () => {
   const user = fresh();
   const dir = repo(`${user}/upstream`, { "pdf/SKILL.md": skillMd("pdf", "version one") });
   await importFromGit(`${user}/upstream`, skills, { overwrite: true });

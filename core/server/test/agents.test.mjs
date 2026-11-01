@@ -7,6 +7,9 @@ import test from "node:test";
 import Database from "better-sqlite3";
 import { freePort, serverEnv, startServer, testHome } from "./server-harness.mjs";
 
+/** The sandbox's agents are users, and users are a POSIX thing: where the machine has none, the tests about them are skipped. */
+const POSIX = process.platform !== "win32" && typeof process.getuid === "function";
+
 const home = testHome("agents-");
 // The first agent is named from its SOUL.md, as the setup wizard writes it.
 writeFileSync(path.join(home, "agent-home", "SOUL.md"), "Who you are.\n\n---\n\n# Nova\n\nWarm and direct.\n");
@@ -124,7 +127,7 @@ test("an agent made in a folder that already holds its own files says which, wit
   assert.deepEqual(fresh.body.kept, []);
 });
 
-test("deleting an agent stops the jobs its chats started, in a folder that is kept as well", async () => {
+test("deleting an agent stops the jobs its chats started, in a folder that is kept as well", { skip: SANDBOX }, async () => {
   const made = (await call("POST", "/api/agents", { name: "Jobber" })).body;
   await withJob(made.home, async () => {
     const gone = await call("DELETE", `/api/agents/${made.id}`);
@@ -133,7 +136,7 @@ test("deleting an agent stops the jobs its chats started, in a folder that is ke
   });
 });
 
-test("deleting a project stops the jobs its chats started", async () => {
+test("deleting a project stops the jobs its chats started", { skip: SANDBOX }, async () => {
   const project = await call("POST", "/api/projects", { name: "Jobs" });
   assert.equal(project.status, 200, JSON.stringify(project.body));
   await withJob(project.body.path, async () => {
@@ -143,7 +146,7 @@ test("deleting a project stops the jobs its chats started", async () => {
   });
 });
 
-test("deleting an agent or a project stops a job that started after the last look at its folder", async () => {
+test("deleting an agent or a project stops a job that started after the last look at its folder", { skip: SANDBOX }, async () => {
   // The jobs panel of an open chat looks every few seconds, and what a look finds is kept for a second.
   const looked = async (folder, chat) => {
     assert.equal((await call("GET", `/api/sessions/${chat}/background`)).status, 200);

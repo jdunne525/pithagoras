@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { lstat, readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { insideReal, isUnderText, realPath } from "./within.js";
 
 /**
@@ -651,8 +652,20 @@ async function tracksAround(repo: Repo): Promise<boolean> {
 
 /** Where a remote's URL is on this machine, or null when it is elsewhere. */
 function localRemote(url: string, base: string): string | null {
-  if (url.startsWith("file://")) return url.slice("file://".length);
+  if (url.startsWith("file://")) {
+    if (process.platform === "win32") {
+      // There a file URL is the only shape a path takes in a URL: `file:///G:/work/x`.
+      try {
+        return fileURLToPath(url);
+      } catch {
+        return null;
+      }
+    }
+    return url.slice("file://".length);
+  }
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) return null;
+  // A Windows path with a drive letter, which git writes `C:/work/x`: the colon comes before any slash, as `user@host:path` does, and is not a remote's host.
+  if (process.platform === "win32" && /^[a-z]:[\\/]/i.test(url)) return path.resolve(base, url);
   // user@host:path, as scp writes it: a colon before any slash.
   if (/^[^/]*:/.test(url)) return null;
   return path.resolve(base, url);

@@ -102,15 +102,26 @@ export function scratch(prefix) {
  * and npm's commands are batch files, so there the program is wrapped in a `pi.cmd` of the same name.
  */
 export function fakePi(bin, source) {
+  return fakeProgram(bin, "pi", source);
+}
+
+/**
+ * A program a test wants on the PATH, answering to `name` in `bin`: `source` is a Node program, run by this same
+ * Node, with its arguments in `process.argv.slice(2)`, its output on stdout, and a failure a non-zero exit.
+ *
+ * On unix the file answers to its own name, with this Node in its shebang. Windows runs only the files PATHEXT
+ * knows, and npm's commands are batch files, so there the program is wrapped in a `.cmd` of the same name.
+ */
+export function fakeProgram(bin, name, source) {
   mkdirSync(bin, { recursive: true });
-  const script = path.join(bin, "pi-impl.js");
+  const script = path.join(bin, `${name}-impl.js`);
   writeFileSync(script, source);
   if (process.platform === "win32") {
-    const wrapper = path.join(bin, "pi.cmd");
+    const wrapper = path.join(bin, `${name}.cmd`);
     writeFileSync(wrapper, `@echo off\r\n"${process.execPath}" "${script}" %*\r\nexit /b %ERRORLEVEL%\r\n`);
     return wrapper;
   }
-  const file = path.join(bin, "pi");
+  const file = path.join(bin, name);
   writeFileSync(file, `#!${process.execPath}\n${source}`);
   chmodSync(file, 0o755);
   return file;

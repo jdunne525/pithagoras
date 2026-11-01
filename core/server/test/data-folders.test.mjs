@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, realpathSync, rmSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { freePort, runToEnd, serverEnv, startServer, testHome } from "./server-harness.mjs";
 
 // A portal started from source, as somebody who is not root: the folders it keeps for itself that nothing
@@ -30,7 +30,8 @@ test("the folders it names itself are where it says", async () => {
   assert.equal(agentHomePath(), path.join(own, "agent-home"));
   const { dataFolder } = await import("../dist/data-dir.js");
   process.env.BIN_DIR = "/somewhere/else";
-  assert.equal(dataFolder("BIN_DIR", "bin"), "/somewhere/else");
+  // As the OS reads the name: on Windows a path that begins with / has no root of its own, and is taken on the current drive.
+  assert.equal(dataFolder("BIN_DIR", "bin"), path.resolve("/somewhere/else"));
   delete process.env.BIN_DIR;
   assert.equal(dataFolder("BIN_DIR", "bin"), path.join(own, "bin"));
 });
@@ -41,7 +42,7 @@ test("with no DATA_DIR at all, a folder of the data directory is in ./data, not 
   delete env.DATA_DIR;
   delete env.BIN_DIR;
   const module = fileURLToPath(new URL("../dist/data-dir.js", import.meta.url));
-  const { code, out, err } = await runToEnd(["--input-type=module", "-e", `const { dataFolder } = await import(${JSON.stringify(module)}); console.log(dataFolder("BIN_DIR", "bin"));`], env, { cwd });
+  const { code, out, err } = await runToEnd(["--input-type=module", "-e", `const { dataFolder } = await import(${JSON.stringify(pathToFileURL(module).href)}); console.log(dataFolder("BIN_DIR", "bin"));`], env, { cwd });
   assert.equal(code, 0, err);
   // As the process has its folder: where a temporary one is behind a link, the folder the link leads to.
   assert.equal(out.trim(), path.join(realpathSync(cwd), "data", "bin"));

@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import {
   type BigIntStats,
+  chmodSync,
   closeSync,
   constants,
   existsSync,
@@ -8,6 +9,7 @@ import {
   fchownSync,
   fstatSync,
   fsyncSync,
+  ftruncateSync,
   linkSync,
   lstatSync,
   mkdirSync,
@@ -793,6 +795,9 @@ function madeIn(held: Held): { mode: number; owner: Owner } {
  * lets write.
  */
 function handOver(fd: number, owner: Owner, mode: number, held: Held): void {
+  // Windows has no owner and no mode bits to give: a file takes what the folder it was made in hands down, and
+  // `fchmod` of a folder is refused outright (EPERM), which would stop a folder from being made at all.
+  if (process.platform === "win32") return;
   if (held.pinned) {
     try {
       fchownSync(fd, owner.uid, owner.gid);
@@ -808,6 +813,35 @@ function handOver(fd: number, owner: Owner, mode: number, held: Held): void {
   // After the owner: giving a file away takes setuid and setgid off it, and they are not carried over in any case.
   if (fstatSync(fd).gid !== owner.gid) mode &= ~0o2020;
   fchmodSync(fd, mode);
+}
+
+/**
+ * A rename that puts `from` over the name `to`: on Windows a file marked read-only cannot be replaced, so its
+ * attribute is put aside for the rename and given back after it. Elsewhere a rename is a rename.
+ */
+function renameOver(from: string, to: string): void {
+  if (process.platform !== "win32") {
+    renameSync(from, to);
+    return;
+  }
+  const was = lstatSync(to, { throwIfNoEntry: false });
+  const readOnly = was !== undefined && !was.isDirectory() && (was.mode & 0o200) === 0;
+  const restore = (): void => {
+    if (!was || !readOnly) return;
+    try {
+      chmodSync(to, was.mode & 0o7777);
+    } catch {
+      // The name holds the new file now, as asked.
+    }
+  };
+  if (readOnly) chmodSync(to, (was.mode | 0o200) & 0o7777);
+  try {
+    renameSync(from, to);
+  } catch (e) {
+    restore();
+    throw e;
+  }
+  restore();
 }
 
 /**
@@ -894,6 +928,7 @@ export function writeText(
 
     const tempName = `.${tempStem(name)}.${randomBytes(6).toString("hex")}.tmp`;
     let fd: number | undefined;
+    let after: BigIntStats | undefined;
     try {
       fd = openSync(held.at(tempName), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, mode);
       // What the file had: the mode is cut by the umask on creation, and the owner is not ours if the portal runs as another user.
@@ -902,7 +937,46 @@ export function writeText(
       while (written < data.length) written += writeSync(fd, data, written, data.length - written, written);
       fsyncSync(fd);
       if (existed) {
-        renameSync(held.at(tempName), held.at(name));
+        try {
+          renameOver(held.at(tempName), held.at(name));
+        } catch (e) {
+          // Windows: a file that somebody has open — an editor, the portal's own download of it — cannot be put
+          // a new one in its place, which is the whole of the save above. The bytes go through the name's own
+          // door, safe because the file was just checked against what this save began with (`expected`), and
+          // the empty file beside it is taken away. The one promise that is given up is the old contents
+          // surviving a failure in the middle of the write, which is what the door in the file cannot keep.
+          if (process.platform !== "win32" || (e as NodeJS.ErrnoException).code !== "EPERM") throw e;
+          closeSync(fd);
+          fd = undefined;
+          rmSync(held.at(tempName), { force: true });
+          // A file marked read-only takes its attribute off for the writing, and has it put back after.
+          const target = held.at(name);
+          const was = lstatSync(target, { throwIfNoEntry: false });
+          const readOnly = was !== undefined && (was.mode & 0o200) === 0;
+          if (readOnly) chmodSync(target, (was.mode | 0o200) & 0o7777);
+          try {
+            const inPlace = openPlain(target, constants.O_WRONLY | constants.O_NOFOLLOW);
+            try {
+              let done = 0;
+              while (done < data.length) done += writeSync(inPlace, data, done, data.length - done, done);
+              ftruncateSync(inPlace, data.length);
+              fsyncSync(inPlace);
+            } finally {
+              closeSync(inPlace);
+            }
+          } finally {
+            if (was !== undefined && readOnly) {
+              try {
+                chmodSync(target, was.mode & 0o7777);
+              } catch {
+                // The name keeps what was written, as asked.
+              }
+            }
+          }
+          // Times are taken from the name after the last handle of it is closed: while one is open, the
+          // file system gives the times it will have, and they move when it lets go.
+          after = lstatSync(target, { bigint: true });
+        }
       } else {
         // A file that is made is not put over one that has appeared since: a link
         // fails where a rename would replace. Where links are not possible, rename.
@@ -910,16 +984,25 @@ export function writeText(
           linkSync(held.at(tempName), held.at(name));
           unlinkSync(held.at(tempName));
         } catch (e) {
-          if ((e as NodeJS.ErrnoException).code === "EEXIST") throw new FileError("conflict", CHANGED);
-          renameSync(held.at(tempName), held.at(name));
+          const code = (e as NodeJS.ErrnoException).code;
+          if (code === "EEXIST") throw new FileError("conflict", CHANGED);
+          // Where links are not possible, a rename. A name that has appeared since is still not put over,
+          // and on Windows a read-only file is given back its attribute after the rename.
+          if (lexists(held.at(name))) {
+            rmSync(held.at(tempName), { force: true });
+            throw new FileError("conflict", CHANGED);
+          }
+          renameOver(held.at(tempName), held.at(name));
         }
       }
-      // After the rename or link, which both change the file's times.
-      const after = fstatSync(fd, { bigint: true });
-      closeSync(fd);
+      // The times of the name as it now stands, read the way a later look reads them: the file system stamps
+      // a file's times as its handles close, so the descriptor that wrote them can report them too early.
+      if (fd !== undefined) closeSync(fd);
       fd = undefined;
+      if (after === undefined) after = lstatSync(held.at(name), { bigint: true });
       syncFolder(held);
-      return { size: Number(after.size), mtime: mtimeOf(after), change: changeOf(after) };
+      const stats = after as BigIntStats; // The save above leaves the times it wrote, from the file it wrote them to.
+      return { size: Number(stats.size), mtime: mtimeOf(stats), change: changeOf(stats) };
     } catch (e) {
       if (fd !== undefined) closeSync(fd);
       rmSync(held.at(tempName), { force: true });
