@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Fully cleans all build artifacts and rebuilds the Pithagoras project from scratch.
 
@@ -6,7 +6,7 @@
     Switching git branches does not remove previously compiled output, because the
     dist/ directories are gitignored. Running `tsc` / `vite build` only writes changed
     files and never deletes orphaned ones, so code from another branch can linger in
-    server/dist and web/dist. This script wipes every build artifact and recompiles
+    core/server/dist and core/web/dist. This script wipes every build artifact and recompiles
     cleanly so your working branch is what actually gets served.
 
 .PARAMETER Start
@@ -53,10 +53,10 @@ function Remove-Artifact($spec) {
     }
     Write-Host "  removed: $spec" -ForegroundColor DarkGray
 }
-Remove-Artifact 'server/dist'
-Remove-Artifact 'web/dist'
-Remove-Artifact 'server/tsconfig.tsbuildinfo'
-Remove-Artifact 'web/tsconfig.tsbuildinfo'
+Remove-Artifact 'core/server/dist'
+Remove-Artifact 'core/web/dist'
+Remove-Artifact 'core/server/tsconfig.tsbuildinfo'
+Remove-Artifact 'core/web/tsconfig.tsbuildinfo'
 Remove-Artifact '*.tsbuildinfo'
 
 # 3. Ensure dependencies are installed

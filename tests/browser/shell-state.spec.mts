@@ -27,7 +27,6 @@ async function portal(page: Page, opts: Opts = {}) {
       return opts.answer ?? { ok: true };
     }
     if (p.endsWith('/config')) return { live: false, state: null, stats: null, thinking: { levels: [] }, models: { models: [] }, named: { provider: null, model: null } };
-    if (p.endsWith('/canvases')) return [];
   }, { streams: 'none', settings: true });
   await page.addInitScript(() => {
     // The page's animations are on here: the sidebar measures its rows only then.
@@ -118,6 +117,9 @@ test('a reply ending replaces what was written so far, also when the end comes r
 
 test('a poll that finds the chats as they were does not draw the sidebar again', async ({ page }) => {
   const { asked } = await portal(page);
+  // Home and the projects as the page knew them from before, and as the portal says they are. Not known, they are
+  // asked for once the chats are drawn, and their answer draws the sidebar again: late, that came after the count.
+  await page.addInitScript(() => localStorage.setItem('knownPlaces', JSON.stringify({ home: '/h', agents: [], projects: [] })));
   await page.goto('/s/a');
   await expect(page.getByRole('complementary', { name: 'Sidebar' }).getByText('Chat B')).toBeVisible();
   await page.evaluate(() => (window as any).hide(true));
@@ -133,18 +135,18 @@ test('a poll that finds the chats as they were does not draw the sidebar again',
   expect(await measured(page)).toBe(before);
 });
 
-test('going from chat to chat does not ask for the list and the browser again', async ({ page }) => {
+test('going from chat to chat does not ask for the list again, nor a chat for the feature flags at all', async ({ page }) => {
   const { asked } = await portal(page);
   await page.goto('/s/a');
   const side = page.getByRole('complementary', { name: 'Sidebar' });
   await expect(side.getByText('Chat B')).toBeVisible();
-  await expect.poll(() => asked['/api/browser']).toBeGreaterThan(0);
-  const [browser, list] = [asked['/api/browser'], asked['/api/sessions']];
+  const list = asked['/api/sessions'];
   for (const name of ['Chat B', 'Chat C', 'Chat D']) {
     await side.getByText(name).click();
     await expect(page.getByRole('heading', { name })).toBeVisible();
   }
-  expect([asked['/api/browser'], asked['/api/sessions']]).toEqual([browser, list]);
+  // What a chat's menus once asked of them (whether the subagent tool was on) is the subagent extension's to draw.
+  expect([asked['/api/features/flags'] ?? 0, asked['/api/sessions']]).toEqual([0, list]);
 });
 
 test('a chat the portal has none of says so, and is not retried as a lost connection', async ({ page }) => {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_ORB, ORB_EYES, ORB_HATS, ORB_ITEM_COLORS, ORB_PALETTES, ORB_PATTERNS, ORB_PERSONALITIES, ORB_PROPS, hexToRgb, itemColor, normalizeOrb } from '../server/src/orb-style.ts';
+import { DEFAULT_ORB, ORB_EYES, ORB_HATS, ORB_ITEM_COLORS, ORB_PALETTES, ORB_PATTERNS, ORB_PERSONALITIES, ORB_PROPS, hexToRgb, itemColor, normalizeOrb } from '../core/server/src/orb-style.ts';
 
 test('nothing stored is the orb as it always was',()=>{
  assert.deepEqual(normalizeOrb(undefined),DEFAULT_ORB);
@@ -84,4 +84,13 @@ test('a pattern is kept when known, and the old ribbons switch becomes one',()=>
  // Saved before patterns existed.
  assert.equal(normalizeOrb({ribbons:false}).pattern,'none');
  assert.equal(normalizeOrb({ribbons:true}).pattern,'ribbons');
+});
+
+test("the avatar is the orb unless an extension's is chosen, by its key",()=>{
+ assert.equal(DEFAULT_ORB.avatar,'orb');
+ // Stored before there was a choice.
+ assert.equal(normalizeOrb({personality:'calm'}).avatar,'orb');
+ for(const avatar of ['',42,null,['test-puppet/puppet'],'x'.repeat(257)])assert.equal(normalizeOrb({avatar}).avatar,'orb');
+ assert.equal(normalizeOrb({avatar:'test-puppet/puppet'}).avatar,'test-puppet/puppet');
+ assert.equal(normalizeOrb({avatar:'@codacus/notes/'+'x'.repeat(241)}).avatar.length,256);
 });

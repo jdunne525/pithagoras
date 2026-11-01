@@ -11,7 +11,7 @@ const ALL = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 const config = (model: typeof modelA, levels: string[], named: { provider: string | null; model: string | null } = { provider: null, model: null }, models = [modelA, modelB]) =>
   ({ live: false, state: { model, thinkingLevel: 'medium' }, stats: null, thinking: { levels }, models: { models }, named });
 
-async function portal(page: Page, opts: { streamsOpen?: boolean; listHangs?: boolean } = {}) {
+async function portal(page: Page, opts: { streamsOpen?: boolean } = {}) {
   const at = new Date().toISOString();
   const chat = (id: string, title: string, provider: string | null = null) =>
     ({ id, title, workspace: '/w/site', status: 'idle', kind: 'task', pinned: false, updated_at: at, provider, model: null, thinking_level: null });
@@ -52,8 +52,6 @@ async function portal(page: Page, opts: { streamsOpen?: boolean; listHangs?: boo
     // No default set in the portal: pi's own, which an idle chat cannot name.
     if (p === '/api/sessions/g/config') return config({ id: 'default', name: "pi's default", provider: 'llama-swap' }, []);
     // The browser has no connection for it: asked, and never answered.
-    if (p.endsWith('/canvases') && opts.listHangs) return HANG;
-    if (p.endsWith('/canvases')) return [];
     if (p === '/api/workspaces') return { root: '/w', workspaces: [] };
     if (p === '/api/models') return { models: [], providers: {} };
   }, { streams: opts.streamsOpen === false ? 'pending' : 'open', settings: true });
@@ -85,12 +83,12 @@ const open = async (page: Page, title: string, id: string) => {
   await expect(page).toHaveURL(new RegExp(`/s/${id}$`));
 };
 
-test('a chat keeps one stream, its canvases on it, hidden or not', async ({ page }) => {
+test('a chat keeps one stream, hidden or not', async ({ page }) => {
   await page.clock.install();
   await portal(page);
   await page.goto('/s/a');
   await expect.poll(() => streams(page)).toEqual(['/api/sessions/a/events?since=0']);
-  // Its canvases come on it: they had a stream of their own.
+  // What the installed extensions' server halves say comes on it too: no stream of their own.
   expect(await everAsked(page)).toEqual(['/api/sessions/a/events?since=0']);
 
   // A hidden tab keeps it: hands-free voice speaks its replies there, a
@@ -99,31 +97,6 @@ test('a chat keeps one stream, its canvases on it, hidden or not', async ({ page
   await page.evaluate(() => (window as any).hide(true));
   await page.clock.fastForward(120_000);
   expect(await streams(page)).toEqual(['/api/sessions/a/events?since=0']);
-});
-
-test('the canvas list comes on the stream once, not asked for again beside it', async ({ page }) => {
-  const { asked } = await portal(page);
-  await page.goto('/s/a');
-  await expect.poll(() => streams(page)).toEqual(['/api/sessions/a/events?since=0']);
-  await page.evaluate(() => {
-    const s = (window as any).streams.find((s: any) => !s.closed);
-    // Sent first on every connection, before the panel is drawn.
-    s.emit('canvas', { type: 'snapshot', canvases: [] });
-    s.emit('message', { seq: 7, type: 'portal_prompt', payload: { message: 'Hello there' } });
-    s.emit('caught-up', { seq: 7 });
-  });
-  await expect(page.getByText('Hello there')).toBeVisible();
-  await page.waitForTimeout(500);
-  expect(asked['/api/sessions/a/canvases'] ?? 0).toBe(0);
-});
-
-test('the canvas list is asked for when the stream does not come up', async ({ page }) => {
-  // The browser has no connection to give it: the stream stays pending.
-  // Before, the panel waited on it for ever, empty and saying nothing.
-  const { asked } = await portal(page, { streamsOpen: false });
-  await page.goto('/s/a');
-  await expect.poll(() => streams(page)).toEqual(['/api/sessions/a/events?since=0']);
-  await expect.poll(() => asked['/api/sessions/a/canvases'] ?? 0, { timeout: 6000 }).toBeGreaterThan(0);
 });
 
 test("a chat on the default model draws the default's effort control before its own answer comes", async ({ page }) => {
@@ -156,7 +129,9 @@ test("a model picked in a chat on the default is not kept as the default's", asy
   // Picked here: the chat is on a model of its own now, with seven levels.
   await page.getByTitle('model-a', { exact: true }).click();
   await page.getByRole('button', { name: 'More models' }).click();
-  await page.getByTitle('model-b', { exact: true }).click();
+  // By its name, not its title: the list opens under the pointer, and the title of the model it comes to rest on is
+  // lifted into the portal's own tooltip (tooltips.ts), so a title would find nothing.
+  await page.getByRole('group', { name: 'Models' }).getByRole('button', { name: 'Model B' }).click();
   await expect(page.getByTitle('Effort / thinking level')).toHaveText('medium');
   // Chat b is still on the default, which switches on and off.
   await open(page, 'Second chat', 'b');
@@ -212,12 +187,3 @@ test("pi's own default, which cannot be named, keeps what was drawn", async ({ p
   await expect(page.getByTitle('Thinking on / off')).toHaveText('thinking on');
 });
 
-test('the canvas list is asked for once at a time while no connection is free', async ({ page }) => {
-  // Neither the stream nor the list gets a connection. One more ask every
-  // five seconds piled up in the browser's queue, to go out together.
-  const { asked } = await portal(page, { streamsOpen: false, listHangs: true });
-  await page.goto('/s/a');
-  await expect.poll(() => asked['/api/sessions/a/canvases'] ?? 0, { timeout: 6000 }).toBe(1);
-  await page.waitForTimeout(11_000);
-  expect(asked['/api/sessions/a/canvases']).toBe(1);
-});

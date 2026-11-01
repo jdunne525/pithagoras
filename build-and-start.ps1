@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Cleanly rebuilds every part of Pithagoras and then starts the server, in one step.
 
@@ -8,8 +8,8 @@
     full clean build of both the server and the web frontend, and then launches
     the server from the freshly built dist. Because it always rebuilds from
     scratch, the bundle that gets served always reflects the current source —
-    there is no way to start against an old or half-built server/dist or
-    web/dist. This is the script to use whenever you have changed source and
+    there is no way to start against an old or half-built core/server/dist or
+    core/web/dist. This is the script to use whenever you have changed source and
     want a guaranteed-fresh app, rather than the two-step
     .\rebuild.ps1 followed by .\start.ps1.
 
@@ -56,10 +56,10 @@ function Remove-Artifact($spec) {
     }
     Write-Host "  removed: $spec" -ForegroundColor DarkGray
 }
-Remove-Artifact 'server/dist'
-Remove-Artifact 'web/dist'
-Remove-Artifact 'server/tsconfig.tsbuildinfo'
-Remove-Artifact 'web/tsconfig.tsbuildinfo'
+Remove-Artifact 'core/server/dist'
+Remove-Artifact 'core/web/dist'
+Remove-Artifact 'core/server/tsconfig.tsbuildinfo'
+Remove-Artifact 'core/web/tsconfig.tsbuildinfo'
 Remove-Artifact '*.tsbuildinfo'
 
 # 3. Ensure dependencies are installed

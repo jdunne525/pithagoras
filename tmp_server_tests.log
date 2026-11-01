@@ -1,0 +1,989 @@
+✔ a channel talks as its agent, and moved back finds its old conversations (53.2049ms)
+✔ an agent a channel talks as is not deleted until the channel is moved (8.9877ms)
+✔ the Agent tab without ?agent= answers for the first agent, whatever its id (4313.01ms)
+✔ a conversation begun on the Agent page is the owner's, whoever is named primary: a command typed there is not refused (218.0084ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+✔ the chats of an agent are found with one read of the agents, however many chats there are (71.6239ms)
+✔ a name with accents keeps its letters, and one with none a folder can keep gets a folder of its own (0.8046ms)
+✔ an agent takes up only the folder that was kept for its own name (30.3598ms)
+✔ two names that make the same folder name do not share what one of them kept (26.8619ms)
+✔ a folder kept before the name was recorded is taken up by the name it was made from (19.1652ms)
+✔ the first agent is the Home there was, named by its SOUL.md (25.5246ms)
+✔ an agent has a home, files and chats of its own (239.6833ms)
+✔ renaming keeps the folder (12.6511ms)
+✔ an agent renamed and deleted with its folder kept comes back under its last name, and a new one given its first name does not get its files (74.3581ms)
+✔ an agent made in a folder that already holds its own files says which, with the wizard and without it (47.1876ms)
+✖ deleting an agent stops the jobs its chats started, in a folder that is kept as well (24.473ms)
+✖ deleting a project stops the jobs its chats started (18.8319ms)
+✖ deleting an agent or a project stops a job that started after the last look at its folder (32.8764ms)
+✔ the first agent is not deleted (4.0956ms)
+✔ deleting an agent removes its chats, and its folder only when asked (58.7683ms)
+✔ each agent has an avatar of its own, and voice mode shows its chat's agent's (48.8258ms)
+✔ an agent's avatar can be one an extension offers, and voice mode is told the chat's agent with it (36.4847ms)
+✔ an agent speaks with a voice its voice mode's source offers, or the source's own choice (42.4037ms)
+✔ a deleted agent's routines are switched off with its folder kept, and gone with it deleted, so a new agent of that name does not run them (63.2514ms)
+✔ a routine made under the name of a deleted one starts a conversation of its own, and an explicit slug takes the old one up again (64.0859ms)
+✔ a folder in an agent's home is not said to be the home of a deleted agent (27.9497ms)
+✔ a routine's chat that its agent's delete left in place takes messages again, so the routine runs once the agent is made again (190.4391ms)
+✔ the New button's chat goes to the agent picked for new chats, the first agent's until one is, and again when that agent is deleted (186.1929ms)
+✔ a question waits until it is answered unless the setting says otherwise, and the setting takes only the offered minutes (4731.5401ms)
+✔ a project's chats and an agent's pages are offered the tool in their lists, a routine's page is not (63.0913ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+✔ the tool is registered only for a client that is told to (2574.4011ms)
+✔ a chat someone talks to in the browser is offered the tool (89.6021ms)
+✔ a conversation started on the Agent page is offered the tool, as it is a chat a person answers in the web UI (93.8513ms)
+✔ a routine run is not offered the tool (83.1368ms)
+✔ a heartbeat look is not offered the tool (76.2535ms)
+✔ a chat reached through a channel is not offered the tool (74.3874ms)
+✔ a browser chat for a lower role than the owner's is not offered the tool (153.9061ms)
+✔ an idle chat shows the tool in its list where it would get it, and not where it would not (22.5445ms)
+✔ a question waits for a page that opens later, and is answered through the dialog route (597.0205ms)
+✔ a question nobody answers has no answer, rather than one the object it is kept in has (127.3335ms)
+✔ Stop closes the dialog on every page that has it, and nothing is left to show a page that opens later (102.4532ms)
+✔ a page that opens a chat with a question waiting is sent it before the stream is caught up (26.7876ms)
+✔ a question waits until it is answered by default, and for the minutes the setting gives, then closes as a timeout (232.2419ms)
+✔ the wait setting takes only the offered minutes (1.1824ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+✔ a message pi refuses fails the ask without an unhandled rejection (42.6212ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+✔ a typed conversation's system prompt says nothing of [Audio mode] (3505.0655ms)
+✔ a conversation keeps the rule from its first spoken message on, reopened too (212.549ms)
+✔ a spoken message sent while a typed run is going is answered with the rule (125.5334ms)
+✔ a spoken message queued into a run whose prompt an extension set is answered with the rule (121.7006ms)
+✔ a typed message after a queued spoken one does not take the rule away before it is answered (123.2233ms)
+✔ a spoken message queued after the tools changed in a run whose prompt an extension set has the rule (116.8828ms)
+✔ a spoken message queued into a run whose prompt an extension wrote itself has the rule (138.4424ms)
+✔ a spoken message an extension takes leaves no rule behind (117.034ms)
+✔ a conversation whose spoken messages were compacted away opens without the rule (195.5916ms)
+✔ a spoken conversation's prompt follows its tools during a run, and keeps the rule (130.1705ms)
+✔ with VOICE_RESPONSE_INSTRUCTIONS=false no conversation has the rule (83.0007ms)
+✔ saved speaking instructions are used for voice turns instead of the built-in ones (287.2103ms)
+✔ instructions saved in the middle of a conversation apply from its next spoken message (118.0503ms)
+✔ instructions saved while a run is going reach its next turn in place of the earlier ones (127.7253ms)
+✔ with VOICE_RESPONSE_INSTRUCTIONS=false saved speaking instructions are not used either (81.9773ms)
+✔ a prompt that could not be built again with new instructions keeps the earlier ones (129.5898ms)
+✔ what a tool asks to be told in a spoken turn is in the voice rule while the tool is on, and in no typed turn (136.2541ms)
+✔ a lazy tool that the chat reaches through the tools tool is told of in a spoken turn, as one offered by its name is (115.5503ms)
+✔ DELETE /api/audit removes every entry, says how many, and leaves only a note that it did (102.7493ms)
+✔ with ?through, entries recorded after that id survive the clear (9.3437ms)
+✔ clearing an empty log removes nothing and leaves no note (5.4366ms)
+✔ a second clear keeps the note of the first (4.5475ms)
+✔ a through that is not an entry id is refused, and nothing is deleted (9.7111ms)
+✔ the log keeps recording after a clear, and still keeps only the newest entries (370.0061ms)
+
+  PORTAL_PASSWORD was moved into the portal's database. The password is kept there from now on, and the
+  variable is ignored: change the password under Settings → Authentication, and remove the variable.
+
+✔ the password of an install from before is moved into the database once, and the variable is ignored from then on (21025.1576ms)
+✔ a PORTAL_PASSWORD shorter than the minimum is moved only by a portal that has been used, and is then flagged until it is changed (20630.4658ms)
+✔ a PORTAL_PASSWORD that is the example or too short for a portal that is new is not the password: the setup screen is shown (14961.3889ms)
+✔ a lost password is removed by the reset command, after asking, from a running portal too, and a restart does not bring the old variable back (11207.6786ms)
+
+  PORTAL_PASSWORD was moved into the portal's database. The password is kept there from now on, and the
+  variable is ignored: change the password under Settings → Authentication, and remove the variable.
+
+✔ changing the password ends every event and terminal stream that was open under the old one, also those that share the cookie it was changed with (12225.7309ms)
+✖ changing the password ends an extension's streams, the changer's too, and a reset ends every stream (20371.2718ms)
+✔ a password that is removed from a portal that also has PORTAL_ALLOW_NO_PASSWORD never opens it: it waits on the setup screen, on the address it was bound to (12905.182ms)
+✔ wrong current passwords sent to the change route are held back after ten, on a count of their own, and the right one is held back too (9972.952ms)
+✔ PORTAL_ALLOW_NO_PASSWORD still runs without a login, and then there is no password to choose or change (8162.3562ms)
+✔ the portal listens on every interface once it has a login or is waiting for one, and on this machine only where it is open by choice (0.6382ms)
+✔ the cookie is Secure where the portal serves TLS, and only there (2.6986ms)
+✔ a secret that is a shell command, as a .env written from the old guide holds, is warned about (2441.1185ms)
+✔ the example environment file ships no password for anyone to find, and none to set (1.1846ms)
+
+  PORTAL_PASSWORD was moved into the portal's database. The password is kept there from now on, and the
+  variable is ignored: change the password under Settings → Authentication, and remove the variable.
+
+✔ an IPv6 /64 is one address to the throttle, and a mapped IPv4 address is the IPv4 one (4319.5188ms)
+✔ when the throttle is full, the oldest entry makes room and a new address still gets its attempts (135.7927ms)
+✔ a locked address stays locked however many others pass through a full throttle (133.8626ms)
+✔ when every entry of a full throttle is locked, a newcomer is refused rather than a lock dropped (976.9268ms)
+✔ addresses that stop at nine and let 4096 others push them out are held to the window's budget (6934.2965ms)
+✔ the window's budget is a fresh one when the window is over (829.5503ms)
+✔ a stream is behind the login: no extension is asked for it without one (116.9356ms)
+✔ an upgrade that is not an extension's is answered and closed, not held open for whoever sent it (140.0142ms)
+✔ clients that reset the connection while an upgrade is refused do not take the portal down (346.7549ms)
+﹣ a refused upgrade whose client keeps its side open is let go of after a few seconds (0.3345ms) # SKIP
+✖ a stream of another site's page is refused, and the one of the portal's own is handed to the extension that takes it (14454.1852ms)
+✖ behind a reverse proxy that rewrites Host, the page of the host it was asked for is accepted, and another site's still is not (14477.8276ms)
+
+  PORTAL_PASSWORD was moved into the portal's database. The password is kept there from now on, and the
+  variable is ignored: change the password under Settings → Authentication, and remove the variable.
+
+✔ what is behind the login answers 401 without it, and the 404 for a route that is not there comes after the login (4923.5579ms)
+✔ a wrong password gets no cookie, and the right one gets a cookie that works (688.0058ms)
+✔ a cookie with a flipped signature, a stamp that has run out or another login's signature is refused (322.8192ms)
+✔ signing out refuses the login it ended, also a copy of its cookie (633.9403ms)
+✔ a password is kept as a salted scrypt hash that only that password matches, and the older salt:hash form is still read (1584.5466ms)
+✔ a portal with no password waits on its setup screen, answers nothing else, and the first password chosen signs in (9372.5099ms)
+✔ two passwords chosen at the same moment: the first stands, and the other is told so (5092.649ms)
+✔ changing the password needs the current one, applies from then on, and ends every other login (11684.3428ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+✔ a routine run answers an extension's dialog at once with no answer, and shows it nowhere (2168.6036ms)
+✔ a heartbeat look answers an extension's dialog at once with no answer, and shows it nowhere (71.5902ms)
+✔ a chat reached through a channel answers an extension's dialog at once with no answer, and shows it nowhere (72.2019ms)
+✔ a chat in the browser, and a conversation on the Agent page, show the dialog and wait for the person (144.7543ms)
+✔ what a browser tool read is marked as someone else's words, and limits the session after (48.0338ms)
+✔ a page cannot close the block itself (1.1891ms)
+✔ the paragraph the short envelope leaves out is the portal's, said of any outside content, and other sources keep the full one (0.7482ms)
+✔ what mail, the web through a command, an MCP server or the browser returned is wrapped, and taints only when it tries to instruct the agent; the agent's own tools, a subagent's and a routine's answer are left as they are (15.6838ms)
+✔ once tainted the dangerous shapes are refused, each with its audit row, and the harmless ones still run (230.1303ms)
+✔ a push and an upload are held in the forms a model writes them: options before the subcommand, folded short flags, wget's own (242.9957ms)
+✔ where the taint rules are off, the same calls run and are recorded as exempt (1.3644ms)
+✔ a conversation that read a result flagged as a suspected injection before it was reloaded is still tainted, and one that read content from outside is not (2.4398ms)
+✔ a flagged result says which it is and why, and once the person trusts it, it holds the conversation back no more, then or after a reload (2.2091ms)
+✔ a message an extension wrote in the form of a flagged result, as a subagent's answer that was marked is, holds the conversation back when the guard is made again, and can be trusted (2.2093ms)
+✔ where a browser goes is held to the allowlist, whichever way the call arrives, and an empty list is any site (9.5565ms)
+✔ the allowlist holds when the MCP proxy gets its arguments as JSON text, and a call it cannot read is refused (2.7634ms)
+✔ a ref is read one way: as a snapshot writes it, decoration and all, by the guard for the Playwright MCP's (0.9767ms)
+✔ a ref is made plain only for a tool that declares nothing of itself: a Playwright MCP's (0.3112ms)
+✔ a screenshot is made to come back in the result only for a Playwright MCP's, not for a tool that declares what the guard holds it to (0.2142ms)
+✔ the address a browser tool called by its name is held to is its own `url`: an `args` beside it hides nothing, and is not read (6.5503ms)
+✔ a call that is not the primary user's is refused unless it is a read or a rule says so (175.1926ms)
+✔ a rule or an approval does not open a tool that would run what a colleague writes as the primary user, and none is asked for (6.4821ms)
+✔ a tool that names no path is approved on its arguments, which the refusal says, and a question for it is not read as a path (4.7136ms)
+ℹ Error: A resource generated asynchronous activity after the test ended. This activity created the error "Error: EPERM: operation not permitted, symlink 'C:\Users\Joe\AppData\Local\Temp\guard-read-pxOkPh\elsewhere\secret.txt' -> 'C:\Users\Joe\AppData\Local\Temp\guard-read-pxOkPh\home\notes\link.txt'" which triggered an uncaughtException event, caught by the test runner.
+✖ test\browser-guard.test.mjs (1871.6586ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+✔ the rules for a Playwright browser are sent only where there is one (3321.8737ms)
+✔ a configuration that cannot be read says there is no browser server, and leaves the chat its extensions (303.3909ms)
+✔ a browser server is one that attaches to a running browser, at any address, not the one with a certain name (4.1388ms)
+✔ one that is called browser still counts, as it always has (2.4655ms)
+✔ an entry that is not an object is no browser, and does not stop the others from being found (7.3372ms)
+✔ a folder the repository ships is found beside the server's folder, wherever the portal was started (2.1334ms)
+✔ a folder of the same name where the portal was started does not take the place of the shipped one (1.5107ms)
+✔ a name nothing holds is undefined, not a path that is not there (0.6514ms)
+✔ a folder is found from where the portal was started, or from the folder above it (2.9095ms)
+✔ the marker has to be in the folder: another folder of that name is not the one (3.6018ms)
+✔ only real pi packages are listed, the most used first (27.9117ms)
+✔ the provider topic keeps packages that bring models, and a search keeps npm's order (8.2683ms)
+✔ an answer is kept a while, and a failure is not (4.6949ms)
+✔ a result without a name or version is left out (0.2397ms)
+✔ a package's link is kept only when it goes to a web page (0.2548ms)
+✔ searches kept are only so many: each word typed is one (118.8041ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+✔ pictures a channel hands over go to the agent with the message, kept beside the chat; what is not a picture is said so and goes nowhere (42.5885ms)
+✔ what a call gives goes to a channel as it is given, with the words after it: a picture and a clip sent, any other file named (67.326ms)
+[channel pair] started
+[channel pair] started
+[channel kept] started
+[channel kept] started
+✖ a picture or a clip a call gives that the sandbox closed to the agent is not sent on: it is named, as a file that was not sent (21.9383ms)
+✔ a code a channel package asks to have scanned is on its status until it takes it back, and a stopped start of it cannot put one there (2.0912ms)
+✔ what a channel package keeps with ctx.state is there for its next start, not written by a stopped one, and goes with the channel (13.1464ms)
+✔ a channel switched off forgets what it kept, so that switched on again it does not pick up where it was (20.662ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+✔ a channel that will not stop does not hold the sync or the shutdown behind it (61.6666ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+[portal] could not tell tg about tg:stranger: channel is down
+✔ before a primary user is named nobody is turned away, and after it a stranger and a message that names nobody are (12.423ms)
+[guard t] blocked bash: role guest
+✔ a stranger is announced to the primary user only once it got through, and the word is not a note that taints the conversation it lands in (29.7591ms)
+✔ a guest's question to the primary user reaches their chat, and is not a note that taints it for good (10.4847ms)
+✔ an answer the primary user wrote without the question's id is no answer, and the portal says nothing of a waiting question in any conversation, a group included (8.9115ms)
+✔ a question that did not reach the primary user is not left waiting, and one that waits for them to speak is shown in the chat it was sent to and nowhere else (10.0498ms)
+✔ a question is not put to the primary user for an approval that could not make the action run (163.0329ms)
+✔ what somebody who is not the primary user writes comes after the portal's block about them, and cannot forge one (4.599ms)
+✔ the primary user's own messages carry no framing, and a note queued for the conversation is explained and marked as data (4.1015ms)
+✔ a conversation never recovers from the least trusted person who spoke in it, whatever the order (9.1291ms)
+✔ lower picks the less capable role whichever way round it is asked (0.9224ms)
+✔ a conversation whose speaker is not in memory is read as its row and last speaker say, and a chat in the portal as its own (4.8936ms)
+✔ a conversation begun on the Agent page is the owner's however many people are named: its tools and commands are not refused, a channel conversation nobody spoke in still is (52.9807ms)
+✔ only the primary user's word approves anything: a colleague's "always" is a message, the owner's is a permission (17.6536ms)
+✔ only the words the question offers approve: an answer that merely begins with another is an answer, and nothing runs or is allowed (452.2218ms)
+[guard t] blocked bash: role colleague
+✔ what the asker's agent is told of an answer follows what was asked: a decision is answered as it is, a permission only by its words (217.0443ms)
+[guard t] blocked bash: role colleague
+[guard t] blocked bash: role colleague
+[guard t] blocked bash: role colleague
+[guard t] blocked bash: role colleague
+✔ an approval makes the action run in the conversation that asked: neither the relay of the answer nor the resumed reply taints it (125.9757ms)
+✔ an approval is written down once the answer is on its way: when it cannot be passed on, no grant or rule stands, and the question can be answered again (63.3694ms)
+✔ an extension's open question is answered only by the person it was put to or the primary user (5.8759ms)
+✔ a native question's buttons ask the transport whether the one who pressed may answer (2.892ms)
+✔ a command is for the primary user alone: a colleague's /bg is plain text to pi, and a command sent into their conversation is refused (19.1507ms)
+✔ a name somebody chose here stays, and one a platform sends cannot carry anything into the speaker block (2.0442ms)
+✔ the last primary user is known, and the framing tags are the ones the page folds away (3.9962ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+[extension listener] server half started
+✔ a routine run in a session of its own is finished once it is over and its pi stopped (16.219ms)
+✔ a person who goes on with a finished run's chat starts its pi again, and it is a chat like any other then (12.9742ms)
+✔ a routine run whose session is kept for the next is not finished, and neither is a chat stopped for being idle (11.0548ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+✔ a mode is made with an id from its name that no mode has and no chat stores, changed, and deleted (112.8447ms)
+✔ a chat is offered the portal's modes, then the person's by their names, and stores one of theirs as custom/<id> (17.0245ms)
+✔ a mode's model and effort are written into a chat put in it, and taken back by the next choice unless the person changed them (20.7948ms)
+✔ a mode's tools are its chats' layer, and a change of them reaches its live chats and no others (3062.6272ms)
+✔ a mode's instructions are said in its chats' system prompt, and a change of them reaches a running chat (231.8758ms)
+✔ a mode made to work through the code tool has it on in its layer, and its chats are offered the code tool alone (306.9863ms)
+✔ in a mode of the person's whose tools switch the code tool on, a chat's switch cannot turn it off; where they leave it, it can (77.292ms)
+✔ a started chat whose own switches have the code tool off is held once its mode is changed to work through it (126.3546ms)
+✔ a running chat's own code-tool off stays through another switch saved while its mode holds the tool, and counts again once the mode lets it go (186.3381ms)
+✔ a chat in a mode made to work through the code tool, whose tools then switch it off, has its tools declared, and its lazy tools lazy again (133.8568ms)
+✔ the code-tool switch of a mode reaches a running chat at its next start; the code tool in its layer at once (515.0613ms)
+✔ a deleted mode stays on its chats, which lose its tools and instructions at once, and no chat can be put in it (177.0762ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+✔ a chat with the person on the portal's pages is offered Standard and Code mode, and no other chat is offered any (92.699ms)
+✔ Code mode is stored by its name, and Standard as nothing (7.9645ms)
+✔ a chat that has said something keeps its mode; one whose every message was removed can choose again (9.5699ms)
+✔ asking what a chat may be put in does not start its pi (1.7976ms)
+✔ a pi that has said nothing is let go, and the next one starts in the mode chosen (3052.4077ms)
+✔ a change of mode is held like an edit: refused beside one, and a message sent during it starts in the mode chosen (257.8051ms)
+✔ in Code mode the code tool is on as the mode's layer, the chat is listed as one that differs, and its own switch cannot turn it off (112.0341ms)
+✔ in Code mode only the code tool is declared, and a script reaches a lazy tool, also after a reload; in Standard the lazy tool is behind the tools tool (679.8215ms)
+✔ a chat whose own switches had the code tool off before Code mode was chosen has it on and held, and its switch back in Standard (157.0239ms)
+✔ a chat that is not running says which thinking levels its model has (4184.7156ms)
+✔ an idle chat's model and levels are the ones it would be started on (39.595ms)
+✔ an idle chat's effort is the one pi would start it on (13.5426ms)
+✔ a running chat's answer says what its row names only when pi is on the model it comes to (146.7457ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+✔ a question asked in a chat is kept in the database, and a portal started afresh lists it as open (3213.3278ms)
+✔ an answer the run is waiting for goes to it, and is written down as the question's record (76.3758ms)
+✔ an answer to a question nothing waits for any more is written down, and goes to the agent as a message (1.8787ms)
+✔ the answers sent as a message are the person's words: a tag of the portal's own in them is only text (1.2502ms)
+✔ a restart of the portal stops the run that waits on a question, and leaves the question open for the next (560.8314ms)
+[portal] marked 2 session(s) interrupted (server restarted mid-run)
+✔ an answer given while the portal stops is written down, and reaches the agent once the portal is back (115.1606ms)
+✔ a cancelled question is written down as cancelled, with no answers, and nothing is sent (73.2764ms)
+✔ a question whose wait ends is written down as not answered, also when the portal restarted in between (130.0864ms)
+✔ Stop ends a waiting question, written down as not answered because the run was stopped (76.5894ms)
+✔ the chat list has a listed child with its parent named, and not an unlisted one, which is found by its id (4070.7202ms)
+✔ a child that waits on a person says so in the list, until its question has ended (73.4465ms)
+✔ the list reads a child's questions through their index, and a question whose wait is up does not count and is not ended by the poll (11.6923ms)
+✔ deleting a chat deletes its children and their transcripts, and leaves the other chats (10.4601ms)
+✔ a project counts its chats without their children, and deleting it deletes them with their parents (45.5803ms)
+✔ a chat a server half started unlisted is in no list, is found by its id, and is deleted with its project (33.9683ms)
+✔ a working chat a server half keeps out of the lists does not keep its project or its agent from being deleted: nobody could find it to stop it, and it is stopped with them (805.0749ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+[extension helper] server half started
+[extension other] server half started
+[extension moded] server half started
+[extension asker] server half started
+✔ a server half makes a child chat in its parent's folder; one made unlisted is out of the chat lists and found by its id (6.7229ms)
+✔ a child of a child is refused, and so is a parent that is not there, a child with no title, and a model that is not one (2.2881ms)
+✔ a child takes its parent's role, last speaker, model and tool switches; the mode and model it is asked for; and no mode a colleague's chat may not have (4.3186ms)
+✔ prompt resolves with the child's last answer once its run is over, sent as the person its parent last heard from (2842.417ms)
+✔ a steer reaches a running child, and both prompts resolve with the run's last answer; while it runs it is its parent's background work (163.3598ms)
+✔ abort stops a child's run, and its prompt resolves as stopped (108.0551ms)
+✔ deleting the parent deletes its children, their transcripts and files, and the server halves hear each deleted (91.3709ms)
+[portal] marked 1 session(s) interrupted (server restarted mid-run)
+✔ a child running as its parent is deleted is stopped first, and its prompt resolves as stopped (131.3782ms)
+✔ only the package that made a child prompts, stops or removes it, and none of that is done to a chat of its own (3.4225ms)
+✔ a child cannot be made of a chat that is being deleted (1.0265ms)
+✔ a child the last portal left running is marked interrupted on the next start, as any chat is (2.3158ms)
+✔ a child of a heartbeat is refused: the heartbeat is held to reading by a role its row does not carry (0.639ms)
+✔ a child asks, and opens dialogs, only where its parent's people can answer: not for a channel conversation or a routine run (17.9425ms)
+✔ prompts with the same words are told apart by the line each was recorded as, not found by their words (31.2843ms)
+✔ a child takes its parent's mode unless it is asked into another, and its pi is started in it (167.1996ms)
+✔ a mode that asks the person first is for a child only where its parent is in it; a mode with a model gives it to the child (4.8166ms)
+✔ a child put in Standard or another mode keeps the tools its parent's mode took away; one asked into its parent's mode takes the parent's model and effort (105.4778ms)
+✔ a command a child's speaker may not run resolves as an error, not as done (66.828ms)
+✔ children finds the ones a package made, listed or not, and no other's (2.1845ms)
+✔ a child removed as its parent is deleted is deleted, and heard so, once (99.32ms)
+✔ a child's delete that is under way as its parent's begins is heard once too (95.4023ms)
+✔ a child is held to the tool switches its parent has now: what the person switched off in the parent since is off in the child's next run (137.5249ms)
+✔ a child marked by the guard marks its parent when its answer comes back, and says so; one that is not marked does not (161.4072ms)
+✔ an unattended child asks nobody, wherever its parent is: no ask_question, and a dialog an extension opens is answered at once with its no-answer value, also after its pi starts again (200.1229ms)
+✔ a server half starts a chat of a project's or an agent's folder: a task chat of its own, in the primary role, on the defaults, listed or not (153.1298ms)
+✔ a child of a chat nobody attends is unattended too, and one of an unlisted chat unlisted, whoever makes it and whatever it asks (99.7424ms)
+✖ a chat is its agent's when it works in the agent's home, as the sandbox runs it, else its project's, and no chat is neither's (37.0113ms)
+✔ a chat is started only in an agent's or a project's folder, with a title (15.6867ms)
+✔ a started chat is run, stopped and removed by the package that started it alone, as the primary user (91.7943ms)
+✔ chats.list gives the task chats pinned first, then the most recently active first, as the typings promise (1.6833ms)
+[portal] marked 1 session(s) interrupted (server restarted mid-run)
+✔ lastAnswer says where the last run of a chat the package made stands, from what the portal keeps: nothing before one, running, done, stopped, cut off (168.9452ms)
+✔ lastAnswer says a run that failed is an error, with what went wrong: a model that answered with one, or a run the portal saw fail; a good message after an error clears it (7.1885ms)
+✔ lastAnswer says a chat is marked while the guard holds it so, also with no pi running for it, until the person trusts what was flagged; a child's marks its parent (276.9779ms)
+✔ a child asked to start from the defaults has the folder's tools in its mode, none of its parent's switches, and is not held to them; an unattended one does unless asked (182.7281ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+✔ what a script read through the tools tool is wrapped and flagged in the result the model is given, also when it hands on only the words (2943.989ms)
+[guard C:\Users\Joe\AppData\Local\Temp\pithagoras-codemode-gateway-wdJWw0\chat-qpBbBJ] blocked bash: publish
+[guard C:\Users\Joe\AppData\Local\Temp\pithagoras-codemode-gateway-wdJWw0\chat-TP6Zyy] blocked bash: publish
+✔ a script that reads through the tools tool and keeps it to itself still holds the conversation back, also when it is opened again (287.616ms)
+[guard C:\Users\Joe\AppData\Local\Temp\pithagoras-codemode-gateway-wdJWw0\chat-rnLINJ] blocked bash: publish
+✔ a page the model reads through the tools tool itself is flagged where it is, and not twice (87.2674ms)
+✔ a read that ends after the script that made it has nothing to hold back: nobody was given it (1203.9741ms)
+[guard C:\Users\Joe\AppData\Local\Temp\pithagoras-codemode-gateway-wdJWw0\chat-Aru3Cz] blocked bash: publish
+✔ a read that ends while the script is still running is held for the script's result (581.4568ms)
+✔ a new install starts every chat with code mode off (4198.0608ms)
+✔ switched on in one chat, it is that chat's, kept with it, and the others keep it off (63.3777ms)
+✔ in a chat whose mode works through the code tool, its switch cannot turn the code tool off; a Standard chat's can (59.5284ms)
+✔ code mode cannot be marked lazy: its row says so, and a mark that names it is refused (7.34ms)
+✔ a tool that is offered to scripts only cannot be marked lazy either: nothing would be kept out of the prompt (18.9053ms)
+✖ an install that had defaults keeps them, with code mode off beside them (87.7017ms)
+✖ once the operator has it on by default, a later start leaves it on (66.1484ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+✔ switched off, code mode is listed in the chat's tools and not declared to the model (3072.7583ms)
+✖ switched on, the model is offered it beside its other tools, and a script's calls run (322.6192ms)
+[guard C:\Users\Joe\AppData\Local\Temp\pithagoras-codemode-GARkbc\chat-LaYqfl] blocked bash: publish
+✔ what a script read from outside is wrapped and flagged in the result the model is given, and the next push is refused (200.618ms)
+[guard C:\Users\Joe\AppData\Local\Temp\pithagoras-codemode-GARkbc\chat-pO4Ecq] blocked bash: publish
+✔ a script that reads something and keeps it to itself still holds the conversation back (185.9873ms)
+[guard C:\Users\Joe\AppData\Local\Temp\pithagoras-codemode-GARkbc\chat-gephOw] blocked bash: publish
+✔ within one script, a push after reading something that tries to instruct the agent is refused (177.6523ms)
+[guard C:\Users\Joe\AppData\Local\Temp\pithagoras-codemode-GARkbc\chat-mg6YYa] blocked bash: publish
+✔ what a script read stays read when the conversation is opened again (247.511ms)
+✔ a tool switched off in the chat is not reached from a script, though pi lets scripts call it (181.4669ms)
+✔ a tool that pi offers to scripts only is in the chat's tools, to be switched (130.7625ms)
+✔ a tool switched off is not described to the model as one a script can call, nor listed to a script (362.172ms)
+✔ the guard refuses a call a script makes to a tool that is switched off, whatever pi lets it find (1.0494ms)
+✔ on, the same tool is reached from a script (171.7947ms)
+✖ in the only presentation, the model is offered the code tool alone, and a script's calls run (281.8577ms)
+[guard C:\Users\Joe\AppData\Local\Temp\pithagoras-codemode-GARkbc\chat-4gp24z] blocked bash: publish
+✔ in the only presentation, what a script read from outside is wrapped and flagged in its result, and the next push is refused (277.3722ms)
+[guard C:\Users\Joe\AppData\Local\Temp\pithagoras-codemode-GARkbc\chat-zCBF7B] blocked bash: publish
+✔ in the only presentation, within one script, a push after reading something that tries to instruct the agent is refused (170.3656ms)
+✔ in the only presentation, a tool switched off in the chat is not reached from a script (173.5008ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+✔ a command that shows nothing is still in the chat, and says it had nothing to show (48.7618ms)
+✔ a command that answers is done, with its answer after it (8.5875ms)
+✔ a terminal-only view, a failure and a message for people are each said (26.3174ms)
+✔ only what the command shows for itself counts: not a status, a widget, or a message for the model (15.2521ms)
+✔ a view opened during a run is not put on the command sent beside it (8.0264ms)
+✔ a command pi never answers, because pi went away, ends as failed (64.1621ms)
+✔ a skill says it started a run, and is not a chat message (7.9587ms)
+✔ a failure is named by its package, not its path (0.6427ms)
+✔ what extensions showed goes when pi is stopped, so a status cannot outlast it (7.2564ms)
+[portal] marked 1 session(s) interrupted (server restarted mid-run)
+✔ a builtin that fails says it once: on its line, its notice marked as its own (31.4971ms)
+✔ a command pi refuses fails on its line, and the chat is not put in error (8.683ms)
+✔ an extension failing on every event says so once a run (10.2239ms)
+✔ a run that starts while a command sent into a run is in hand is not its answer (8.907ms)
+✔ live events each have a seq of their own, even in the same millisecond (7.3891ms)
+✔ an extension's notice is shown without the codes a terminal would act on (6.4283ms)
+✔ what is in the chat box is there for an extension to read, and not once it is sent (7.5032ms)
+✔ a command the last server never answered ends as failed, with what it threw (4.1651ms)
+✔ a command pi dies with leaves the chat in error, not idle (7.079ms)
+✔ a command is named as pi names it, so its failure is put on its line (7.1864ms)
+✔ taking out a message keeps the end of a command sent before it (3.0899ms)
+✔ a box filled from pi's RPC mode is what the command showed (6.9272ms)
+✔ an extension failing on every event says so once a run, whatever each error says (8.2617ms)
+✔ what an extension put in the box outlives the pi that put it there (15.7332ms)
+✔ taking out a command takes its end with it, wherever the end fell (1.4481ms)
+✔ the commands a crash left unanswered are found through their index, not by reading every event (0.4633ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+✔ the room stays held from the compaction's end until its resume lands (170.5143ms)
+✔ a compaction pi resumes itself keeps holding the room (157.8247ms)
+✔ the raw editor refuses what is not JSON, and the file is as it was (4432.001ms)
+✖ the raw editor takes what the adapter reads, comments too, and puts it in place as typed for its owner alone (17.6633ms)
+✔ a server is refused a name the adapter would not take, and the file is as it was (31.8766ms)
+✔ an entry that is not one server is refused, and the file is as it was (12.9822ms)
+✔ a file that does not parse is not written over by any of the forms, and is shown as it is (42.5184ms)
+✔ the adapter's settings are an object, and an empty one takes them out (31.3732ms)
+✔ a pasted config adds what is usable, says what it left out, and writes nothing when there is none (32.2126ms)
+✔ an extension setting is written only under a key that is a name, and the file is as it was (15.152ms)
+✔ a package is switched only with a spec and a boolean, and one that is not installed is not found (10.7819ms)
+✔ the raw editor of settings.json refuses what pi cannot parse, comments too, and what is not an object (9.4296ms)
+✔ a package spec that is not one pi documents is refused before pi is run (87.0222ms)
+✖ a spec of a documented shape reaches pi as one argument of its own (2329.0678ms)
+✖ a folder is removed by its full path: pi reads the one it is given from where it runs, not from where it wrote it (415.8764ms)
+✔ a folder that pi does not list is held to the documented shapes before it is removed (11.6409ms)
+✖ a package pi cannot install is an error with pi's words, and the next one still goes (2799.505ms)
+✖ Update all updates the installed packages and leaves pi to the portal's own version (819.0762ms)
+✔ a channel is made only of a kind there is, what it requires and an agent there is (24.8991ms)
+✔ a channel keeps its secret to itself, takes a free slug, and is changed only in ways that stay valid (69.5835ms)
+✔ a channel package is named, is not one that ships with the portal, and is not installed without a spec (25.4205ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+✖ a container's dialog is answered at once with cancelled where nobody can answer, and goes to no page (2.7461ms)
+✖ a container's dialog in a chat of the person's goes to the page and waits for its answer (0.7856ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+node:internal/test_runner/harness:122
+      throw err;
+      ^
+
+Error: EPERM: operation not permitted, symlink 'C:\Users\Joe\AppData\Local\Temp\pithagoras-context-links-NglXqo\outside\dotfiles.md' -> 'C:\Users\Joe\AppData\Local\Temp\pithagoras-context-links-NglXqo\agent\AGENTS.md'
+    at symlinkSync (node:fs:1877:11)
+    at file:///G:/work/git/pithagoras/core/server/test/context-file-links.test.mjs:42:1
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5) {
+  errno: -4048,
+  code: 'EPERM',
+  syscall: 'symlink',
+  path: 'C:\\Users\\Joe\\AppData\\Local\\Temp\\pithagoras-context-links-NglXqo\\outside\\dotfiles.md',
+  dest: 'C:\\Users\\Joe\\AppData\\Local\\Temp\\pithagoras-context-links-NglXqo\\agent\\AGENTS.md'
+}
+
+Node.js v24.16.0
+✖ test\context-file-links.test.mjs (4600.7669ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+✔ a chat in the agent home gets SOUL, PrimaryUser and MEMORY; one in a project gets none of them (36.7476ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+✔ a limit belongs to one model, and can be taken away (3.1688ms)
+✔ the session runs on the limit, not on what the model definition says (0.7752ms)
+✔ taking the limit away puts the definition back, in a session that is already open (0.7113ms)
+✔ a model with no limit is left exactly as it was (0.286ms)
+✔ the default is a ceiling: it lowers a model, never raises one, and a model of its own beats it (1.3397ms)
+✔ a session follows the default, and lets go of it when it is removed (0.5171ms)
+✔ only whole numbers in range are accepted as a window (23.2685ms)
+✔ a model pi puts back, as it does on /reload, is given the window again (0.6084ms)
+✔ Reset works when the registry can no longer say what the model declares (0.8607ms)
+✔ a model that declares less than the default is not raised when the registry has lost it (0.8731ms)
+✔ one chat that cannot take the window does not stop the others getting it (1.8409ms)
+✔ a window that cannot be applied costs the run and the config nothing (0.6803ms)
+✔ skipping ahead finds the same moment as trying every minute (5936.5614ms)
+✔ a clock that changes still gives the moment the minute scan gave (4.1379ms)
+✔ a rare schedule is found without trying half a million minutes (1.6714ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+✔ a run the model cut itself off on keeps its room and carries on (162.217ms)
+✔ a model that keeps hitting its output limit is carried on a bounded number of times (218.7613ms)
+✔ with only DATA_DIR given, the bin folder, the agent's home and the channels folder are made inside it (3958.2629ms)
+✖ the folders it names itself are where it says (7.3727ms)
+✖ with no DATA_DIR at all, a folder of the data directory is in ./data, not in /data (66.2469ms)
+✔ a new install needs no upgrade; an old database does, from version 0 (35.8643ms)
+✔ a healthy database is backed up, then upgraded, and the copy holds what was there (88.948ms)
+✔ a damaged database is found before anything changes, and is not backed up (52.4498ms)
+✔ with no room for the backup it refuses, and changes nothing (32.513ms)
+✔ only the newest backups are kept, and nothing else in the folder is touched (5.5824ms)
+✔ a whole upgrade on startup: backed up, upgraded with the real migrations, then it returns (1317.3351ms)
+✔ a damaged database on startup keeps the page up with how to repair it, rather than exiting (294.3738ms)
+✖ an upgrade whose page cannot have its port still upgrades (1303.4141ms)
+✖ a backup that fails or is cut off leaves no file that could be taken for one, and the next try finds its room (553.1282ms)
+✖ the repair steps name the container the portal is told it has, and have a form for a portal that is not in one (0.7937ms)
+✔ a database from a newer portal is not opened: the page says so, and the file is as it was (325.9175ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+✔ a tool call has a line when it begins and one when it ends, with the outcome and how long it took, and nothing else of it (63.5938ms)
+✔ a call through the tools tool is filed under the lazy tool it calls, and a search through it under tools (19.338ms)
+✔ a subagent's call names the subagent, and a call whose subagent stops, or whose pi is stopped, ends as cut off (26.5966ms)
+✔ at the info level a tool call writes no line, and one that began before debug was on ends without a duration (9.55ms)
+✔ an audit entry has a line with its kind, its tool and the chat, and never its subject or reason (5.0671ms)
+✔ an answer to an approval has a line with the tool, the outcome and how long the person waited, and not the action or the words (15.8399ms)
+✔ asking the primary user has a line for the question that was asked and one for the one that could not be (17.7737ms)
+✔ at info a debug line prints nothing and is not kept, and at debug it is both, marked as debug (7.6153ms)
+✔ readLogs keeps every level by default, and a level keeps that and worse (0.2376ms)
+✔ the fields of a debug line are one line of key=value, with the empty ones left out (10.3928ms)
+✔ a field named like a secret is never printed, whatever it holds (16.0345ms)
+✔ what looks like a secret is taken out of a debug line, in a field, in the message and in the scope (121.6147ms)
+✔ what is not a secret is left alone, ids and counts and paths among it (3.4406ms)
+✔ a long text is scrubbed in a moment, however it is built (974.9508ms)
+✔ the values of the process's own secret environment variables are taken out wherever they stand (2.9594ms)
+✔ nothing a debug line was given reaches stdout or the list with a secret in it (75.7288ms)
+✔ the environment sets the level and the size of the buffer, and says what it could not use (0.6798ms)
+✖ a server started with the variables keeps what they say, prints at debug, and says what it ignored (66.5561ms)
+✔ GET /api/logs names the level and the limits, keeps the debug lines unless asked for less, and knows the debug level (77.3601ms)
+✖ a portal stopped while it installs what it starts with exits only once the install has ended (17080.6814ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+[extensions] installed pithagoras-terminal, which a portal starts with
+[extensions] installed pithagoras-git, which a portal starts with
+✖ what the list names is installed once, from its folder, and one removed is not put back (1454.0722ms)
+✔ a package the list adds later is installed on the next start, and one installed already under its name is left as it is (381.1236ms)
+[extensions] installed pithagoras-broken, which a portal starts with
+[extensions] installed pithagoras-notes, which a portal starts with
+[extensions] extensions/defaults.json names "missing", which is not a package of the portal's
+✖ an install that fails is tried again on the next start, and the rest still go in (1099.5916ms)
+✔ the list names only folders of the portal's own that hold a package (4.6805ms)
+[extensions] installed pithagoras-themes, which a portal starts with
+✔ PORTAL_DEFAULT_EXTENSIONS=off installs none of them, and leaves them to be installed once it is on (717.1137ms)
+[extensions] installed pithagoras-themes, which has what the extensions taken out had
+[extensions] took out C:\Users\Joe\AppData\Local\Temp\default-extensions-O7mlJH\image\extensions\theme-dusk, C:\Users\Joe\AppData\Local\Temp\default-extensions-O7mlJH\image\extensions\theme-warm: extensions the portal does not ship any more
+✖ Dusk and Warm, which are themes of the themes package now, are taken out of pi's list and the person keeps the theme (2169.19ms)
+[extensions] took out C:\Users\Joe\AppData\Local\Temp\default-extensions-O7mlJH\image\extensions\theme-dusk: extensions the portal does not ship any more
+[extensions] took out C:\Users\Joe\AppData\Local\Temp\default-extensions-O7mlJH\image\extensions\theme-warm: extensions the portal does not ship any more
+✔ the theme package is not installed in place of Dusk where it is installed already or where Dusk was switched off (1249.7321ms)
+[extensions] installed pithagoras-themes, which has what the extensions taken out had
+[extensions] took out C:\Users\Joe\AppData\Local\Temp\default-extensions-O7mlJH\image\extensions\theme-dusk: extensions the portal does not ship any more
+✖ the start takes the entries out before it installs what the list names, also with the defaults off (1131.7966ms)
+[extensions] switched pithagoras-themes on, which has what the extensions taken out had
+[extensions] took out C:\Users\Joe\AppData\Local\Temp\default-extensions-O7mlJH\image\extensions\theme-dusk: extensions the portal does not ship any more
+[extensions] took out C:\Users\Joe\AppData\Local\Temp\default-extensions-O7mlJH\image\extensions\theme-warm: extensions the portal does not ship any more
+✔ the theme package installed and switched off is switched on where Dusk was in use, and stays off where Dusk was off too (1180.3097ms)
+[extensions] installed pithagoras-themes, which has what the extensions taken out had
+[extensions] took out C:\Users\Joe\AppData\Local\Temp\default-extensions-O7mlJH\image\extensions\theme-dusk: extensions the portal does not ship any more
+✖ an install of the theme package that fails leaves the entries in, and the next start installs it and takes them out (1142.2752ms)
+✔ a chat whose delete failed takes messages again, and still has what it had (204.5809ms)
+✔ the conversations of a channel whose delete with them failed take messages again (77.6202ms)
+✖ the chats of a project whose folder could not be removed take messages again (38.7243ms)
+✔ 400 streaming deltas stay out of SQLite; completion saves one full message (42.6726ms)
+✔ parallel tool updates keep only the latest per call, and results persist separately (0.9977ms)
+✔ aborted assistant messages keep their partial content at the message boundary (0.5551ms)
+✔ messages in another session and unknown lifecycle events remain intact (1.3116ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+✔ an event is its stored text, put in place as it is (1.9825ms)
+✔ everything stored is delivered in order, a page of the size it was asked for at a time (5.5716ms)
+✔ the other streams get their turn between pages (1.1044ms)
+✔ a reader that is waited for is waited for in order, and one that has gone ends the replay (156.9703ms)
+✔ a page that catches up on a long run slowly is not buffered whole, loses nothing and sees what happened meanwhile once (1678.5642ms)
+✔ a page that leaves between two pages of the replay leaves nothing waiting for it (484.2448ms)
+✔ scrolling back answers with the stored text too, and with the page it was asked for (31.1414ms)
+✖ one that throws in a timer is held, with what requires it; the rest runs; another revision starts (1657.0303ms)
+✖ one whose promise rejects with nobody to hear it, from a route, is held; switched off and on, it starts again (1851.3765ms)
+✖ one that calls process.exit() has crashed, and the portal goes on (2135.4713ms)
+✔ a tool's call and a handler pending in one that crashes end at once with the crash and its last lines; later ones do not run it (1529.6223ms)
+✔ code a half left going after it crashed, or after it was stopped, is said each time it fails, and the portal goes on (2006.5129ms)
+✔ one that crashes as it starts is given up on at once (1482.9591ms)
+✔ the code the portal runs as a half's is known as its own with nothing of it in the stack: its tools, handlers, events, upgrades, sockets and requests (1429.7006ms)
+✔ what a half said is kept for it, the latest up to a limit; a call its crash ends carries the last few, with no secret in them (1440.459ms)
+✔ what the portal does that a half asks for is not the half's code (1399.0082ms)
+✖ what a half's routes had not answered when it crashed is answered then (1640.9995ms)
+✔ a chat mode offered by one that crashes goes with it, and the chat started in it keeps it (1408.9294ms)
+✖ an error that is no extension's ends the process as Node does: thrown, or a rejection nobody heard (1389.9904ms)
+✔ a crash changes what every page is told is installed, and the list then has it; a switch off and on lifts the hold, and changes it again (4832.1965ms)
+✖ a real chat: the tool's call that crashes its half comes back as the call's error in the same turn, the chat goes on, and another revision starts it again (4900.6543ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+[extension docker] server half started
+[extension browser] server half started
+[extension docker] server half started
+[extension rogue] its server half could not be started: Error: docker is not one rogue builds on: name it in "requires" or "optional" under "pithagoras" in its package.json
+    at Object.use (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:560:27)
+    at Module.default (file:///C:/Users/Joe/AppData/Local/Temp/extension-dependencies-wculPw/packages/rogue/server-4.js:4:77)
+    at file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:804:38
+    at async start (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:799:25)
+    at async run (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:998:17)
+    at async TestContext.<anonymous> (file:///G:/work/git/pithagoras/core/server/test/extension-dependencies.test.mjs:48:3)
+    at async Test.run (node:internal/test_runner/test:1313:7)
+    at async Test.processPendingSubtests (node:internal/test_runner/test:897:7)
+[extension docker] server half started
+[extension docker] server half started
+[extension docker] server half started
+[extension browser] server half started
+[extension docker] server half started
+[extension browser] server half started
+[extension shots] server half started
+[extension docker] server half started
+[extension browser] server half started
+[extension shots] server half started
+[extension docker] server half started
+[extension browser] server half started
+[extension shots] server half started
+[extension other] server half started
+[extension docker] server half started
+[extension browser] server half started
+[extension shots] server half started
+[extension browser] server half started
+[extension docker] server half started
+[extension browser] server half started
+[extension browser] server half started
+[extension docker] server half started
+[extension docker] its server half could not be started: Error: no socket
+    at Module.default (file:///C:/Users/Joe/AppData/Local/Temp/extension-dependencies-wculPw/packages/docker/server-22.js:4:7)
+    at file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:804:38
+    at async start (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:799:25)
+    at async run (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:998:17)
+    at async TestContext.<anonymous> (file:///G:/work/git/pithagoras/core/server/test/extension-dependencies.test.mjs:122:3)
+    at async Test.run (node:internal/test_runner/test:1313:7)
+    at async Test.processPendingSubtests (node:internal/test_runner/test:897:7)
+[extension shots] server half started
+[extension docker] its server half could not be started: Error: not yet
+    at Module.default (file:///C:/Users/Joe/AppData/Local/Temp/extension-dependencies-wculPw/packages/docker/server-27.js:4:33)
+    at file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:804:38
+    at async start (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:799:25)
+    at async run (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:998:17)
+    at async TestContext.<anonymous> (file:///G:/work/git/pithagoras/core/server/test/extension-dependencies.test.mjs:144:3)
+    at async Test.run (node:internal/test_runner/test:1313:7)
+    at async Test.processPendingSubtests (node:internal/test_runner/test:897:7)
+[extension browser] server half started
+[extension docker] its server half could not be started: Error: not yet
+    at Module.default (file:///C:/Users/Joe/AppData/Local/Temp/extension-dependencies-wculPw/packages/docker/server-27.js:4:33)
+    at file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:804:38
+    at async start (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:799:25)
+    at async run (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:998:17)
+    at async TestContext.<anonymous> (file:///G:/work/git/pithagoras/core/server/test/extension-dependencies.test.mjs:148:3)
+    at async Test.run (node:internal/test_runner/test:1313:7)
+    at async Test.processPendingSubtests (node:internal/test_runner/test:897:7)
+[extension docker] server half started
+[extension browser] server half started
+✔ an extension starts after what it requires, and gets what that gives it, one for each that asks, once (17.4166ms)
+✔ an extension that names one it does not build on is told so, and does not start (9.6367ms)
+✔ one whose requirement is not there, not in a version it takes, or not a range, does not start, and Settings says why (24.8888ms)
+✔ when what it builds on is started anew, so is it, after it, and with what the new one gives (34.292ms)
+✔ an optional one: started without it, given nothing, and started again as it comes and goes (13.4172ms)
+✔ one whose provider fails to start waits and says why; an optional one goes on without it; a circle starts none of them (11.4967ms)
+✔ an optional provider that failed to start and starts later, as it was, brings what builds on it up again with it; one that keeps failing does not (9.447ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+✔ a dialog is still open long after the five minutes it used to be closed at, and answers when it is answered (4.209ms)
+✔ a dialog that waits still ends when it is cancelled or the run is stopped, with the value of no answer (0.7248ms)
+✔ Stop closes every dialog of the run, also one that was opened without a signal (0.7691ms)
+✔ a caller that names a wait gets it: the dialog closes as a timeout when it is up, and 0 is no wait (0.627ms)
+✔ a dialog of every kind opened with no page attached is handed to a page that opens later, until it is settled (0.6793ms)
+✔ a dialog waiting while no page is attached is replayed to a page that opens, and not once it is answered (68.8281ms)
+✔ a dialog in a chat someone is watching arms no timer at all, whatever the run's own limits are (1.0323ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+[extension watcher] server half started
+[extension watcher] server half started
+[extension watcher] server half started
+[extension watcher] its server half could not be started: Error: it cannot start
+    at Module.default (file:///C:/Users/Joe/AppData/Local/Temp/extension-folders-missed-S1sOc3/packages/watcher.js?pithagoras-rev=watcher-4:3:9)
+    at file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:804:38
+    at async start (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:799:25)
+    at async run (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:998:17)
+    at async TestContext.<anonymous> (file:///G:/work/git/pithagoras/core/server/test/extension-folders-missed.test.mjs:52:3)
+    at async Test.run (node:internal/test_runner/test:1313:7)
+    at async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3)
+[extension watcher] server half started
+[extension newcomer] server half started
+[extension newcomer] server half started
+[extension late] its server half could not be started: Error: it cannot start
+    at Module.default (file:///C:/Users/Joe/AppData/Local/Temp/extension-folders-missed-S1sOc3/packages/late.js:3:9)
+    at file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:804:38
+    at async start (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:799:25)
+    at async run (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:998:17)
+    at async TestContext.<anonymous> (file:///G:/work/git/pithagoras/core/server/test/extension-folders-missed.test.mjs:73:3)
+    at async Test.run (node:internal/test_runner/test:1313:7)
+    at async Test.processPendingSubtests (node:internal/test_runner/test:897:7)
+[extension late] server half started
+[extension taker] server half started
+[extension away] server half started
+[extension away] server half started
+✔ a server half that was not running when a folder was deleted is told of it when it starts again, once (26.8357ms)
+✔ a package that starts for the first time is told of no folder deleted before, and of each after (21.1598ms)
+✔ a package the portal told from the start, as an upgrade tells the one that takes up what it left, is told on its first start of each folder deleted since (4.5062ms)
+✔ the folders deleted are kept, for the halves not running, the latest few hundred (128.1851ms)
+✖ a server half is told of the folders the agents work in, and when the portal deletes one (11620.3044ms)
+✖ a server half is told what the person calls a folder, whether a list has it or not (10945.7426ms)
+✖ the default agent's home is marked home, and the home of the agent New starts chats with newChats, as the agents say (10976.0698ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+[extension @codacus/notes] server half started
+✔ a server half's routes are under its package's name, written from its own root (50.4059ms)
+✔ the rest of a path is read once, by the package's own routes: what was written as part of a name stays part of it (12.2326ms)
+✔ no body is read for a server half unless its route asks, so a route can take a file as it comes (58.3492ms)
+✔ a server half is told of the chats, and of the folder each works in (12.3912ms)
+✔ a server half makes a file in a chat's folder, never over one that is there, is told what a file is by its bytes, and sends it as the portal sends its own (61.6605ms)
+[extension @codacus/notes] what it said to a page could not be sent: TypeError: Do not know how to serialize a BigInt
+    at JSON.stringify (<anonymous>)
+    at wire (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:393:21)
+    at say (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:1134:81)
+    at openingPushes (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:1141:17)
+    at file:///G:/work/git/pithagoras/core/server/dist/api/events.js:85:9
+    at Layer.handleRequest (G:\work\git\pithagoras\node_modules\router\lib\layer.js:152:17)
+    at next (G:\work\git\pithagoras\node_modules\router\lib\route.js:157:13)
+    at Route.dispatch (G:\work\git\pithagoras\node_modules\router\lib\route.js:117:3)
+    at handle (G:\work\git\pithagoras\node_modules\router\index.js:435:11)
+    at Layer.handleRequest (G:\work\git\pithagoras\node_modules\router\lib\layer.js:152:17)
+[extension @codacus/notes] what it said to a page could not be sent: TypeError: Converting circular structure to JSON
+    --> starting at object with constructor 'Object'
+    --- property 'self' closes the circle
+    at JSON.stringify (<anonymous>)
+    at wire (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:393:21)
+    at Object.send (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:700:30)
+    at TestContext.<anonymous> (file:///G:/work/git/pithagoras/core/server/test/extension-host.test.mjs:226:16)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async Test.run (node:internal/test_runner/test:1313:7)
+    at async Test.processPendingSubtests (node:internal/test_runner/test:897:7)
+[extension @codacus/notes] what it said to a page could not be sent: TypeError: Do not know how to serialize a BigInt
+    at JSON.stringify (<anonymous>)
+    at wire (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:393:21)
+    at file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:1157:83
+    at Array.filter (<anonymous>)
+    at Module.openingFor (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:1157:17)
+    at TestContext.<anonymous> (file:///G:/work/git/pithagoras/core/server/test/extension-host.test.mjs:228:31)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async Test.run (node:internal/test_runner/test:1313:7)
+    at async Test.processPendingSubtests (node:internal/test_runner/test:897:7)
+✔ a page that opens a chat is told where things stand, then each thing a server half says, and nothing of another chat's (12.8008ms)
+✔ a server half hears a chat's pi start and stop, the chat deleted, and all its pi says (0.4104ms)
+✔ what a server half adds to a chat's pi is registered as that pi loads, for that chat, under the package's name (0.7057ms)
+✔ a chat's pi is kept while a server half holds it, and let go when every hold is (0.2151ms)
+✔ upgrades under a server half's routes go to it, with the address as its routes see it (0.3136ms)
+[extension @codacus/notes] server half started
+✖ a command is run for a chat in the folder the chat works in, which is where a server half keeps what is the chat's (64.0162ms)
+✖ a server half has a folder of the portal's own in the data folder, closed to everyone else, one for each package (3.2189ms)
+✖ what the portal left for an extension when an upgrade took something out of it, a server half takes into its own folder, whole, and has until it is done with it (6.6143ms)
+[extension @codacus/notes] its server half could not be started: Error: cannot start here
+    at Module.default (file:///C:/Users/Joe/AppData/Local/Temp/extension-host-fwZc1N/packages/notes/server.js?pithagoras-rev=mvx1wckf-2b-3:2:9)
+    at file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:804:38
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async start (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:799:25)
+    at async run (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:998:17)
+    at async TestContext.<anonymous> (file:///G:/work/git/pithagoras/core/server/test/extension-host.test.mjs:372:3)
+    at async Test.run (node:internal/test_runner/test:1313:7)
+    at async Test.processPendingSubtests (node:internal/test_runner/test:897:7)
+[extension @codacus/notes] server half started
+[extension @codacus/notes] server half started
+[extension @codacus/notes] server half started
+[extension other] server half started
+✔ a server half changed is stopped and started anew, one gone is stopped, and one that fails says why (19.1795ms)
+﹣ with the sandbox on, what a server half runs for a chat runs as the chat's agent, with none of the portal's own environment (0.1186ms) # needs root on Linux, as the portal runs in its image
+﹣ with the sandbox on, files.* with likeParent turn away what the chat's agent could not use itself: a closed folder renamed to documents, and a closed file moved into it, by the agent as the sandbox runs it (0.0762ms) # needs root on Linux, as the portal runs in its image
+﹣ with the sandbox on, the agent files.* ask for is the chat's own, from the workspace stored for it: a stored path that leads into another agent's home is checked as the chat's agent, not as the one whose home it leads to (0.0479ms) # needs root on Linux, as the portal runs in its image
+﹣ with the sandbox on, a folder with a thousand sessions is checked as fast as one with a few: the agents asked are those of the stored workspaces, not one lookup for each session (0.0491ms) # needs root on Linux, as the portal runs in its image
+✖ chats.inFolder gives the sessions of every kind whose stored workspace leads to the folder, and chats.list the tasks alone (189.4585ms)
+[extension @codacus/notes] stopping failed: Error: cannot stop
+    at file:///C:/Users/Joe/AppData/Local/Temp/extension-host-fwZc1N/packages/notes/server.js?pithagoras-rev=mvx1wcq1-2t-6:2:30
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async stop (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:782:9)
+    at async stopWithDependents (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:934:5)
+    at async run (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:974:17)
+[extension @codacus/notes] server half started
+[extension @codacus/notes] stopping failed: Error: It had not finished stopping after 0.3 seconds
+    at Timeout.<anonymous> (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:386:41)
+    at listOnTimeout (node:internal/timers:605:17)
+    at process.processTimers (node:internal/timers:541:7)
+[extension @codacus/notes] its server half could not be started: Error: It had not finished starting after 0.3 seconds
+    at Timeout.<anonymous> (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:386:41)
+    at listOnTimeout (node:internal/timers:605:17)
+    at process.processTimers (node:internal/timers:541:7)
+[extension @codacus/notes] server half started
+✔ a server half that fails to stop, or never finishes stopping or starting, holds up nothing else (640.5206ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+[extension test-installer] server half started
+node:internal/test_runner/harness:122
+      throw err;
+      ^
+
+Error: listen EACCES: permission denied C:\Users\Joe\AppData\Local\Temp\pithagoras-cUlfZy\1.sock
+    at Server.setupListenHandle [as _listen2] (node:net:1986:21)
+    at listenInCluster (node:net:2065:12)
+    at Server.listen (node:net:2187:5)
+    at file:///G:/work/git/pithagoras/core/server/dist/half-runtime.js:459:74
+    at new Promise (<anonymous>)
+    at serve (file:///G:/work/git/pithagoras/core/server/dist/half-runtime.js:459:12)
+    at start (file:///G:/work/git/pithagoras/core/server/dist/half-runtime.js:467:11)
+    at process.<anonymous> (file:///G:/work/git/pithagoras/core/server/dist/half-runtime.js:499:18)
+    at process.emit (node:events:509:28)
+    at emit (node:internal/child_process:972:14) {
+  code: 'EACCES',
+  errno: -4092,
+  syscall: 'listen',
+  address: 'C:\\Users\\Joe\\AppData\\Local\\Temp\\pithagoras-cUlfZy\\1.sock',
+  port: -1
+}
+
+Node.js v24.16.0
+[extension x] its server half crashed. It is off until another revision of it is installed, or it is switched off and on. [Error: Its process ended with code 7]
+[extension x] its server half could not be started: Error: It crashed as it started: Error: Its process ended with code 7
+    at file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:806:31
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async start (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:799:25)
+    at async run (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:998:17)
+✖ a package from its own data folder is installed and runs: its route answers, and Settings says where it came from (1179.4601ms)
+✖ only a folder of its own data folder, with a name of its own: anything else is refused, and nothing is installed (3.9026ms)
+node:internal/test_runner/harness:122
+      throw err;
+      ^
+
+Error: listen EACCES: permission denied C:\Users\Joe\AppData\Local\Temp\pithagoras-eqjgEg\1.sock
+    at Server.setupListenHandle [as _listen2] (node:net:1986:21)
+    at listenInCluster (node:net:2065:12)
+    at Server.listen (node:net:2187:5)
+    at file:///G:/work/git/pithagoras/core/server/dist/half-runtime.js:459:74
+    at new Promise (<anonymous>)
+    at serve (file:///G:/work/git/pithagoras/core/server/dist/half-runtime.js:459:12)
+    at start (file:///G:/work/git/pithagoras/core/server/dist/half-runtime.js:467:11)
+    at process.<anonymous> (file:///G:/work/git/pithagoras/core/server/dist/half-runtime.js:499:18)
+    at process.emit (node:events:509:28)
+    at emit (node:internal/child_process:972:14) {
+  code: 'EACCES',
+  errno: -4092,
+  syscall: 'listen',
+  address: 'C:\\Users\\Joe\\AppData\\Local\\Temp\\pithagoras-eqjgEg\\1.sock',
+  port: -1
+}
+
+Node.js v24.16.0
+[extension x] its server half crashed. It is off until another revision of it is installed, or it is switched off and on. [Error: Its process ended with code 7]
+[extension x] its server half could not be started: Error: It crashed as it started: Error: Its process ended with code 7
+    at file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:806:31
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async start (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:799:25)
+    at async run (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:998:17)
+✖ the same folder installed again is loaded again in place: one entry, its half at the new revision, the note replaced (809.7264ms)
+✖ one the person switched off stays off when it is installed again (66.0745ms)
+✖ it removes only what is in its own folder: the package goes, with its half and routes, and its files stay (726.3428ms)
+node:internal/test_runner/harness:122
+      throw err;
+      ^
+
+Error: listen EACCES: permission denied C:\Users\Joe\AppData\Local\Temp\pithagoras-p1dgXW\1.sock
+    at Server.setupListenHandle [as _listen2] (node:net:1986:21)
+    at listenInCluster (node:net:2065:12)
+    at Server.listen (node:net:2187:5)
+    at file:///G:/work/git/pithagoras/core/server/dist/half-runtime.js:459:74
+    at new Promise (<anonymous>)
+    at serve (file:///G:/work/git/pithagoras/core/server/dist/half-runtime.js:459:12)
+    at start (file:///G:/work/git/pithagoras/core/server/dist/half-runtime.js:467:11)
+    at process.<anonymous> (file:///G:/work/git/pithagoras/core/server/dist/half-runtime.js:499:18)
+    at process.emit (node:events:509:28)
+    at emit (node:internal/child_process:972:14) {
+  code: 'EACCES',
+  errno: -4092,
+  syscall: 'listen',
+  address: 'C:\\Users\\Joe\\AppData\\Local\\Temp\\pithagoras-p1dgXW\\1.sock',
+  port: -1
+}
+
+Node.js v24.16.0
+[extension z] its server half crashed. It is off until another revision of it is installed, or it is switched off and on. [Error: Its process ended with code 7]
+[extension z] its server half could not be started: Error: It crashed as it started: Error: Its process ended with code 7
+    at file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:806:31
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async start (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:799:25)
+    at async run (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:998:17)
+✔ removed in Settings, a package it installed with a note leaves no note behind (1915.0616ms)
+node:internal/test_runner/harness:122
+      throw err;
+      ^
+
+Error: listen EACCES: permission denied C:\Users\Joe\AppData\Local\Temp\pithagoras-2iTf0F\1.sock
+    at Server.setupListenHandle [as _listen2] (node:net:1986:21)
+    at listenInCluster (node:net:2065:12)
+    at Server.listen (node:net:2187:5)
+    at file:///G:/work/git/pithagoras/core/server/dist/half-runtime.js:459:74
+    at new Promise (<anonymous>)
+    at serve (file:///G:/work/git/pithagoras/core/server/dist/half-runtime.js:459:12)
+    at start (file:///G:/work/git/pithagoras/core/server/dist/half-runtime.js:467:11)
+    at process.<anonymous> (file:///G:/work/git/pithagoras/core/server/dist/half-runtime.js:499:18)
+    at process.emit (node:events:509:28)
+    at emit (node:internal/child_process:972:14) {
+  code: 'EACCES',
+  errno: -4092,
+  syscall: 'listen',
+  address: 'C:\\Users\\Joe\\AppData\\Local\\Temp\\pithagoras-2iTf0F\\1.sock',
+  port: -1
+}
+
+Node.js v24.16.0
+[extension s] its server half crashed. It is off until another revision of it is installed, or it is switched off and on. [Error: Its process ended with code 7]
+[extension s] its server half could not be started: Error: It crashed as it started: Error: Its process ended with code 7
+    at file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:806:31
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async start (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:799:25)
+    at async run (file:///G:/work/git/pithagoras/core/server/dist/extension-host.js:998:17)
+✖ where an installed extension stands: running, failing, crashed, what it said after a line, its page's failure, a chat's load errors (3681.9767ms)
+✔ a row in Audit, under the extension's name: the subject cut at 2,000 characters, the chat kept as given (1.7455ms)
+✖ installs go one at a time: two of one name from two folders, and one is refused; not while its half starts, nor once it stopped (844.8357ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+✔ an extension worked on in a folder of its own shows a setting as soon as its code reads one (29.0189ms)
+✔ one installed from npm is scanned again only when it is installed again (36.7113ms)
+✔ a package that gives pi no extension reads none of pi's settings, whatever its own code calls settings (47.3456ms)
+✔ a name in a string is no setting read: an extension's own page in Settings is registered as "settings.page" (2.9009ms)
+
+  No password is set yet. Open the portal in a browser to choose one: until then it answers nothing
+  else, and whoever opens it first chooses the password. This portal runs arbitrary commands on the
+  host, so keep the port to yourself until you have.
+
+[extension notes] server half started
+[extension notes] server half started
+[extension notes] server half started
+✖ a server written for the portal's user alone, with the adapter installed where it is missing, and trusted only when asked (8397.5171ms)
+✖ its tools are the chats' only through the adapter, switched on, and while the server is not switched off (36.1588ms)
+✖ removed, it is gone from the file, from what the chats have and from the servers trusted (17.6325ms)
+✔ a name or a server the adapter would not take is refused, and so is a file that cannot be read (4.3932ms)
+✖ what is written to the file while the adapter is being installed stays (90012.9153ms)
+EXIT=1

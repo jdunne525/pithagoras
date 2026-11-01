@@ -17,11 +17,17 @@ same permissions. It is off until you switch it on in **Settings → Sandbox**.
 - **The shell.** Every command pi's `bash` runs, and whatever that command starts.
 - **pi's file tools.** `read`, `write`, `edit` and `ls` do their reading and
   writing as the agent's user. `grep` and `find` run whole as that user too.
+  An installed extension that registers a tool of one of these names, or
+  `bash`, would have its own run in their place, as the portal: that tool is
+  off in the chat instead, and the chat says which package took the name.
 - **The environment.** Commands get a short list of variables: `PATH`, the
   language and terminal ones, and pi's own `PI_*` session variables. The portal's
   password, its secret and the provider keys are not among them, so `env` shows
   nothing worth taking. Each agent has a `HOME` and a `TMPDIR` of its own under
   `/data/sandbox-home`, so no cache or temporary file is shared between agents.
+- **Subagents.** A subagent works in a chat of its own in its chat's folder
+  ([Subagents](/guide/features#subagents)), whose commands run as that folder's
+  user, as the chat's own do.
 
 ## One user per agent
 
@@ -51,7 +57,8 @@ the portal's, `/data/sandbox/mcp`.
 The folder's skills, in `.pi/skills` and in `.agents/skills` up to the root of
 its repository, are still loaded: a skill is text the model reads, and what it
 says to run, the agent runs with its own tools, inside the sandbox. The folder's
-`AGENTS.md` is read as before. A `.pi/SYSTEM.md` or `APPEND_SYSTEM.md` in it is
+`AGENTS.md` is read as before, unless it is a link or the agent could not read
+it (see [below](#paths)). A `.pi/SYSTEM.md` or `APPEND_SYSTEM.md` in it is
 not, as pi leaves those out of an untrusted project too.
 
 ## Paths
@@ -64,6 +71,30 @@ The most specific rule decides.
 | No access | nothing: not read it, list it or pass through it | group root, no permissions for group or others |
 | Read-only | read it and run what is in it, not change it | readable and runnable by everyone, writable only by root |
 | Read & write | everything | owned by the group `pi-sandbox`, writable by it; new files keep the group |
+
+What you make in [Files](/guide/files) (a new file, an upload, a new folder) or
+what the portal saves into a project follows the same rule: it gets the owner and
+group of the folder it is made in, and is writable by that group where the folder is.
+Under a read & write rule that is `pi-sandbox`, so the agent can edit it; in an
+agent's own folder it is that agent's. It is not left to root, as it was.
+
+The tools that read a file the agent names, as root, read it only where the
+agent could read it itself: [Media](/guide/media)'s `show_image`, `show_video`,
+`edit_image` and the frames `generate_video` starts and ends a clip with, which
+read through the checks the portal gives every extension
+([A chat's folder](/guide/extension-ui#a-chat-s-folder)), and a picture or a
+clip a call gives that a channel sends on. A picture under a no-access rule is
+refused to the agent, as `cat` would refuse it; you still see it in Files.
+
+What the portal puts in the agent's prompt it reads the same way: the agent's
+`SOUL.md`, `PrimaryUser.md`, `MEMORY.md` and `TEAM.md`, the `AGENTS.md` or
+`CLAUDE.md` pi finds from the chat's folder up, and the `WATCH.md` a heartbeat
+look is asked. One that is a link is left out, wherever it leads, and so is one
+the agent could not read itself: a link the agent leaves in its home in place of
+`MEMORY.md` does not put another agent's files, or the portal's own, in its
+prompt. In a project linked to an agent, that agent's files are read as the
+agent whose home they are in. The `AGENTS.md` in pi's own folder
+(`/data/home/.pi/agent`) is yours, and is read as it is.
 
 A path no rule names keeps the permissions it has. For most of the system that
 means readable and not changeable. The agents' homes and their `HOME` folders
@@ -79,8 +110,14 @@ The defaults:
 | `/data/portal.db` | no access | the portal's database and settings |
 | `/data/home` | no access | the portal's `HOME`: pi's `auth.json`, SSH keys, packages |
 | `/data/sessions` | no access | every chat's transcript |
-| `/data/browser-profile` | no access | the browser's cookies and logins |
 | `/data/backups`, `/certs` | no access | database backups, the TLS key |
+
+What an extension keeps for itself, in `/data/extension-data`, is made for the
+portal alone, closed to the agents: the [Browser](/guide/browser) extension's
+local Chrome profile, with the browser's cookies and logins, is there. A policy
+saved before Browser was an extension still has a `/data/browser-profile` rule,
+for a folder the upgrade moved; it is said to be not there yet, does nothing,
+and can be taken out.
 
 **Save and apply** sets owners and permissions at once. Under a read or write
 rule it changes every file below it, which can take a while in a big workspace.
@@ -111,10 +148,13 @@ A trusted command must not print its own key: what it prints, the agent reads.
 
 ## Not covered yet
 
-- **Subagents** start a separate pi process, as the portal's user.
 - **MCP servers** that pi starts, and **an extension's own tools** that start
   programs, run as the portal's user.
 - **The Terminal panel** is yours, not the agent's, and is not sandboxed.
+- **What [Creator mode](/guide/creator-mode) installs** runs outside the sandbox
+  by design, as the portal's user, its server half in a process of its own. The
+  sandbox decides what of the agent's draft the install may read, and keeps the
+  agent out of the copy that is installed.
 - **The network.** What the agent can read, it can still send. Limiting where
   it may connect is a separate step.
 

@@ -9,52 +9,6 @@ test("the model menu's providers link goes through the router, as any other link
   expect(await page.evaluate(() => typeof history.state?.idx)).toBe('number');
 });
 
-test("with the subagent tool on, the model menu says what this chat's subagents run on, and a choice there is kept", async ({ page }) => {
-  const saved: unknown[] = [];
-  await page.route('**/api/features/flags', (route) => route.fulfill({ json: { subagent: { enabled: true }, understory: { enabled: false } } }));
-  await page.route('**/api/sessions/preview/subagent-model', async (route) => {
-    if (route.request().method() === 'PUT') {
-      const { model } = route.request().postDataJSON();
-      saved.push(model);
-      return route.fulfill({ json: { model, default: 'auto' } });
-    }
-    await route.fulfill({ json: { model: null, default: 'auto' } });
-  });
-  await page.goto('/tests/chat.html?phase=model');
-  await page.getByTitle('Model A', { exact: true }).click();
-  const picker = page.getByRole('combobox', { name: 'Subagents in this chat run on' });
-  await expect(picker).toContainText("Default — this chat's model");
-  await picker.click();
-  await page.getByRole('option', { name: /This chat's model/ }).click();
-  // The menu stays open across the choice made in it.
-  await expect(picker).toContainText("This chat's model");
-  expect(saved).toEqual(['auto']);
-});
-
-test('without the subagent tool, the model menu has nothing about subagents', async ({ page }) => {
-  await page.route('**/api/features/flags', (route) => route.fulfill({ json: { subagent: { enabled: false }, understory: { enabled: false } } }));
-  await page.goto('/tests/chat.html?phase=model');
-  await page.getByTitle('Model A', { exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Add or change providers…' })).toBeVisible();
-  await expect(page.getByRole('combobox', { name: 'Subagents in this chat run on' })).toHaveCount(0);
-});
-
-test("the subagents' row is asked for with the chat, so the model menu opens with it already there", async ({ page }) => {
-  let asked = 0;
-  await page.route('**/api/features/flags', (route) => route.fulfill({ json: { subagent: { enabled: true }, understory: { enabled: false } } }));
-  await page.route('**/api/sessions/preview/subagent-model', async (route) => {
-    asked++;
-    await new Promise((r) => setTimeout(r, 300));
-    await route.fulfill({ json: { model: 'llama-swap/model-b', default: 'auto' } });
-  });
-  await page.goto('/tests/chat.html?phase=model');
-  await expect.poll(() => asked).toBe(1);
-  await page.waitForTimeout(400);
-  await page.getByTitle('Model A', { exact: true }).click();
-  // There in the first frame: nothing arrives after the menu to push it about.
-  await expect(page.getByRole('combobox', { name: 'Subagents in this chat run on' })).toContainText('llama-swap/model-b', { timeout: 150 });
-});
-
 const catalogue = (ids: string[]) => ({
   live: true, stats: null, thinking: { levels: ['off', 'low', 'medium', 'high'] },
   state: { model: { id: 'Model A', name: 'Model A', provider: 'llama-server' }, thinkingLevel: 'medium' },
@@ -105,6 +59,7 @@ test("a model picked in the menu is asked for with its own provider, not the one
   await page.goto('/tests/chat.html?phase=model');
   await page.getByTitle('Model A', { exact: true }).click();
   await page.getByRole('button', { name: 'More models' }).click();
-  await page.getByTitle('strata-1gpu', { exact: true }).click();
+  // By its name, not its title, which is lifted into the tooltip of the model the list opens under the pointer.
+  await page.getByRole('group', { name: 'Models' }).getByRole('button', { name: 'strata-1gpu' }).click();
   await expect.poll(() => asked).toEqual([{ provider: 'llama-swap', modelId: 'strata-1gpu' }]);
 });

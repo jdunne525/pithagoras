@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Starts the Pithagoras server natively on Windows without Docker.
 
@@ -57,8 +57,8 @@ if (-not (Test-Path "node_modules")) {
 }
 
 # 4. Check build artifacts
-$serverBuilt = Test-Path "server/dist/index.js"
-$webBuilt = Test-Path "web/dist/index.html"
+$serverBuilt = Test-Path "core/server/dist/index.js"
+$webBuilt = Test-Path "core/web/dist/index.html"
 
 if (-not $Dev -and (-not $serverBuilt -or -not $webBuilt)) {
     Write-Host "Build artifacts missing. Running npm run build..." -ForegroundColor Yellow
@@ -116,5 +116,5 @@ if ($Dev) {
     npm run dev:server
 } else {
     Write-Host "Starting server..." -ForegroundColor Cyan
-    node server/dist/index.js
+    node core/server/dist/index.js
 }

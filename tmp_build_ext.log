@@ -1,0 +1,45 @@
+npm notice run pithagoras@0.2.0 build:extensions
+npm notice run node scripts/build-extensions.mjs
+[22:58:09] building pithagoras-browser
+pithagoras-browser: installing its packages (3)
+pithagoras-browser: built web/ and server.js
+[22:58:21] building pithagoras-canvas
+pithagoras-canvas: installing its packages (7)
+pithagoras-canvas: built web/ and server.js
+[22:58:27] building pithagoras-creator
+pithagoras-creator: installing its packages (2)
+pithagoras-creator: built web/, server.js and its skill's reference
+[22:58:33] building pithagoras-docker
+pithagoras-docker: installing its packages (2)
+pithagoras-docker: built web/ and server.js
+[22:58:40] building pithagoras-docs
+pithagoras-docs: installing its packages (@milkdown/core, @milkdown/ctx, @milkdown/exception, @milkdown/plugin-history, @milkdown/plugin-listener, …)
+pithagoras-docs: built web\editor.js
+[22:58:48] building pithagoras-files
+pithagoras-files: installing its packages (2)
+pithagoras-files: built web/ and server.js
+[22:58:56] building pithagoras-git
+pithagoras-git: installing its packages (2)
+pithagoras-git: built web/ and server.js
+[22:59:03] building pithagoras-kanban
+pithagoras-kanban: installing its packages (2)
+pithagoras-kanban: built web/ and server.js
+[22:59:11] building pithagoras-media
+pithagoras-media: installing its packages (11)
+pithagoras-media: built web/ and server.js
+[22:59:20] building pithagoras-subagent
+pithagoras-subagent: built web/ and server.js
+[22:59:24] building pithagoras-terminal
+pithagoras-terminal: installing its packages (4)
+pithagoras-terminal: built web/
+[22:59:30] building pithagoras-understory
+pithagoras-understory: installing its packages (3)
+pithagoras-understory: built web/ and server.js
+[22:59:38] building pithagoras-voice
+pithagoras-voice: installing its packages (2)
+pithagoras-voice: built web/ and server.js
+[22:59:45] building pithagoras-voice-servers
+pithagoras-voice-servers: installing its packages (2)
+pithagoras-voice-servers: built web/ and server.js
+[22:59:54] DONE
+EXIT=0

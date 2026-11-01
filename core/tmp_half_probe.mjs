@@ -1,0 +1,16 @@
+import { writeFileSync, mkdirSync } from "node:fs";
+import path from "node:path";
+const { inProcessHome } = await import("./core/server/test/server-harness.mjs");
+const home = inProcessHome("halfprobe-");
+const host = await import("./core/server/dist/extension-host.js");
+await import("./core/server/dist/session-manager.js");
+host.setChatBridge({ tell: async () => false, offers: () => undefined, reload: async () => ({ reloaded: 0, waiting: 0 }), model: async () => undefined });
+const dir = path.join(home, "pkg", "timer");
+mkdirSync(dir, { recursive: true });
+const file = path.join(dir, "server.js");
+writeFileSync(file, `setTimeout(() => { throw new Error("thrown in a timer"); }, 100);\n`);
+await host.syncServerHalves([{ name: "timer", version: "1.0.0", file, rev: "1" }]);
+await new Promise((r) => setTimeout(r, 3000));
+console.log(JSON.stringify(host.extensionStatus?.("timer") ?? host.serverStatus?.("timer") ?? "no status api", null, 1).slice(0, 1500));
+await host.stopServerHalves();
+process.exit(0);
