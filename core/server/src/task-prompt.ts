@@ -40,6 +40,10 @@ export function buildTaskPrompt(
 
   let prompt =
     `You are Pithagoras, an AI assistant helping execute task development.\n\n` +
+    // The task's run has no ask_question (session-manager.ts canAsk): nobody is at its page to answer, and a model
+    // that expects a question to be answered leaves the work half-done and asks in its answer instead.
+    `## Working Alone\n\nYou work on your own: no question is put to the person while you run, and none is answered. ` +
+    `Read the task as it is written, decide everything it leaves open yourself, and write down what you decided and why.\n\n` +
     `## Specific Task\n\nTask: ${task.title}\n\nDescription:\n${task.description ?? ""}`;
 
   if (projectInstructions.trim()) {

@@ -98,6 +98,7 @@ import {
   anySessionRunning,
   onChannel,
   dialogHost,
+  isTaskRunChat,
   lazyMarks,
   lazyToolNames,
   lazySetLabels,
@@ -282,10 +283,15 @@ function plain(text: unknown): string {
 const hasRoutineTools = (session: SessionRow) =>
   session.kind === "agent" || (session.kind === "task" && agentAt(session.workspace) !== undefined);
 
-/** Whether the conversation gets the ask_question tool: see asksQuestions. Never in a chat nobody attends (child-chats.ts). */
+/**
+ * Whether the conversation gets the ask_question tool: see asksQuestions. Never in a chat nobody attends
+ * (child-chats.ts), and never in a Task's run: an autonomous Task works from what its prompt gives it and decides
+ * the rest for itself (task-execution.ts), with nobody at its page to answer. A child a Task's run made has none
+ * either: its dialogs would go to that run's page (see isTaskRunChat).
+ */
 const canAsk = (session: SessionRow) => {
   const host = dialogHost(session);
-  return !session.unattended && asksQuestions({ kind: host.kind, role: session.role }, onChannel(host));
+  return !session.unattended && !isTaskRunChat(session) && asksQuestions({ kind: host.kind, role: session.role }, onChannel(host));
 };
 
 /**

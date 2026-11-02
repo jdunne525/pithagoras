@@ -226,8 +226,11 @@ The tool exists wherever you answer in the portal's own pages: in your chats,
 and in the conversations you start on the Agent page. It does not exist in a
 routine, a heartbeat or a chat reached through a channel, where nobody could
 answer in the web UI: there the agent asks in plain text, and the person
-answers with their next message. It is in the tools list like any other, in a
-group named `ask-question`, and can be switched off there.
+answers with their next message. A Task's own run has no questions for the same
+reason: it works from what its prompt gives it, decides for itself what the task
+leaves open, and says in its answer what it decided; a chat a package made under
+that run is the same. It is in the tools list like any other, in a group named
+`ask-question`, and can be switched off there.
 
 ## Looking at a picture
 

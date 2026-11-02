@@ -4290,6 +4290,19 @@ export function getAttempt(id: string): TaskAttemptRow | undefined {
   return getDb().prepare("SELECT * FROM task_attempts WHERE id = ?").get(id) as TaskAttemptRow | undefined;
 }
 
+/**
+ * Whether a chat is one an autonomous Task ran in: an attempt points at it. Every run of a Task goes through
+ * task-execution.ts, which makes the chat and opens the attempt on it — the first, each retry and a Rerun — so the
+ * attempt row is the record of what the chat was made for, and a chat the person started has none. Read where a
+ * chat's tools are settled: a Task's run is left to decide on its own and has no ask_question (session-manager.ts
+ * canAsk). A child chat is counted with the run it was made under, for its dialogs go to that run's page (dialogHost).
+ */
+export function isTaskRunChat(session: Pick<SessionRow, "id" | "parent_id"> | undefined): boolean {
+  const id = session?.parent_id || session?.id;
+  if (!id) return false;
+  return getDb().prepare("SELECT 1 AS one FROM task_attempts WHERE session_id = ? LIMIT 1").get(id) !== undefined;
+}
+
 /** Update the given attempt columns. Timestamps use UTC strings; pass null to clear. */
 export function updateAttemptFields(id: string, fields: {
   session_id?: string | null;
