@@ -1092,6 +1092,11 @@ class SessionManager extends EventEmitter {
       // room was let go at the same time: going on here would start a run nobody
       // asked for.
       if (!this.compactionResumePending.has(sessionId) && !this.cutOffResumePending.has(sessionId)) return;
+      // Never into a run that is going: pi queues it into that run, where the
+      // model reads it as an order to work, which is how a chat comes to answer
+      // the same "resume where you left off" every turn and never finish. A run
+      // has its own end to be decided at, and the marker waits for it.
+      if (this.inRun.has(sessionId)) return;
       const live = this.live.get(sessionId);
       if (!live || this.stopping.has(live.client)) {
         // No pi to resume into: the pending marker is all that keeps the room
