@@ -21,7 +21,7 @@ test("a typed message is answered once pi has taken it, not once the run it star
     // pi's own shape: the preflight says it was accepted, and the promise
     // holds on until the whole run is done.
     prompt: (_text, options) => {
-      options.preflightResult?.(true);
+      options.preflightResult?.("started");
       return new Promise((resolve) => (finish = resolve));
     },
   };
@@ -42,7 +42,7 @@ test("a run that fails after taking the message says so before it settles", asyn
     setActiveToolsByName() {},
     // pi's order: the run settles in its finally, and only then does prompt() throw.
     prompt: async (_text, options) => {
-      options.preflightResult?.(true);
+      options.preflightResult?.("started");
       await new Promise((resolve) => setImmediate(resolve));
       try {
         throw new Error("model went away");
@@ -287,7 +287,7 @@ test("a settle that comes after the next prompt has started a run is not held be
     setActiveToolsByName() {},
     // The next prompt: accepted with pi reading as idle, and its run goes on.
     prompt: (_text, options) => {
-      options.preflightResult?.(true);
+      options.preflightResult?.("started");
       return new Promise(() => {});
     },
   };
@@ -652,16 +652,17 @@ test("pi's client says what it queued, as pi queued it", async () => {
     prompt: async (text, options) => {
       steering.push(`expanded ${text}`);
       client.noteQueue({ type: "queue_update", steering: [...steering], followUp: [] });
-      options.preflightResult?.(true);
+      options.preflightResult?.("queued");
     },
   };
   const client = new SdkPiClient(session, {}, () => {});
   assert.deepEqual(await client.prompt("/tmpl", { steer: true }), { outcome: "queued", lane: "steering", text: "expanded /tmpl" });
-  session.prompt = async (_text, options) => options.preflightResult?.(true);
+  // pi answers a prompt an extension took by returning without a word about it.
+  session.prompt = async () => {};
   assert.deepEqual(await client.prompt("/handled"), { outcome: "handled" });
   session.isIdle = true;
   session.prompt = (_text, options) => {
-    options.preflightResult?.(true);
+    options.preflightResult?.("started");
     session.isIdle = false;
     return new Promise(() => {});
   };

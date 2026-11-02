@@ -15,7 +15,7 @@ import { inProcessHome } from "./server-harness.mjs";
 const home = inProcessHome("pithagoras-compaction-gap-");
 mkdirSync(path.join(home, "work"), { recursive: true });
 
-const { createSession, getSession, getDb, setSingleActiveSession } = await import("../dist/db.js");
+const { createSession, eventsSince, getSession, getDb, setSingleActiveSession } = await import("../dist/db.js");
 const { SdkPiClient } = await import("../dist/pi/sdk-client.js");
 const { sessions, PromptQueuedForSingleActive } = await import("../dist/session-manager.js");
 test.after(() => getDb().close());
@@ -46,6 +46,11 @@ class FakePi extends EventEmitter {
     return { model: { id: "m", name: "M", provider: "p", input: ["text"] }, thinkingLevel: "off" };
   }
   async abort() {}
+  /** The chat's own auto-compaction switch, which pi has too. */
+  autoCompaction = true;
+  async setAutoCompaction(enabled) {
+    this.autoCompaction = enabled;
+  }
   async shutdown() {}
   dispose() {}
   /** Accepting a message starts a run of its own, as pi's does. */
@@ -90,6 +95,7 @@ function reset() {
   sessions.compacting.clear();
   sessions.compactionInterruptedRun.clear();
   sessions.compactionResumePending.clear();
+  sessions.compactionFailures.clear();
   sessions.singleActiveClaiming.clear();
   sessions.singleActiveQueue = [];
 }
@@ -185,6 +191,117 @@ test("a compaction pi resumes itself keeps holding the room", async () => {
     aPi.settle();
     await flush();
     assert.deepEqual(started, [a, b], "B starts once the run has ended");
+  } finally {
+    reset();
+  }
+});
+
+// From pi 1.2 the session is busy from the moment a run starts preparing, and
+// from pi 1.5 an auto-compaction at a turn boundary is followed by pi's own
+// next turn of that same run: the portal's "the compaction ended and pi will
+// not resume the turn" is read as an unfinished turn, and the resume it sends
+// lands in a run that is going — queued, and answered as an order to work on.
+// BlastRunHero answered "Compaction detected, resume where you left off"
+// forty-four times in one day and never finished. What the portal may do is
+// carry a turn on that nothing else will, and say what a failing compaction
+// leaves the chat with.
+
+test("a compaction pi carries on itself gets no resume of ours", async () => {
+  try {
+    setSingleActiveSession(false);
+    const a = chat();
+    await sessions.prompt(a, "work on A");
+    await flush();
+    const pi = pis.get(a);
+
+    // Auto-compaction at a turn boundary: the run does not end, and pi's next
+    // turn of it follows in the same breath compaction_end says it will retry
+    // nothing.
+    pi.emit("event", { type: "compaction_start", reason: "threshold" });
+    pi.emit("event", { type: "compaction_end", reason: "threshold", willRetry: false, result: { summary: "s" } });
+    assert.equal(sessions.compactionResumePending.has(a), true, "the gap is marked until it is known");
+    pi.emit("event", { type: "turn_start" });
+    assert.equal(sessions.compactionResumePending.has(a), false, "the turn carried on: nothing to resume");
+
+    pi.settle();
+    await flush();
+    assert.deepEqual(pi.prompts, ["work on A"], "no resume was sent into the carried-on turn");
+  } finally {
+    reset();
+  }
+});
+
+test("a run pi stops for a mid-turn compaction is carried on at its end", async () => {
+  try {
+    setSingleActiveSession(false);
+    const a = chat();
+    await sessions.prompt(a, "work on A");
+    await flush();
+    const pi = pis.get(a);
+
+    // A manual compaction of a running chat: pi aborts the run, compacts, and
+    // the run settles. The turn is in nobody's hands, so the resume waits for
+    // that settle rather than landing in the middle of it.
+    pi.emit("event", { type: "compaction_start", reason: "manual" });
+    pi.emit("event", { type: "compaction_end", reason: "manual", willRetry: false, result: { summary: "s" } });
+    assert.deepEqual(pi.prompts, ["work on A"], "nothing sent while the run was still winding down");
+    assert.equal(sessions.compactionResumePending.has(a), true, "the gap is marked, and holds the room");
+
+    pi.settle();
+    await flush();
+    assert.deepEqual(pi.prompts, ["work on A", "Compaction detected, resume where you left off if needed."], "carried on once the run had ended");
+  } finally {
+    reset();
+  }
+});
+
+test("compactions that keep failing are said, and stop being attempted", async () => {
+  const notices = (id) =>
+    eventsSince(id)
+      .map((r) => ({ type: r.type, payload: JSON.parse(r.payload) }))
+      .filter((r) => r.type === "portal_notice");
+
+  try {
+    setSingleActiveSession(false);
+    const a = chat();
+    await sessions.prompt(a, "work on A");
+    await flush();
+    const pi = pis.get(a);
+    // The shape pi 1.4 reports when the summary it asked the model to write
+    // stopped in the middle for want of room: no result, and its own text.
+    const failed = {
+      type: "compaction_end",
+      reason: "threshold",
+      willRetry: false,
+      errorMessage: "Auto-compaction failed: Summarization failed: generation hit the token cap and the summary is incomplete. Compaction stopped: 185932 > 119072.",
+    };
+
+    // The first failure is said, not acted on: one summary can fail for a
+    // provider that was having a bad minute.
+    pi.emit("event", { type: "compaction_start", reason: "threshold" });
+    pi.emit("event", { type: "compaction_end", reason: "threshold", willRetry: false, result: { summary: "s" } });
+    assert.equal(notices(a).length, 0, "a compaction that worked says nothing");
+
+    pi.emit("event", { type: "compaction_start", reason: "threshold" });
+    pi.emit("event", { type: "compaction_end", ...failed });
+    assert.equal(notices(a).length, 1, "the failure is said");
+    assert.equal(pi.autoCompaction, true, "one failure of thirty is not the chat's to decide on");
+
+    pi.emit("event", { type: "compaction_start", reason: "threshold" });
+    pi.emit("event", { type: "compaction_end", ...failed });
+    // The switch-off line follows the call that asks pi for it, so it lands a
+    // moment after the failure it explains.
+    await flush();
+    const after = notices(a);
+    assert.equal(after.length, 3, "the failure, and the switch off, each said");
+    assert.equal(pi.autoCompaction, false, "the chat stops paying minutes for attempts that cannot work");
+    assert.equal(after[1].payload.text, "Auto-compaction failed: the summary did not fit in what the model can write in one answer, so nothing was compacted.");
+    assert.match(after[2].payload.text, /Auto-compaction is off for this chat after failing twice in a row/);
+
+    // A chat whose compactions work again is a chat left to itself.
+    pi.emit("event", { type: "compaction_end", reason: "threshold", willRetry: false, result: { summary: "s" } });
+    assert.equal(sessions.compactionFailures.has(a), false, "the count starts afresh");
+    assert.equal(pi.autoCompaction, false, "the chat's own switch is the person's to turn back");
   } finally {
     reset();
   }

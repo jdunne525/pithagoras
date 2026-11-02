@@ -32,7 +32,8 @@ function running(refuse = false) {
   session.prompt = (_text: string, options: any) =>
     new Promise<void>((resolve, reject) => {
       if (refuse) return reject(new Error('refused'));
-      options.preflightResult(true);
+      // pi 1.2 says how it took the message, in its options, before the run starts.
+      options.preflightResult('started');
       session.isIdle = false;
       ran.push(session.agent.state.model.id);
       finish = (error) => (error ? reject(error) : resolve());
@@ -90,7 +91,8 @@ test('a spoken message pi refuses leaves the chat on its model', async () => {
 
 test('a spoken message an extension handles leaves the chat on its model', async () => {
   const { client, session } = clientOn();
-  session.prompt = async (_text: string, options: any) => options.preflightResult(true);
+  // An extension answered it: pi says nothing and no run starts.
+  session.prompt = async () => undefined;
   save('fast/small');
   assert.equal((await client.prompt('/cmd', { voice: true })).outcome, 'handled');
   assert.equal(session.agent.state.model, chat);
@@ -112,7 +114,7 @@ test('a spoken message into a run that is going keeps the run on its model', asy
   save('');
   await client.prompt('first');
   save('fast/small');
-  session.prompt = (_t: string, options: any) => { options.preflightResult(true); ran.push(session.agent.state.model.id); return Promise.resolve(); };
+  session.prompt = (_t: string, options: any) => { options.preflightResult('queued'); ran.push(session.agent.state.model.id); return Promise.resolve(); };
   await client.prompt('then speaking', { voice: true });
   assert.deepEqual(ran, ['big', 'big']);
   await end();

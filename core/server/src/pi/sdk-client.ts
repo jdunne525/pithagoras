@@ -1007,18 +1007,30 @@ export class SdkPiClient extends EventEmitter implements PiClient {
     const text = options?.voice ? audioMessage(message) : message;
     const handoff: Handoff = { text, lane: options?.steer ? "steering" : "followUp" };
     this.handoffs.push(handoff);
-    // pi says it has the message just before it either returns — queued, or
-    // handled by an extension — or starts the run: idle then and running a
-    // moment later is a run this message started.
+    // pi says what it made of the message — it started a run with it, queued it
+    // behind a run that is going, or an extension took it — and says it at the
+    // moment it takes it. That word is the answer: from pi 1.2 the session is
+    // busy from the moment a run starts preparing, so "it was idle then and is
+    // running now" is no longer a run this message started, and every prompt
+    // read as one an extension had swallowed.
+    let taken: string | undefined;
+    // Kept for a pi that says nothing: idle when taken, running a moment later.
     let idleWhenTaken = false;
     try {
       await acceptPrompt(
         preflightResult =>
+          // pi says it through the preflightResult option of prompt: "started"
+          // into a run of its own, "queued" behind one that is going, "steered"
+          // into it — and nothing at all when an extension consumed the text. A
+          // pi without the hook (the RPC executor) says nothing, and the
+          // portal's own record — idle when taken, running a moment later — is
+          // the guide.
           this.session.prompt(text, {
             ...promptOptions,
-            preflightResult: (success: boolean) => {
+            preflightResult: (disposition: string) => {
+              taken = disposition;
               idleWhenTaken = this.session.isIdle;
-              preflightResult(success);
+              preflightResult(true);
             },
           }),
         error => {
@@ -1039,7 +1051,12 @@ export class SdkPiClient extends EventEmitter implements PiClient {
       this.handoffs.splice(this.handoffs.indexOf(handoff), 1);
     }
     if (handoff.queued !== undefined) return { outcome: "queued", lane: handoff.lane, text: handoff.queued };
-    if (idleWhenTaken && !this.session.isIdle) return { outcome: "started" };
+    // pi put it in the queue of the run that is going, and into the
+    // conversation: the message is on its way, whatever the run answers.
+    if (taken === "queued" || taken === "steered") return { outcome: "queued", lane: handoff.lane, text };
+    if (taken === "started" || (taken === undefined && idleWhenTaken && !this.session.isIdle)) {
+      return { outcome: "started" };
+    }
     // Taken by an extension, and not into the conversation.
     if (ruleFromThis) this.unsayAudioRule();
     this.restoreChatModel();

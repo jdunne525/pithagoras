@@ -1017,6 +1017,58 @@ class SessionManager extends EventEmitter {
   }
 
   /**
+   * A failed auto-compaction, said once and then acted on.
+   *
+   * pi writes a chat's summary with a model call like any other, and that call
+   * can fail — the answer runs out of room and stops before the summary is
+   * complete, the provider is down, the model was taken away. pi says so and
+   * asks again at the next turn boundary, and again after that, and nothing about
+   * the chat changes between the attempts: one chat of that shape spent five
+   * hours on thirty-four attempts of four minutes each, answering nothing, with
+   * its context full the whole time. So the failure is said in the chat, and
+   * after it has failed twice in a row auto-compaction is switched off for that
+   * chat — where the person sees it, in the same control that turns it back on,
+   * instead of the chat quietly eating its time. pi's setting and every other
+   * chat are left alone, and a compaction stopped by the person is not a failure.
+   */
+  private noteCompactionFailure(sessionId: string, msg: any): void {
+    // A compaction the person stopped is not a failure of the chat's.
+    if (msg.aborted === true) return;
+    // pi carries the summary in result when the compaction worked.
+    if (msg.result) {
+      this.compactionFailures.delete(sessionId);
+      return;
+    }
+    const why = compactionFailureText(msg.errorMessage);
+    this.record(sessionId, "portal_notice", { text: `Auto-compaction failed: ${why}`, warning: true });
+    const n = (this.compactionFailures.get(sessionId) ?? 0) + 1;
+    if (n < 2) {
+      this.compactionFailures.set(sessionId, n);
+      return;
+    }
+    this.compactionFailures.delete(sessionId);
+    void this.stopAutoCompaction(sessionId, why);
+  }
+
+  /**
+   * Auto-compaction off for one chat, and a line saying so where pi's own
+   * repeated failures are what asked for it. The switch is the chat's, shown in
+   * its model controls; turning it off stops the attempts, not the chat.
+   */
+  private async stopAutoCompaction(sessionId: string, why: string): Promise<void> {
+    const client = this.live.get(sessionId)?.client;
+    try {
+      await client?.setAutoCompaction?.(false);
+    } catch {
+      return;
+    }
+    this.record(sessionId, "portal_notice", {
+      text: `Auto-compaction is off for this chat after failing twice in a row (${why}) The conversation stays over the compaction threshold, and every turn pays for an attempt that cannot work. Turn it back on in this chat's model controls, compact by hand, make the chat smaller, or start a new one. A chat whose summary needs more room to be written is given more in Max output tokens, in the same controls: give it that, then turn auto-compaction back on.`,
+      warning: true,
+    });
+  }
+
+  /**
    * Send the message that carries an unfinished turn on in the same session.
    *
    * Two ends of a run leave a turn in hand that nothing resumes by itself: a
@@ -1035,9 +1087,10 @@ class SessionManager extends EventEmitter {
    */
   private scheduleResumeAfterCompaction(sessionId: string, resumeText = "Compaction detected, resume where you left off if needed."): void {
     setImmediate(() => {
-      // Cancelled in the meantime — a Stop, or the pi going away — so nothing
-      // is coming to carry the turn on, and the room was let go at the same
-      // time: going on here would start a run nobody asked for.
+      // Cancelled in the meantime — a Stop, the pi going away, or the turn
+      // already carrying on — so nothing is coming to pick the turn up, and the
+      // room was let go at the same time: going on here would start a run nobody
+      // asked for.
       if (!this.compactionResumePending.has(sessionId) && !this.cutOffResumePending.has(sessionId)) return;
       const live = this.live.get(sessionId);
       if (!live || this.stopping.has(live.client)) {
@@ -1135,9 +1188,9 @@ class SessionManager extends EventEmitter {
   /**
    * Sessions a compaction caught mid-turn — an agent run was still going when
    * the compaction began, so pi left the turn unfinished. Flagged on
-   * compaction_start while inRun, cleared on compaction_end: if pi is not going
-   * to resume the turn itself (compaction_end.willRetry), a resume message is
-   * sent after the compaction so the turn can pick up where it stopped.
+   * compaction_start while inRun, cleared on compaction_end, and handed to
+   * compactionResumePending below: only a run pi stops for the compaction (a
+   * manual compact of a running conversation) is a turn nothing picks up.
    */
   private compactionInterruptedRun = new Set<string>();
 
@@ -1151,10 +1204,17 @@ class SessionManager extends EventEmitter {
    * gap is what let a second session start beside it and two Tasks run at
    * once), and the Task watcher must not settle the attempt on that idle.
    * Handed over from compactionInterruptedRun in the same breath compaction_end
-   * clears it, so the room is never momentarily free, and cleared when the
-   * resumed run starts, or when the resume will not come at all.
+   * clears it, so the room is never momentarily free, and cleared when the run
+   * carries on — a turn_start, which is pi continuing the turn itself — or when
+   * the person stops the chat, which is the end of the work.
    */
   private compactionResumePending = new Set<string>();
+
+  /**
+   * Auto-compactions this chat has failed in a row, since its last success.
+   * See noteCompactionFailure.
+   */
+  private compactionFailures = new Map<string, number>();
 
   /**
    * The stopReason the last assistant message pi wrote into a session ended on.
@@ -1687,6 +1747,15 @@ class SessionManager extends EventEmitter {
           this.cutOffCarries.delete(sessionId);
         }
         this.inRun.delete(sessionId);
+        // A mid-turn compaction whose run ended with pi going quiet — the manual
+        // compaction of a running conversation, which pi aborts before compacting
+        // — leaves the turn unfinished, and the resume that carries it on starts
+        // a run of its own. Decided here, at the run's end, and only here: a run
+        // that went on after the compaction dropped the marker at its turn_start
+        // and wants no resume beside the work already going.
+        if (this.compactionResumePending.has(sessionId) && client.isIdle?.() !== false) {
+          this.scheduleResumeAfterCompaction(sessionId);
+        }
         // Any claim this session still held — a message queued into the run
         // going added one — ends with the run; drop it here too, or it would
         // keep the session "active" forever and the queue would never drain.
@@ -1706,11 +1775,13 @@ class SessionManager extends EventEmitter {
         if (client.reloadDue) void this.reloadSettled(sessionId, client);
       }
       // A compaction caught mid-turn — a run was still going when it began —
-      // leaves the turn unfinished: pi either resumes it itself (overflow,
-      // compaction_end.willRetry) or, as with a manual compaction of a running
-      // conversation, stops it and goes quiet. Detect the mid-turn case here and
-      // send a resume once the compaction has unwound so the turn continues.
-      // A compaction of an idle chat (the turn had already concluded) is not this.
+      // leaves the turn unfinished only when pi stops the run for it, as it does
+      // for a manual compaction of a running conversation (compact() aborts
+      // first). Auto-compaction at a turn boundary, and the overflow recovery,
+      // are followed by pi's own next turn, which carries the work on (see
+      // turn_start below). Detect the mid-turn case here; the resume is sent
+      // where the run ends, see agent_settled. A compaction of an idle chat (the
+      // turn had already concluded) is not this.
       if (msg.type === "compaction_start") {
         if (this.inRun.has(sessionId)) {
           this.compactionInterruptedRun.add(sessionId);
@@ -1728,8 +1799,17 @@ class SessionManager extends EventEmitter {
         const interrupted = this.compactionInterruptedRun.delete(sessionId);
         if (interrupted && msg.willRetry !== true) {
           this.compactionResumePending.add(sessionId);
-          this.scheduleResumeAfterCompaction(sessionId);
         }
+        this.noteCompactionFailure(sessionId, msg);
+      }
+      // A turn starting is the work carrying on: pi's own next turn after a
+      // mid-turn compaction, or a queued follow-up drained into the run going.
+      // Nothing is left for a resume of ours to pick up, and one landing inside
+      // a run that is going is queued into it and read as an order to start
+      // working again — which is how a chat ends up answering the same
+      // "resume where you left off" over and over, never finishing.
+      if (msg.type === "turn_start") {
+        this.compactionResumePending.delete(sessionId);
       }
     });
 
@@ -3926,6 +4006,27 @@ class SessionManager extends EventEmitter {
     );
     await Promise.all([...this.live.keys()].map((id) => this.stop(id)));
   }
+}
+
+/**
+ * A compaction failure, in words the chat can use.
+ *
+ * pi's own sentence is aimed at its TUI and names numbers the portal shows
+ * nowhere: the one that repeats every turn is "generation hit the token cap and
+ * the summary is incomplete", which is the model using all the room it has for
+ * one answer and stopping in the middle of the summary. Said as what happened to
+ * the chat, since that is what the reader has to act on.
+ */
+function compactionFailureText(message: unknown): string {
+  const raw = String(message ?? "")
+    .replace(/^Auto-compaction failed:\s*/i, "")
+    .replace(/\s*Compaction stopped:.*$/i, "")
+    .trim();
+  if (/hit the token cap/i.test(raw)) {
+    return "the summary did not fit in what the model can write in one answer, so nothing was compacted.";
+  }
+  const text = plainFailure(raw || "the model did not produce a summary");
+  return text.endsWith(".") ? text : `${text}.`;
 }
 
 /**
