@@ -40,7 +40,7 @@ import { LogsPanel } from "./LogsPanel";
 import { PasswordPanel } from "./PasswordPanel";
 import { SsoPanel } from "./SsoPanel";
 import { parseWindow } from "../context-window";
-import { KeepRecent, useKeepRecentSave } from "./KeepRecent";
+import { KeepFree, KeepRecent, useKeepFreeSave, useKeepRecentSave } from "./KeepRecent";
 import { formatTokens } from "../transcript";
 import { useAsksBeforeDeleting } from "../confirm-prefs";
 import { useAnimations } from "../motion";
@@ -1088,6 +1088,7 @@ function GeneralPanel({ onError, onProviders, onExtensions, onSource }: { onErro
   // What each save said, in the language shown when it is drawn.
   const [saved, setSaved] = useState<(() => string) | null>(null);
   const [keepRecent, setKeepRecent] = useState<number | null>(r?.compaction.keepRecentTokens ?? null);
+  const [keepFree, setKeepFree] = useState<number | null>(r?.compaction.reserveTokens ?? null);
   const [applied, setApplied] = useState<(() => string) | null>(null);
   /** Typed text, so that a half-written number is not turned into a request. */
   const [ctxText, setCtxText] = useState(r?.contextDefault ? String(r.contextDefault) : "");
@@ -1128,7 +1129,8 @@ function GeneralPanel({ onError, onProviders, onExtensions, onSource }: { onErro
   useEffect(() => {
     if (!r) return;
     if (!saver.busy) setStored(r.stored);
-    setKeepRecent(r.compaction.keepRecentTokens);
+    setKeepRecent(r.compaction.keepRecentTokens ?? null);
+    setKeepFree(r.compaction.reserveTokens ?? null);
     setSingleActive(r.settings.singleActiveSession);
     setCtxSaved(r.contextDefault);
     if (document.activeElement !== ctxField.current) {
@@ -1159,6 +1161,23 @@ function GeneralPanel({ onError, onProviders, onExtensions, onSource }: { onErro
   const saveKeepRecent = useKeepRecentSave(
     (compaction, refreshed) => {
       setKeepRecent(compaction.keepRecentTokens);
+      setApplied(() => () =>
+        refreshed > 0 ? tp(refreshed, "Applied to {n} open session", "Applied to {n} open sessions") : t("Saved"),
+      );
+      void load();
+      setTimeout(() => setApplied(null), 3000);
+    },
+    (error) => {
+      onError(error.message);
+      void load();
+    },
+  );
+
+  /** The reserve, on the same rule: released on its own, written to pi's file, pushed to open chats. */
+  const saveKeepFree = useKeepFreeSave(
+    (compaction, refreshed) => {
+      // A file that names no reserve is drawn as pi's own number, not as a blank slider.
+      setKeepFree(compaction.reserveTokens ?? null);
       setApplied(() => () =>
         refreshed > 0 ? tp(refreshed, "Applied to {n} open session", "Applied to {n} open sessions") : t("Saved"),
       );
@@ -1327,6 +1346,15 @@ function GeneralPanel({ onError, onProviders, onExtensions, onSource }: { onErro
               {t("The most recent stretch is kept word for word; only what is older becomes a summary. pi's default of {n} is a third of a 64k window, which is why compacting can look as though it did nothing. Saved as you let go, and it reaches open chats too.", { n: formatTokens(20000) })}
             </p>
             {applied && <p className="mt-1 text-xs text-ok">{applied()}</p>}
+          </div>
+          <div className="border-t border-line/70 pt-3">
+            <p className="text-xs text-fg-muted">{t("Kept free at the end")}</p>
+            {keepFree !== null && (
+              <KeepFree value={keepFree} onChange={setKeepFree} onCommit={saveKeepFree} />
+            )}
+            <p className="mt-2 text-xs text-fg-faint">
+              {t("A chat is compacted once it passes its window minus this. The summary is written by the chat's model in one answer, so a chat compacted late arrives with more to write than one answer holds, and the compaction fails: give it more free here. A model's own number, and its Max output tokens, are in the chat's context card and on its model's row in Settings → Providers.")}
+            </p>
           </div>
         </div>
       </Section>

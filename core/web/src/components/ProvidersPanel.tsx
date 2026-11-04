@@ -8,7 +8,7 @@ import { api, type ProviderInfo, type ProviderKind, type ProviderModel, type Pro
 import { forget, refreshFailed, useCached } from "../settings-cache";
 import { packageName } from "../package-names";
 import { PackageCatalog } from "./PackageCatalog";
-import { parseWindow } from "../context-window";
+import { parseAnswer, parseWindow } from "../context-window";
 import { looksComplete } from "../provider-address";
 import { confirmDialog } from "./ConfirmDialog";
 import { useUnsavedDraft } from "./Modal";
@@ -278,6 +278,13 @@ function ModelChip({ model: m, loaded, missing }: { model: ProviderModel; loaded
       {loaded && <i className="provider-loaded-dot" aria-hidden="true" />}
       <span className="truncate">{m.name ?? m.id}</span>
       {m.contextWindow && <span className="font-mono text-[10px] text-fg-faint">{formatTokens(m.contextWindow)}</span>}
+      {/* The other half of a compaction: a summary the model cannot write in one answer is a chat that
+          compacts forever, and this is the number that gives the answer its room. */}
+      {m.maxTokens && (
+        <span className="font-mono text-[10px] text-fg-faint" title={t("{n} tokens for one answer", { n: formatTokens(m.maxTokens) })}>
+          <span aria-hidden="true">→</span>{formatTokens(m.maxTokens)}
+        </span>
+      )}
       {m.input?.includes("image") && <LuEye className="h-3 w-3 text-fg-faint" aria-label={t("Sees images")} />}
       {m.reasoning && <LuBrain className="h-3 w-3 text-fg-faint" aria-label={t("Thinks")} />}
     </span>
@@ -287,17 +294,28 @@ function ModelChip({ model: m, loaded, missing }: { model: ProviderModel; loaded
 /**
  * A model row in the editor: whether it is kept, and what is known about it.
  * `own` is one saved before or added by name — not only found at an address.
+ * `ctxText` is the window it may hold and `outText` what one answer gets, both as typed:
+ * the number is read by `parseWindow` / `parseAnswer`, so a field mid-typing is shown as a
+ * draft rather than written off as a number.
  */
-type Row = ProviderModel & { keep: boolean; found: boolean; own: boolean; ctxText: string; named: boolean };
+type Row = ProviderModel & { keep: boolean; found: boolean; own: boolean; ctxText: string; outText: string; named: boolean };
 
 /**
  * What a person decides about the models: which are used, each with its window and abilities. A probe adds rows, and none of those used.
  * A model added by name is a decision in itself, counted apart (`named`): the models the server lists are what it is measured against.
  */
 const chosenOf = (rows: Row[]) =>
-  JSON.stringify(rows.filter((r) => r.keep && !r.named).map((r) => [r.id, r.ctxText, !!r.input?.includes("image"), !!r.reasoning]).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+  JSON.stringify(rows.filter((r) => r.keep && !r.named).map((r) => [r.id, r.ctxText, r.outText, !!r.input?.includes("image"), !!r.reasoning]).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
 
-const toRow = (m: ProviderModel, keep: boolean, found: boolean, own = false, named = false): Row => ({ ...m, keep, found, own, named, ctxText: m.contextWindow ? m.contextWindow.toLocaleString("en-US") : "" });
+const toRow = (m: ProviderModel, keep: boolean, found: boolean, own = false, named = false): Row => ({
+  ...m,
+  keep,
+  found,
+  own,
+  named,
+  ctxText: m.contextWindow ? m.contextWindow.toLocaleString("en-US") : "",
+  outText: m.maxTokens ? m.maxTokens.toLocaleString("en-US") : "",
+});
 
 /**
  * The names in use in pi's files. One keyed only from the environment is not:
@@ -424,9 +442,13 @@ export function ProviderEditor({ view, provider, taken, onCancel, onSaved, onErr
 
   const kept = rows.filter((r) => r.keep);
   const badCtx = kept.find((r) => parseWindow(r.ctxText).kind === "bad");
+  // An answer's limit is the room a compaction's summary has: a number typed here is what
+  // decides whether a chat's summary can be written at all, so a nonsense one is refused
+  // here rather than written to pi's file, where the chat would fail to start.
+  const badOut = kept.find((r) => parseAnswer(r.outText).kind === "bad");
   const needsKey = preset.key === "required" && !key.trim() && !provider?.key.set;
   const clash = !editing && taken.has(id.trim());
-  const canSave = !!id.trim() && !clash && !saving && !badCtx && !needsKey && (!preset.endpoint || (!!baseUrl.trim() && kept.length > 0));
+  const canSave = !!id.trim() && !clash && !saving && !badCtx && !badOut && !needsKey && (!preset.endpoint || (!!baseUrl.trim() && kept.length > 0));
 
   const save = async () => {
     setSaving(true);
@@ -438,7 +460,10 @@ export function ProviderEditor({ view, provider, taken, onCancel, onSaved, onErr
           baseUrl, api: kind === "custom" ? apiType : undefined,
           models: kept.map((r) => {
             const ctx = parseWindow(r.ctxText);
-            return { id: r.id, name: r.name, contextWindow: ctx.kind === "ok" ? ctx.tokens : undefined, maxTokens: r.maxTokens, input: r.input, reasoning: r.reasoning };
+            const out = parseAnswer(r.outText);
+            // Empty is not a number: the model goes back to what pi gives it (128k, 16k),
+            // and the field shows the default again next time the editor opens.
+            return { id: r.id, name: r.name, contextWindow: ctx.kind === "ok" ? ctx.tokens : undefined, maxTokens: out.kind === "ok" ? out.tokens : undefined, input: r.input, reasoning: r.reasoning };
           }),
         } : {}),
         ...(key.trim() ? { apiKey: key.trim() } : {}),
@@ -590,7 +615,9 @@ export function ProviderEditor({ view, provider, taken, onCancel, onSaved, onErr
             ? kind === "openrouter" || kind === "hosted"
               ? t("{name} is set up already — edit it in the list.", { name: kind === "openrouter" ? "OpenRouter" : `“${id.trim()}”` })
               : t("{name} is set up already — edit it in the list, or pick another name.", { name: `“${id.trim()}”` })
-            : badCtx ? t("{model}: the window is a whole number of tokens.", { model: badCtx.id }) : needsKey ? t("It needs a key.") : preset.endpoint && kept.length === 0 && rows.length > 0 ? t("Tick at least one model.") : ""}
+            : badCtx ? t("{model}: the window is a whole number of tokens.", { model: badCtx.id })
+            : badOut ? t("{model}: the answer's limit is a whole number of tokens.", { model: badOut.id })
+            : needsKey ? t("It needs a key.") : preset.endpoint && kept.length === 0 && rows.length > 0 ? t("Tick at least one model.") : ""}
         </span>
       </div>
     </div>
@@ -630,7 +657,8 @@ function ModelRows({ rows, onChange, onAll }: { rows: Row[]; onChange: (id: stri
             <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder={t("Filter {n} models", { n: rows.length })} className="w-full bg-transparent pl-4 text-xs outline-none placeholder:text-fg-faint" aria-label={t("Filter models")} />
           </div>
         ) : <span className="flex-1 text-[11px] text-fg-faint">{t("{n} of {all} chosen", { n: rows.filter((r) => r.keep).length, all: rows.length })}</span>}
-        <span className="w-20 text-right text-[10px] uppercase tracking-wider text-fg-faint">{t("Window")}</span>
+        <span className="w-20 text-right text-[10px] uppercase tracking-wider text-fg-faint" title={t("Tokens it may hold")}>{t("Window")}</span>
+        <span className="w-20 text-right text-[10px] uppercase tracking-wider text-fg-faint" title={t("Tokens one answer gets")}>{t("Answer")}</span>
         <span className="w-14 text-center text-[10px] uppercase tracking-wider text-fg-faint">{t("Can")}</span>
       </div>
       <ul className="max-h-72 divide-y divide-line/60 overflow-y-auto">
@@ -650,6 +678,17 @@ function ModelRows({ rows, onChange, onAll }: { rows: Row[]; onChange: (id: stri
               title={t("How many tokens it may hold. Empty: pi's default of 128k.")}
               aria-label={t("Context window of {model}", { model: r.id })}
               className={`w-20 rounded-md border bg-transparent px-1.5 py-0.5 text-right font-mono text-[11px] outline-none focus:border-accent/60 ${parseWindow(r.ctxText).kind === "bad" ? "border-danger/60" : "border-line"}`}
+            />
+            {/* Max output tokens. The chat's compaction writes its summary with this model in
+                one answer, so a chat whose summary stops mid-way is given more room here. */}
+            <input
+              value={r.outText}
+              onChange={(e) => onChange(r.id, { outText: e.target.value })}
+              placeholder={t("default")}
+              inputMode="numeric"
+              title={t("Max output tokens: how many tokens one answer gets. Empty: pi's default of 16k.")}
+              aria-label={t("Max output tokens of {model}", { model: r.id })}
+              className={`w-20 rounded-md border bg-transparent px-1.5 py-0.5 text-right font-mono text-[11px] outline-none focus:border-accent/60 ${parseAnswer(r.outText).kind === "bad" ? "border-danger/60" : "border-line"}`}
             />
             <div className="flex w-14 justify-center gap-0.5">
               <Toggle on={!!r.input?.includes("image")} label={t("Sees images")} onClick={() => onChange(r.id, { input: r.input?.includes("image") ? undefined : ["text", "image"] })}><LuEye /></Toggle>

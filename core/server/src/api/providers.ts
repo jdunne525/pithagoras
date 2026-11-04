@@ -1,11 +1,24 @@
 import express, { type Router } from "express";
 import { agentHome } from "../agent-home.js";
 import { addExtensionProviders, rereadConfig, thinkingLevelsOf } from "../pi/model-runtime.js";
-import { readPiSettings } from "../pi-settings.js";
+import { readPiSettings, writeCompactionSettings } from "../pi-settings.js";
+import { clearCompactionStops } from "../db.js";
 import {
   APIS, PRESETS, ProbeError, TakenError, checkProviders, configStamp, listProviders, probeModels, removeProvider, saveProvider, savedServer,
   type ProviderKind,
 } from "../providers.js";
+
+/**
+ * The session manager, asked for when a save is the room that answers the
+ * portal's stop on this provider's chats.
+ *
+ * Not imported at the top of the file: models.ts imports this module for its
+ * model view, extension-host imports models, and the session manager hands its
+ * bridge to extension-host while that file is still loading — an import here
+ * would run the session manager against a half-loaded extension host (its
+ * `tellChat` is not a value yet), and every chat that starts would fail.
+ */
+const chats = async () => (await import("../session-manager.js")).sessions;
 
 /**
  * What is installed, as pi's settings list it: a package, or an extension by
@@ -150,15 +163,35 @@ export function providersRouter(): Router {
     const body = req.body ?? {};
     if (!KINDS.has(body.kind)) return res.status(400).json({ error: "Which kind of provider this is was not said." });
     try {
+      const models = Array.isArray(body.models) ? body.models.filter((m: any) => m && typeof m.id === "string") : undefined;
       const { backup } = await saveProvider(req.params.id, {
         kind: body.kind,
         adding: body.adding === true,
         baseUrl: typeof body.baseUrl === "string" ? body.baseUrl : undefined,
         api: typeof body.api === "string" ? body.api : undefined,
         apiKey: typeof body.apiKey === "string" ? body.apiKey : undefined,
-        models: Array.isArray(body.models) ? body.models.filter((m: any) => m && typeof m.id === "string") : undefined,
+        models,
       });
-      res.json({ ok: true, ...(backup ? { note: droppedComments(backup) } : {}) });
+      // Max output tokens is the room one answer gets, and a compaction's summary is
+      // written by the chat's model in one answer. Saving it is therefore an answer to
+      // the portal's stop on this provider's chats — the same stop the chat's Context
+      // card answers with keep-recent and keep-free (see session-manager's
+      // stopAutoCompaction): only the chats recorded as stopped by the portal are
+      // touched, and only on this provider.
+      const room = models?.filter((m: any) => Number(m.maxTokens) > 0).map((m: any) => `${req.params.id}/${m.id}`) ?? [];
+      let resumed = 0;
+      if (room.length) {
+        const stopped = clearCompactionStops({ providerPrefix: `${req.params.id}/` });
+        if (stopped.length) {
+          // pi's switch is in its file, one switch for every chat: a chat opened later
+          // takes the room and the switch from there.
+          await writeCompactionSettings({ enabled: true });
+          const manager = await chats();
+          resumed = await manager.resumeStoppedCompaction(stopped, room.join(", "));
+          await manager.refreshSettings();
+        }
+      }
+      res.json({ ok: true, ...(resumed ? { resumed } : {}), ...(backup ? { note: droppedComments(backup) } : {}) });
     } catch (e) {
       res.status(e instanceof TakenError ? 409 : 400).json({ error: (e as Error).message });
     }

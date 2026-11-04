@@ -592,12 +592,36 @@ export interface SaveProvider {
 /** Only what the form edits: anything else on a stored model — a thinking map written by hand — stays. */
 const EDITABLE = ["name", "contextWindow", "maxTokens", "input", "reasoning"] as const;
 
+/**
+ * A number of tokens the form was asked to write, checked before it lands in pi's file.
+ *
+ * pi reads `contextWindow` / `maxTokens` when it builds the model and throws there, which
+ * takes the whole provider away from every chat. So a size typed in a field is refused here,
+ * with the model named, rather than written to a file pi cannot read. The floor is one, not
+ * the page's 1,024: a small number written by hand is in a stored model, the page shows it,
+ * and saving what the page shows must not be refused.
+ */
+function tokensField(model: string, field: "contextWindow" | "maxTokens", value: unknown): number | undefined {
+  if (value === undefined || value === null || value === "" || value === false) return undefined;
+  const n = Number(value);
+  if (!Number.isSafeInteger(n) || n <= 0 || n > 100_000_000) {
+    throw new Error(`${model}: ${field} is a whole number of tokens above 0, not ${String(value)}.`);
+  }
+  return n;
+}
+
 export function mergeModels(existing: ModelEntry[], wanted: ModelEntry[]): ModelEntry[] {
   const before = new Map(existing.map((m) => [m.id, m]));
   return wanted.map((w) => {
     const next: ModelEntry = { ...(before.get(w.id) ?? {}), id: w.id };
     for (const field of EDITABLE) {
       const value = w[field];
+      if (field === "contextWindow" || field === "maxTokens") {
+        const tokens = tokensField(w.id, field, value);
+        if (tokens === undefined) delete next[field];
+        else next[field] = tokens;
+        continue;
+      }
       if (value === undefined || value === null || value === "" || value === false) delete next[field];
       else next[field] = value as never;
     }

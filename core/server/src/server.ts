@@ -15,6 +15,8 @@ import {
   clearProjectAgent,
   clearProjectTools,
   chatModel,
+  clearCompactionStops,
+  noteCompactionChoice,
   contextLimitProblem,
   createSession,
   deleteSession,
@@ -134,8 +136,10 @@ import { routineSupervisor } from "./routines/supervisor.js";
 import { channelSupervisor } from "./channels/supervisor.js";
 import {
   COMPACTION_DEFAULTS,
+  effectiveCompactionTokens,
   piSettingsPath,
   readCompactionSettings,
+  writeCompactionModelRoom,
   writeCompactionSettings,
 } from "./pi-settings.js";
 import { getBuiltinCommands, picturesRefused } from "./pi/builtins.js";
@@ -318,6 +322,15 @@ app.use("/api", requireAuth);
 
 // --- global settings (defaults for every new session) ---
 
+/**
+ * A model named the way pi names it, in `compaction.modelOverrides`: pi builds
+ * the key as `provider/modelId`, so a key shaped otherwise is a number stored
+ * where nothing reads it. Refused rather than tidied: a key quietly rewritten
+ * is a room given to a model nobody asked for. The model's own ID may carry
+ * slashes (pi's keys include them); the provider is the part before the first one.
+ */
+const MODEL_KEY = /^[A-Za-z0-9][A-Za-z0-9._+-]*\/[A-Za-z0-9][A-Za-z0-9._+:/-]*$/;
+
 app.get("/api/settings", (_req, res) => {
   // `stored` and `defaults` are separated so the UI can show an empty field
   // with the inherited value as a placeholder, instead of pre-filling it and
@@ -354,6 +367,7 @@ app.put("/api/settings", async (req, res) => {
   // too: a number that silently becomes a different number is worse than being
   // told it was wrong.
   const keep = req.body?.keepRecentTokens;
+  const free = req.body?.reserveTokens;
 
   // The two live in different stores — the portal's database and pi's own
   // settings file — and there is no way to write both or neither. Committing
@@ -364,7 +378,7 @@ app.put("/api/settings", async (req, res) => {
   const wantsDefaults = ["provider", "model", "thinkingLevel"].some(
     (k) => typeof req.body?.[k] === "string",
   );
-  if (keep !== undefined && wantsDefaults) {
+  if ((keep !== undefined || free !== undefined) && wantsDefaults) {
     return res.status(400).json({
       error: "Save the session defaults and the compaction setting separately — they are stored in different files",
     });
@@ -379,28 +393,101 @@ app.put("/api/settings", async (req, res) => {
     tokens = Math.round(tokens);
   }
 
+  // The other half of the same arithmetic: pi compacts when the chat passes
+  // window − reserve. It is the number that decides how big the part the model
+  // has to write in one answer is, so it is asked for beside keep recent.
+  let reserve: number | undefined;
+  if (free !== undefined) {
+    reserve = Number(free);
+    if (!Number.isFinite(reserve) || reserve < 1000 || reserve > 500_000) {
+      return res.status(400).json({ error: "Keep free must be between 1,000 and 500,000 tokens" });
+    }
+    reserve = Math.round(reserve);
+  }
+
+  // One model's own number, in pi's `compaction.modelOverrides`, keyed the way
+  // pi keys it ("provider/model"). The chat's Context card asks for this one:
+  // it is the model's answer that has to write the summary, so the room a chat
+  // needs is its model's, and every chat on that model takes it with it. The
+  // plain number above is left to every other model.
+  const forModel = req.body?.forModel;
+  let modelKey: string | undefined;
+  if (forModel !== undefined) {
+    modelKey = typeof forModel === "string" ? forModel.trim() : "";
+    if (!MODEL_KEY.test(modelKey)) {
+      return res.status(400).json({ error: "forModel names a model as pi names it: provider/model" });
+    }
+    // A model named with no number asks for nothing: it would be read as a
+    // change and write nothing, and the card that sent it would be told the
+    // number landed when it never left.
+    if (tokens === undefined && reserve === undefined) {
+      return res.status(400).json({ error: "forModel is only sent with the number it is for" });
+    }
+  }
+
   const settings = setSettings(patch);
+
+  // Only the numbers asked for are written: a card that changes one of them
+  // must not write the other, which is what pi reads as its own value.
+  const wanted: Parameters<typeof writeCompactionSettings>[0] = {};
+  if (tokens !== undefined) wanted.keepRecentTokens = tokens;
+  if (reserve !== undefined) wanted.reserveTokens = reserve;
+  const changed = Object.keys(wanted).length > 0;
 
   // Compaction lives in pi's file rather than the portal's, because pi is what
   // reads it.
-  const compaction =
-    tokens !== undefined
-      ? await writeCompactionSettings({ keepRecentTokens: tokens })
-      : readCompactionSettings();
+  const compaction = changed
+    ? modelKey !== undefined
+      ? await writeCompactionModelRoom(modelKey, wanted)
+      : await writeCompactionSettings(wanted)
+    : readCompactionSettings();
+
+  // The room was given, and that is what the portal's own stop was waiting for.
+  //
+  // A chat whose summary cannot be written is left with auto-compaction off (see
+  // session-manager's stopAutoCompaction), and pi's switch is one switch for
+  // every chat — so those chats sit without compaction until somebody gives their
+  // model room. Giving it is exactly the save that just happened: this model's
+  // keep-recent and keep-free (the chats stopped for this model), the plain
+  // numbers (every model's, so every stopped chat), Max output tokens on the
+  // model's row (answered at the provider's save). Only the chats the portal
+  // stopped are answered, and the switch is put back for them alone: a person who
+  // switched it off by hand has no record, and a number saved for an unrelated
+  // reason does not switch their chats on.
+  let resumed = 0;
+  if (changed) {
+    const stopped = clearCompactionStops(modelKey !== undefined ? { modelKey } : {});
+    if (stopped.length) {
+      // pi's switch is in its file, and a chat opened later takes it from there:
+      // the chats that are not open now get their compaction from this write.
+      await writeCompactionSettings({ enabled: true });
+      resumed = await sessions.resumeStoppedCompaction(stopped, modelKey ?? "");
+    }
+  }
 
   // The provider and model defaults apply to sessions started from here on,
   // which matches how the TUI treats a changed default. Compaction is pushed
   // into open sessions as well — the session you are looking at when you
   // change it is the one you meant it for.
-  const refreshed = tokens !== undefined ? await sessions.refreshSettings() : 0;
+  const refreshed = changed ? await sessions.refreshSettings() : 0;
+  /** Which of the two the request moved, in the words the card uses for them. */
+  const moved = [tokens !== undefined && "Keep recent", reserve !== undefined && "Keep free"].filter(Boolean) as string[];
   res.json({
     settings,
     compaction,
+    // What a chat on this model compacts at, resolved the way pi resolves it:
+    // the model's own number where it has one, the plain setting otherwise.
+    // The card asks for that, not for the file's shape.
+    effective: effectiveCompactionTokens(compaction, modelKey),
     singleActiveSession: settings.singleActiveSession,
     refreshed,
+    /** Open chats whose compaction this room brought back, of the ones the portal stopped. */
+    resumed,
     note:
-      tokens !== undefined
-        ? `Compaction applied to ${refreshed} open session${refreshed === 1 ? "" : "s"}. Model and effort apply to newly started sessions.`
+      changed
+        ? modelKey !== undefined
+          ? `${moved.join(" and ")} for ${modelKey} applied to ${refreshed} open session${refreshed === 1 ? "" : "s"}. It is this model's own number, so every chat on it compacts at that; the plain setting is left to every other model.${resumed ? ` Auto-compaction is back on in ${resumed} chat${resumed === 1 ? "" : "s"} the portal had stopped on this model.` : ""}`
+          : `Compaction applied to ${refreshed} open session${refreshed === 1 ? "" : "s"}. Model and effort apply to newly started sessions.${resumed ? ` Auto-compaction is back on in ${resumed} chat${resumed === 1 ? "" : "s"} the portal had stopped.` : ""}`
         : "Applies to newly started sessions",
   });
 });
@@ -1681,13 +1768,36 @@ app.post("/api/sessions/:id/config", async (req, res) => {
       applied.push("thinkingLevel");
     }
     if (typeof autoCompaction === "boolean") {
+      // What pi's file says about the switch before this chat's own move is written
+      // into it: pi has one switch for every chat, and the file is what every chat
+      // started after this one reads. See sessions.honorCompactionOffs.
+      const fileSaid = readCompactionSettings().enabled;
       await client.setAutoCompaction(autoCompaction);
       applied.push("autoCompaction");
+      // The person's own move on the switch, whichever way it goes: the record of
+      // "the portal stopped this chat's compaction, waiting for its model to be given
+      // room" is off their hands from here, and the portal does not switch this chat
+      // back on under them when that room arrives. The chat's card is showing them the
+      // switch, and what they set is what the chat gets.
+      clearCompactionStops({ sessionId: session.id });
+      noteCompactionChoice(session.id, autoCompaction);
+      // Off for this chat, and pi's file given its switch back: their own off is kept
+      // on this chat's pi, and no chat they never touched loses its compaction.
+      await sessions.honorCompactionOffs({ ids: [session.id], fileSwitch: fileSaid });
     }
     if (typeof autoRetry === "boolean") {
       await client.setAutoRetry(autoRetry);
       applied.push("autoRetry");
     }
+    // Every write above is this chat's pi saving its own settings, and what pi saves is
+    // the whole file — its compaction switch included. A chat the portal stopped carries
+    // that switch off in its memory, so moving its model or its effort writes that off
+    // into pi's file, which every chat started after it reads: that is "compaction is not
+    // running at all", arriving with no move the person made. The file is given its switch
+    // back here, and this chat's own off — its person's, or the portal's stop — is kept on
+    // this chat's pi, where one chat can be told. A file that already reads on is not
+    // written, so a chat whose card moved nothing costs nothing. See honorCompactionOffs.
+    await sessions.honorCompactionOffs({ ids: [session.id], fileSwitch: true });
     const state = await client.getState();
     // Recorded so the choice survives a restart, not just this pi process.
     // Taken from the resolved state rather than the request: pi coerces the
@@ -1887,6 +1997,25 @@ const host = bindHost(authMode() !== "open", process.env.ALLOW_OPEN);
 // Before anything can start a run: a catch-up routine marked running in the same
 // moment would be taken for one the last server left.
 const cutOff = sessions.recoverOrphans();
+// A chat whose compaction the portal stopped is left with pi's switch off in pi's
+// own file — one switch for every chat — and nothing of the chat says so: reopened
+// after a restart it answers with a token of thinking and reads as broken, and every
+// chat opened after it runs to the wall of its context. The portal takes its own hand
+// off that file, records the chats a portal that kept no records stopped (read from
+// the sentence they were told), and each of them is then told in its own transcript,
+// with the room that turns the attempts back on.
+void sessions
+  .repairCompactionSwitch()
+  .then(({ seeded, takenBack }) => {
+    sessions.explainCompactionStops();
+    // The one thing a person needs to see about this repair: a chat's stop is one chat's
+    // off, and the file that was left without the switch is every chat's.
+    if (takenBack)
+      console.log("[portal] pi's compaction switch was left off by one chat's stop: it is back on, and every chat the portal did not stop compacts again");
+    if (seeded.length)
+      console.log(`[portal] ${seeded.length} chat(s) had their compaction stopped before the portal kept records: recorded from what they were told, and explained in their own chats`);
+  })
+  .catch((e) => console.error(`[portal] could not take pi's compaction switch back: ${(e as Error).message}`));
 const server = (tls ? createHttpsServer(tls, app) : createHttpServer(app)).listen(
   PORT,
   host,
@@ -1952,6 +2081,10 @@ startLlamaProxy(
   (sessionId, timings) => sessions.reportTimings(sessionId, timings),
 );
 sessions.startReaper();
+// One chat's compaction stop is one chat's off; pi's switch is one switch for every
+// chat, so a chat that read another chat's off at its startup is compacted by nothing.
+// Tended on a timer, and at the portal's own start (see repairCompactionSwitch).
+sessions.startSwitchTender();
 sessions.recoverOrphans();
 // Tasks share this moment: reconcile any left `running` by the previous server
 // back to `pending`, then restore queue-loop state per the restart-resume

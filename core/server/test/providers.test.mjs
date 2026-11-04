@@ -368,3 +368,42 @@ test("a hosted key is removed even while models.json cannot be read, and the pag
     writeFileSync(path.join(dir, "auth.json"), "{}");
   }
 });
+
+// The answer's limit (pi's maxTokens) is the room one answer gets, and the room a
+// compaction's summary has: a chat whose summary stops mid-way is given more of it from the
+// model's row. pi throws on a maxTokens of 0 when it builds the model — which takes a whole
+// provider away from every chat — so a size typed in a field is refused here, with the model
+// named, rather than written where pi would choke on it.
+test("a model's answer limit is written, cleared, and refused when it is no number", async () => {
+  writeFileSync(path.join(dir, "models.json"), JSON.stringify({
+    providers: { box: { baseUrl: "http://box:8080/v1", api: "openai-completions", apiKey: "none", models: [{ id: "A", contextWindow: 131072 }] } },
+  }));
+  await p.saveProvider("box", { kind: "llama-cpp", baseUrl: "http://box:8080", models: [{ id: "A", contextWindow: 131072, maxTokens: 32768 }] });
+  assert.equal(read("models.json").providers.box.models[0].maxTokens, 32768);
+
+  // Empty is not a number: the field goes back to pi's own 16k, so the entry loses it.
+  await p.saveProvider("box", { kind: "llama-cpp", baseUrl: "http://box:8080", models: [{ id: "A", maxTokens: undefined }] });
+  assert.equal(read("models.json").providers.box.models[0].maxTokens, undefined, "cleared: pi's default is what it gets");
+
+  for (const bad of [0, -5, 1024.5, "16 384", 100_000_001]) {
+    await assert.rejects(
+      p.saveProvider("box", { kind: "llama-cpp", baseUrl: "http://box:8080", models: [{ id: "A", maxTokens: bad }] }),
+      /A: maxTokens/,
+      `${String(bad)} is refused, naming the model`,
+    );
+  }
+  await assert.rejects(
+    p.saveProvider("box", { kind: "llama-cpp", baseUrl: "http://box:8080", models: [{ id: "A", contextWindow: 12.5 }] }),
+    /A: contextWindow/,
+    "the window is read by the same rule",
+  );
+  assert.equal(read("models.json").providers.box.models[0].maxTokens, undefined, "nothing was written by the refused saves");
+
+  // A small number written by hand is in a stored model, the page shows it as it stands,
+  // and saving what the page shows is not refused: the floor here is one, not the page's.
+  writeFileSync(path.join(dir, "models.json"), JSON.stringify({
+    providers: { box: { baseUrl: "http://box:8080/v1", api: "openai-completions", apiKey: "none", models: [{ id: "tiny", contextWindow: 1000, maxTokens: 100 }] } },
+  }));
+  await p.saveProvider("box", { kind: "llama-cpp", baseUrl: "http://box:8080", models: [{ id: "tiny", contextWindow: 1000, maxTokens: 100 }] });
+  assert.deepEqual(read("models.json").providers.box.models[0], { id: "tiny", contextWindow: 1000, maxTokens: 100 });
+});

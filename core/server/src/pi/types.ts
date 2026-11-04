@@ -7,6 +7,13 @@ export interface PiState {
     name: string;
     provider: string;
     contextWindow?: number;
+    /**
+     * What one answer gets from this model, in tokens (pi's models carry it; 16,384 where
+     * the model says nothing else). A run that stopped on `length` is measured against it:
+     * all of it used is an answer cut off mid-sentence, a few hundred of it is the context
+     * leaving the model no room. Absent where the executor cannot say.
+     */
+    maxTokens?: number;
     /** What the model takes: "text", and "image" if it can see pictures. Unknown when left out. */
     input?: string[];
   };

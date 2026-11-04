@@ -39,3 +39,30 @@ export function parseWindow(text: string): ParsedWindow {
   }
   return { kind: "ok", tokens: n };
 }
+
+/**
+ * One answer's limit, in tokens (pi's `maxTokens`, 16,384 when the model says nothing else).
+ *
+ * The same shape of number as a window, with its own bounds: this is the room a
+ * model has to write, and a chat whose compaction summary will not fit in one
+ * answer is given more of it. A limit of zero would ask pi for an answer that
+ * cannot exist, so the floor is one thousand and two, the same floor as a window.
+ */
+const ANSWER_MIN = 1_024;
+const ANSWER_MAX = 10_000_000;
+
+export function parseAnswer(text: string): ParsedWindow {
+  const trimmed = text.trim();
+  if (!trimmed) return { kind: "empty" };
+  const n = WINDOW_TEXT.test(trimmed) ? Number(trimmed.replace(/[ ,._]/g, "")) : NaN;
+  if (!Number.isInteger(n) || n < ANSWER_MIN || n > ANSWER_MAX) {
+    return {
+      kind: "bad",
+      message: t("Enter the answer's limit as a whole number of tokens, from {min} to {max}", {
+        min: typeable(ANSWER_MIN),
+        max: typeable(ANSWER_MAX),
+      }),
+    };
+  }
+  return { kind: "ok", tokens: n };
+}

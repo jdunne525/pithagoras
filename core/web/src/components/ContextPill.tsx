@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { LuChevronRight, LuRefreshCw } from "react-icons/lu";
 import { api, type PiConfig } from "../api";
 import { parseWindow } from "../context-window";
-import { KeepRecent, useKeepRecentSave } from "./KeepRecent";
+import { KeepFree, KeepRecent, useKeepFreeSave, useKeepRecentSave } from "./KeepRecent";
+import { modelKeyOf, roomOf, type Room } from "../compaction";
 import { SwitchTrack } from "./SettingsUi";
 import { isEnter } from "../shortcuts";
 import { MENU_WIDTH, anchorLeft } from "../menu-anchor";
@@ -189,20 +190,30 @@ export function ContextPill({
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState<null | "compact" | "auto">(null);
   /** Read when the popup opens rather than with the transcript — it is pi's file. */
-  const [keepRecent, setKeepRecent] = useState<number | null>(null);
+  const [room, setRoom] = useState<Room | null>(null);
   /** pi refuses to compact a short session, so its reason has to be visible. */
   const [note, setNote] = useState<{ text: string; error: boolean } | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   const pill = useRef<HTMLButtonElement>(null);
   const card = useLeaveRef<HTMLDivElement>("menu");
 
+  // The chat's model, as pi keys its own compaction numbers. The room a chat's
+  // summary needs is its model's: pi scopes keep-recent to a model and to
+  // nothing narrower, and it is the model's answer that writes the summary.
+  const modelKey = modelKeyOf(cfg.state.model.provider, cfg.state.model.id);
+
+  // A chat that changes its model changes the numbers it is shown: they are keyed to the
+  // model, and a slider left from the previous model's read would save that number as the
+  // new model's own. Drop the read; the effect below takes it up again while the card is open.
+  useEffect(() => setRoom(null), [modelKey]);
+
   useEffect(() => {
-    if (!open || keepRecent !== null) return;
+    if (!open || room !== null) return;
     api
       .settings()
-      .then((r) => setKeepRecent(r.compaction.keepRecentTokens))
+      .then((r) => setRoom(roomOf(r.compaction, modelKey)))
       .catch(() => {});
-  }, [open, keepRecent]);
+  }, [open, room, modelKey]);
 
   useDismiss(open, [ref], () => setOpen(false), pill);
 
@@ -231,10 +242,23 @@ export function ContextPill({
   /**
    * Saved when the drag ends, not on every step, and applied to open sessions
    * by the server — including this one, so the next compaction uses it.
+   *
+   * Written as this chat's model's own number: the chat the person is looking at
+   * is the one that cannot write its summary, and the plain setting belongs to
+   * every model. Chats on the same model take the same room, which is the
+   * arithmetic that needs it.
    */
   const saveKeepRecent = useKeepRecentSave(
-    (compaction) => setKeepRecent(compaction.keepRecentTokens),
+    (compaction) => setRoom(roomOf(compaction, modelKey)),
     (error) => setNote({ text: error.message, error: true }),
+    modelKey,
+  );
+
+  /** The same for the other half: what pi leaves free, so the summary has room to be written. */
+  const saveKeepFree = useKeepFreeSave(
+    (compaction) => setRoom(roomOf(compaction, modelKey)),
+    (error) => setNote({ text: error.message, error: true }),
+    modelKey,
   );
 
   const toggleAuto = async () => {
@@ -331,18 +355,44 @@ export function ContextPill({
             <SwitchTrack on={auto} />
           </button>
 
-          {keepRecent !== null && (
+          {room !== null && (
             <div className="mt-2 rounded-lg bg-raised/40 px-2 py-2">
+              {/* A chat whose pi cannot name its model has no number of its own to be given: pi
+                  reads the plain ones for it, and the card says so rather than writing a key
+                  nothing reads. */}
+              {!modelKey && (
+                <p className="mb-2 text-[11px] text-fg-faint">
+                  {t("This chat's pi cannot name its model, so these are the plain numbers every chat inherits — change them in Settings → General.")}
+                </p>
+              )}
               <KeepRecent
-                value={keepRecent}
+                value={room.keepRecent}
                 contextWindow={usage.contextWindow}
-                onChange={setKeepRecent}
+                onChange={(keepRecent) => setRoom({ ...room, keepRecent })}
                 onCommit={saveKeepRecent}
-                disabled={busy !== null}
+                disabled={busy !== null || !modelKey}
+                label={modelKey ? (room.ownRecent ? t("Keep recent — this model's own") : t("Keep recent — this model")) : undefined}
               />
               <p className="mt-1.5 text-[11px] text-fg-faint">
-                {t("Kept word for word; only what is older is summarised. This is where a compaction lands, before the summary is added.")}
+                {modelKey
+                  ? t("Kept word for word; only what is older is summarised. Saved as this model's own number: the summary is written by the model in one answer, so a chat whose summary cannot be finished is given room here. Every chat on this model takes it.")
+                  : t("Kept word for word; only what is older is summarised. This is where a compaction lands, before the summary is added.")}
               </p>
+              <div className="mt-3 border-t border-line/70 pt-3">
+                <KeepFree
+                  value={room.keepFree}
+                  contextWindow={usage.contextWindow}
+                  onChange={(keepFree) => setRoom({ ...room, keepFree })}
+                  onCommit={saveKeepFree}
+                  disabled={busy !== null || !modelKey}
+                  label={modelKey ? (room.ownFree ? t("Keep free — this model's own") : t("Keep free — this model")) : undefined}
+                />
+                <p className="mt-1.5 text-[11px] text-fg-faint">
+                  {modelKey
+                    ? t("A chat is compacted above {n} tokens — its window minus what it keeps free. More free means it is compacted sooner, with less for the model to write in one answer; less free means a chat that reaches the summariser with more than one answer can hold, which is the failure that stops compaction.", { n: formatNumber(Math.max(0, usage.contextWindow - room.keepFree)) })
+                    : t("A chat is compacted above {n} tokens — its window minus what it keeps free.", { n: formatNumber(Math.max(0, usage.contextWindow - room.keepFree)) })}
+                </p>
+              </div>
             </div>
           )}
 

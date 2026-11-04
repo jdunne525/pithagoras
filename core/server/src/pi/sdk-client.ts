@@ -1371,6 +1371,7 @@ export class SdkPiClient extends EventEmitter implements PiClient {
         name: model?.name ?? "unknown",
         provider: model?.provider ?? "unknown",
         contextWindow: model?.contextWindow,
+        maxTokens: model?.maxTokens,
         input: Array.isArray(model?.input) ? model.input : undefined,
       },
       thinkingLevel: this.session.thinkingLevel ?? "medium",

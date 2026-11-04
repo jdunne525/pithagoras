@@ -54,7 +54,8 @@ is a message at the top of the dialog instead, and what was shown stays.
 *(The **Defaults** page; older links call it `general`.)*
 
 What new chats start with: provider, model, effort, the context window, how much
-is kept when a chat is compacted, and where routines report. The fields are
+is kept when a chat is compacted and how much is kept free at its end, and where
+routines report. The fields are
 described in [Models and providers](/guide/models#defaults).
 
 At the end of the page, **Voice mode** holds what voice mode does whatever

@@ -107,7 +107,14 @@ import {
   lastRunEvents,
   flaggedEvents,
   trustedResults,
+  compactionStops,
+  compactionStopModel,
+  noteCompactionStop,
+  chatsWithCompactionOffByChoice,
+  COMPACT_STOP_NOTICE,
+  seedCompactionStopsFromNotices,
 } from "./db.js";
+import { readCompactionSettings, writeCompactionSettings } from "./pi-settings.js";
 import { newChildChat, newPackageChat, type ChatAnswer, type ChildRun } from "./child-chats.js";
 
 /**
@@ -182,12 +189,23 @@ export interface PromptOptions {
   /** Mid-run, go into the run that is going instead of waiting for it to end. */
   steer?: boolean;
   /**
+   * This is the portal's own line carrying an unfinished turn on — after a
+   * compaction that caught the run mid-turn, or after a run the model cut
+   * itself off on. Recorded with it, so the chat can show it as the portal
+   * speaking for the work rather than as the person saying the same sentence
+   * again.
+   */
+  resume?: ResumeKind;
+  /**
    * Told the seq of the transcript line that records the message, and whether it waits for a run that is going,
    * as soon as it is recorded: a caller that waits for what happens to this message (runChild) cannot tell it from
    * another with the same words by reading the transcript. Not told for a command, which has no such line.
    */
   onRecorded?: (seq: number, queued: boolean) => void;
 }
+
+/** What a portal resume of ours carries on: the compaction's turn, or a cut-off answer. */
+export type ResumeKind = "compaction" | "cut-off";
 
 /** A message sent into a run, until pi takes it in: see SessionManager.waiting. */
 interface Waiting {
@@ -1026,10 +1044,9 @@ class SessionManager extends EventEmitter {
    * the chat changes between the attempts: one chat of that shape spent five
    * hours on thirty-four attempts of four minutes each, answering nothing, with
    * its context full the whole time. So the failure is said in the chat, and
-   * after it has failed twice in a row auto-compaction is switched off for that
-   * chat — where the person sees it, in the same control that turns it back on,
-   * instead of the chat quietly eating its time. pi's setting and every other
-   * chat are left alone, and a compaction stopped by the person is not a failure.
+   * after it has failed twice in a row the attempts are stopped — see
+   * `stopAutoCompaction` — instead of the chat quietly eating its time. A
+   * compaction stopped by the person is not a failure.
    */
   private noteCompactionFailure(sessionId: string, msg: any): void {
     // A compaction the person stopped is not a failure of the chat's.
@@ -1054,16 +1071,204 @@ class SessionManager extends EventEmitter {
    * Auto-compaction off for one chat, and a line saying so where pi's own
    * repeated failures are what asked for it. The switch is the chat's, shown in
    * its model controls; turning it off stops the attempts, not the chat.
+   *
+   * pi's switch is one switch for every chat (it is `compaction.enabled` in pi's
+   * own settings file), so what one chat's failure does is leave every chat
+   * without compaction, including the ones started after it — which is how a
+   * chat came to run into the wall of its context and answer the portal's
+   * carry-on line with a token of thinking, over and over. So the stop is
+   * recorded with the model it was asked for (`noteCompactionStop`): the next
+   * restart explains it in the chat rather than leaving it as a silent state of
+   * pi's file, and the room that answers it (this model's keep-recent, its
+   * keep-free, its Max output tokens) switches the attempts back on for exactly
+   * these chats.
    */
   private async stopAutoCompaction(sessionId: string, why: string): Promise<void> {
     const client = this.live.get(sessionId)?.client;
+    if (!client) return;
+    // What pi's file says about the switch before this chat's off is written into it:
+    // pi has one switch for every chat, and this chat's off is its own pi's to keep —
+    // see honorCompactionOffs, which gives the file its switch back the moment the
+    // chat's off is on record. Without that, this chat's failure is every chat's
+    // loss of compaction, the chats started after it included.
+    const fileSaid = readCompactionSettings().enabled;
     try {
-      await client?.setAutoCompaction?.(false);
+      await client.setAutoCompaction?.(false);
     } catch {
       return;
     }
+    // The model this chat was on when its failure asked for the stop: the room
+    // that turns the attempts back on is asked for through the model, because it
+    // is the model's answer that has to write the summary. A pi that cannot say
+    // its model leaves an empty key, which only the plain numbers answer.
+    const modelKey = await this.modelKeyOfClient(client).catch(() => "");
+    noteCompactionStop(sessionId, modelKey);
+    // The chat is off, its own pi only; the file is what every other chat reads.
+    // One chat's off in the shared file is repaired when the chat's pi is saved, at
+    // the portal's own start, and by the timer that tends the file — not here, and
+    // not at a chat's start: a state fetch on a chat that is mid-run is a request
+    // among the chat's own, and chats with a command in hand are the worst place
+    // for it (a chat opened while its run is in flight waits on it).
+    await this.honorCompactionOffs({ ids: [sessionId], clients: new Map([[sessionId, client]]), fileSwitch: fileSaid });
     this.record(sessionId, "portal_notice", {
-      text: `Auto-compaction is off for this chat after failing twice in a row (${why}) The conversation stays over the compaction threshold, and every turn pays for an attempt that cannot work. Turn it back on in this chat's model controls, compact by hand, make the chat smaller, or start a new one. A chat whose summary needs more room to be written is given more in Max output tokens, in the same controls: give it that, then turn auto-compaction back on.`,
+      text: `${COMPACT_STOP_NOTICE} (${why}) The conversation stays over the compaction threshold, and every turn pays for an attempt that cannot work. pi has one auto-compaction switch for every chat, so this chat's off is kept on this chat's pi alone and the switch is left to every chat the portal did not stop. Compact by hand, make the chat smaller, or start a new one. The summary is written by the chat's model in one answer: give ${modelKey || "this chat's model"} room — a smaller keep-recent leaves the model less to write, a bigger keep-free compacts it sooner, and Max output tokens on its row in Settings → Providers is the room the answer has — and the chats this stopped get their compaction back. Turn the switch back on in this chat's Context card for this chat alone.`,
+      warning: true,
+    });
+  }
+
+  /**
+   * This chat's model as pi keys its compaction numbers: "provider/model".
+   * Empty when the chat's pi cannot say what it is running.
+   */
+  private async modelKeyOfClient(client?: PiClient): Promise<string> {
+    const state = await client?.getState?.();
+    const provider = state?.model?.provider;
+    const id = state?.model?.id;
+    return provider && id ? `${provider}/${id}` : "";
+  }
+
+  /**
+   * The stops left over from before the portal restarted, said where they were
+   * earned. pi's switch is off in its own file and nothing of the chat shows it:
+   * a chat reopened after a restart answers with a token of thinking and looks
+   * broken, with the reason sitting in a file the person has no reason to open.
+   * One line per chat the portal stopped, each naming the room that answers it.
+   */
+  /**
+   * The stops left over from before the portal restarted, said where they were
+   * earned, and the damage of the switch they wrote taken back.
+   *
+   * A stop is a write to pi's one compaction switch, which every chat reads, so what
+   * a chat that restarted leaves behind is pi's file saying off: every chat opened
+   * from now on starts without compaction, runs to the wall of its context, and
+   * answers the portal's carry-on line with a token of thinking. The record of each
+   * stop is the portal's own hand on that file, so the portal takes it back: the
+   * switch is given to the file, each chat told off is put back off on its own pi,
+   * and each is told in its own transcript why it is off and what turns it back.
+   * A chat opened later takes the file, which now reads on, and the record applies
+   * its off when it starts (see register / honorCompactionOffs).
+   */
+  explainCompactionStops(): number {
+    const stops = compactionStops();
+    let said = 0;
+    for (const stop of stops) {
+      // A chat that has been deleted has no transcript to explain itself in,
+      // and its record goes with it.
+      if (!getSession(stop.sessionId)) continue;
+      // A chat whose pi could not name its model is recorded with a marker: the
+      // line says "this chat's model", and only the plain numbers answer it.
+      const model = compactionStopModel(stop.modelKey);
+      this.record(stop.sessionId, "portal_notice", {
+        text: `Auto-compaction is off for this chat: the portal stopped it here, after its compaction failed twice in a row${model ? ` (${model})` : ""}. pi's switch is one switch for every chat, so your chat's stop left every chat without compaction; the portal has given the switch back, and this chat keeps its off. Give${model ? ` ${model}` : " this chat's model"} room in this chat's Context card, or Max output tokens on its model's row in Settings → Providers, and the chats this stopped get their compaction back.`,
+        warning: true,
+      });
+      said++;
+    }
+    // The switch left in pi's file is the portal's own doing: every chat told off is
+    // put back off on its own pi, and the file is given the switch back for every
+    // chat nobody told off. Nothing is said here; the chats above are.
+    if (said) void this.honorCompactionOffs({ fileSwitch: true });
+    return said;
+  }
+
+  /**
+   * The chats whose stop the room just given answers: their compaction is turned
+   * back on, and each is told in its own transcript that it is. Only the chats
+   * that are open have a pi to ask; a chat opened later takes pi's settings file,
+   * which the caller has just switched back on with the room.
+   */
+  async resumeStoppedCompaction(sessionIds: string[], modelKey: string): Promise<number> {
+    let on = 0;
+    for (const sessionId of sessionIds) {
+      const client = this.live.get(sessionId)?.client;
+      if (!client) continue;
+      try {
+        await client.setAutoCompaction?.(true);
+      } catch {
+        continue;
+      }
+      on++;
+      this.record(sessionId, "portal_notice", {
+        text: `Auto-compaction is back on for this chat: ${modelKey || "its model"} was given room, and this is one of the chats the portal stopped. If the summary still cannot be written in one answer it will say so again, and stop trying: the room that answers it is this model's keep-recent (less to write), its keep-free (compacted sooner) and its Max output tokens (the room one answer has).`,
+        warning: false,
+      });
+    }
+    return on;
+  }
+
+  /**
+   * What one answer gets in this chat's model, kept for the cut-off test at a run's end.
+   *
+   * Asked at the run's start, where a model's answer has one limit for the whole of it.
+   * An answer's token count means nothing on its own: 987 of them is a cut-off answer for
+   * a model allowed 900 and a full context for a model allowed 16,384. Where the executor
+   * cannot say (a container's pi, an older one), the limit is dropped and the answer's own
+   * shape is what the test uses.
+   */
+  private noteOutputLimit(sessionId: string, client: PiClient): void {
+    // A pi that cannot say its state (a container's, an older one, a stand-in in a test)
+    // is answered with no limit, not with a throw: this runs at the start of every run.
+    const asked = client.getState?.() ?? Promise.resolve(undefined);
+    void asked
+      .then((state) => {
+        const limit = state?.model?.maxTokens;
+        if (typeof limit === "number" && limit > 0) this.modelOutputLimit.set(sessionId, limit);
+        else this.modelOutputLimit.delete(sessionId);
+        // The answer's limit is all this fetch is for. The compaction switch is not
+        // tended here: a state fetch at a run's start is a request among the run's own,
+        // and the shared switch does not need tending at a moment this hot — the portal's
+        // start, its saving of a chat's settings and its timer cover it. See
+        // honorCompactionOffs and tendCompactionSwitch.
+      })
+      .catch(() => this.modelOutputLimit.delete(sessionId));
+  }
+
+  /**
+   * Whether an answer that stopped on `length` was cut off in mid-work.
+   *
+   * A model that stopped having written all of the output it was allowed is cut off
+   * mid-sentence: what it was writing is there, and the carry-on takes it up where it
+   * stopped. A model that stopped having written a fraction of that is out of room in the
+   * other direction — pi calls that shape recoverable length and gives it a compact and a
+   * retry, not a continuation: the context leaves the model no room to answer at all, so
+   * the carry-on is answered by a new answer that stops the same way, and the chat shows
+   * the same line again. What pi does for that shape is the chat's compaction, which the
+   * portal says and acts on separately (see noteCompactionFailure).
+   *
+   * The comparison needs both of its numbers. A model's limit is absent where the
+   * executor cannot say (a container's pi, an older one); a message's own count is absent
+   * where the provider reports none, and `usage.output` is then 0 — which is not an answer
+   * that spent 16,384 tokens, it is a measurement that never happened. Read as a
+   * measurement, that shape says the context is full, and a chat cut off mid-sentence
+   * loses the carry-on it needs. Where either number is missing, the answer's own shape is
+   * the test.
+   */
+  private answerWasCutOff(answer: CutOffAnswer, limit: number): boolean {
+    if (limit > 0 && answer.output > 0) return answer.output >= limit;
+    // Measured on the answer's own shape: an answer in hand carries on, a message that
+    // wrote only thinking carries on nothing.
+    return answer.wrote;
+  }
+
+  /**
+   * A run that ended on `length` and is not being carried on, said once: the chat's last
+   * line is why it stopped and what would give it room, not the carry-on sentence.
+   */
+  private noteCutOffEnd(sessionId: string, answer: CutOffAnswer, limit: number, carries: number): void {
+    // The same test the carry-on used, run again on the answer in hand: an answer
+    // that stopped with its output spent is one whose carries ran out, and an
+    // answer that stopped short of it is the context leaving the model no room.
+    if (this.answerWasCutOff(answer, limit)) {
+      this.record(sessionId, "portal_notice", {
+        text: `The answer stopped at its output limit ${carries + 1} times in a row, so the run was left as it is. Give this chat more room in Max output tokens, on its model's row in Settings → Providers, or ask for the work in smaller pieces.`,
+        warning: true,
+      });
+      return;
+    }
+    const room = limit > 0 && answer.output > 0 ? ` It wrote ${tokensOf(answer.output)} ${answer.output === 1 ? "token" : "tokens"}, where one answer gets ${tokensOf(limit)}.` : "";
+    const where = answer.wrote ? "in the middle of its answer" : "in the middle of its thinking, without writing an answer";
+    this.record(sessionId, "portal_notice", {
+      text: `The model stopped ${where}${room} That is the chat's context being full, not its answer running out: a carry-on is answered the same way, so none was sent. Start a new chat, give this one's window room in the Context card, or compact it while what it has to summarise fits one answer.`,
       warning: true,
     });
   }
@@ -1085,7 +1290,7 @@ class SessionManager extends EventEmitter {
    * for the aborted run's idle is suppressed separately — the resumed turn ends
    * naturally, and only that end is announced.
    */
-  private scheduleResumeAfterCompaction(sessionId: string, resumeText = "Compaction detected, resume where you left off if needed."): void {
+  private scheduleResumeAfterCompaction(sessionId: string, resumeText = "Compaction detected, resume where you left off if needed.", resume: ResumeKind = "compaction"): void {
     setImmediate(() => {
       // Cancelled in the meantime — a Stop, the pi going away, or the turn
       // already carrying on — so nothing is coming to pick the turn up, and the
@@ -1104,7 +1309,7 @@ class SessionManager extends EventEmitter {
         this.clearResumePending(sessionId);
         return;
       }
-      void this.prompt(sessionId, resumeText).catch((e) => {
+      void this.prompt(sessionId, resumeText, { resume }).catch((e) => {
         // Held behind another room-holder under the single-active setting: the
         // queue starts it once the room frees, so this is not a failure.
         if (e instanceof PromptQueuedForSingleActive) return;
@@ -1133,7 +1338,149 @@ class SessionManager extends EventEmitter {
           .catch(() => false) ?? Promise.resolve(false),
       ),
     );
+    // A reload is pi reading its own file, and its file has one compaction switch for
+    // every chat: a chat told off — by its person, or by the portal's stop — comes back
+    // on under them with the reload. Put back off, before the count is reported.
+    await this.honorCompactionOffs();
     return done.filter(Boolean).length;
+  }
+
+  /**
+   * The chats told to keep their auto-compaction off, put back off on their own pi,
+   * with pi's file left the switch for every chat nobody told off.
+   *
+   * Two records say a chat is to be off: the person's own move on the switch
+   * (`compaction_choice`), and the portal's stop after its compaction failed twice
+   * (`compaction_stop`, see stopAutoCompaction). Both are made on one chat and land
+   * in one place: pi has one auto-compaction switch for every chat — `compaction.enabled`
+   * in its own settings file — and `setAutoCompaction` on one chat is a write to that
+   * file. Left to itself, one chat's off leaves every chat started after it without
+   * compaction, which is how a chat came to run into the wall of its context and answer
+   * the portal's carry-on line with a token of thinking, over and over; and a room
+   * given to some other chat — written to the same switch, because pi has no other —
+   * switches this chat's compaction on under the person who turned it off, or resumes
+   * the attempts the portal stopped.
+   *
+   * So each chat is put off on its own pi (which is its own copy of the settings, and
+   * the only place one chat can be told), and the file is given the switch back: that
+   * value is every chat nobody told off, and every chat started later. One switch is
+   * all pi has; this is the whole of what can be done with it.
+   *
+   * The same pass carries the other direction, which is the half that matters for the
+   * chats nobody stopped: a chat that starts while the file reads off takes that off for
+   * its own, runs to the wall of its context and answers with a token of thinking. The
+   * file gets off written into it by the chats the portal stops — and by a stopped
+   * chat's own pi, which saves the whole file (its in-memory off included) every time
+   * anything else in it moves: a thinking level, a model, a retry switch. So a chat in
+   * scope whose pi reads compaction off, and which nothing on the books says is its
+   * own, is put back on, and the file is repaired with it. A portal that reads compaction
+   * off with nothing on the books is a portal whose own hand is on that file; the file
+   * is not the place a per-chat off can live, so it is kept on.
+   *
+   * Only a chat whose pi disagrees with its record is written, because every write of
+   * the switch goes to the shared file. The moments a chat's own off is lost are all
+   * covered: a chat reopened reads pi's file, a settings reload is pi reading that file
+   * again, and a reload between two steps of a run is answered by the state read at the
+   * run's start (see noteOutputLimit).
+   */
+  async honorCompactionOffs(opts: { ids?: string[]; fileSwitch?: boolean; clients?: Map<string, PiClient> } = {}): Promise<number> {
+    const off = new Set([...chatsWithCompactionOffByChoice(), ...compactionStops().map((s) => s.sessionId)]);
+    // The chats to put back off, and the pi to put it on. A chat being started is not
+    // in `live` yet, so its caller hands the pi it has along — or the record has
+    // nothing to be applied to. A chat with no record to apply is nothing to write,
+    // and the file below is still owed its switch: one chat's off is the file's off,
+    // and the file is every chat's.
+    const clients = opts.clients ?? new Map([...this.live].map(([id, s]) => [id, s.client]));
+    // Every chat in scope, not only the ones with a record: an off a chat reads out of
+    // the file with no record behind it is the file's off, and that chat is the one
+    // paying for it.
+    const ids = opts.ids ?? [...clients.keys()];
+    // What the switch in pi's file says before any of this chat's own off is written
+    // into it: that is what every other chat, and every chat started later, is owed.
+    // Asked for by the caller that writes the switch itself (a chat's card calls
+    // setAutoCompaction, which is a write to pi's file, before it asks for this), and
+    // by the portal's own repair of a file it left off (see repairCompactionSwitch).
+    // Left out elsewhere, so a chat's start and a chat's reload never take the switch
+    // out of the file on their own.
+    const fileSaid = opts.fileSwitch ?? readCompactionSettings().enabled;
+    let done = 0;
+    for (const id of ids) {
+      const client = clients.get(id);
+      if (!client) continue;
+      try {
+        const state = await client.getState?.().catch(() => undefined);
+        const said = state?.autoCompactionEnabled;
+        if (off.has(id)) {
+          // A chat whose pi already has it off needs no write: its off stands, and the
+          // file the write would touch belongs to the chats nobody told off.
+          if (said === false) continue;
+          await client.setAutoCompaction?.(false);
+          done++;
+        } else if (said === false) {
+          // Off with nothing on the books saying it is this chat's: it is the off this
+          // chat's pi read out of the file, which is the switch of the chats the portal
+          // stopped. Its compaction is what the file owes it, so it is given back on
+          // this chat — the write lands in the file too, which the repair below leaves
+          // the switch for every chat nobody told off.
+          await client.setAutoCompaction?.(true);
+          done++;
+        }
+      } catch {
+        // A chat that cannot be put back off is a chat that keeps what its pi has;
+        // its record stands, and the next reload answers it.
+      }
+    }
+    // The file is left what it said before this chat's off went into it. A file that
+    // already reads on owes nothing, which is the common case: a chat's start, a
+    // reload, a save — none of them writes the switch when nobody moved it.
+    if (fileSaid && readCompactionSettings().enabled === false) {
+      try {
+        await writeCompactionSettings({ enabled: true });
+      } catch {
+        // The file keeps the off; the chats told off are off, and a chat started
+        // later takes the off with it. Nothing here is worse than not trying.
+      }
+    }
+    return done;
+  }
+
+  /**
+   * The switch one chat's stopped compaction left in pi's file, taken back at the start.
+   *
+   * `setAutoCompaction` on one chat is a write to `compaction.enabled` in pi's own file,
+   * and that is the switch for every chat. So the chat whose summary could not be written
+   * — told to stop paying minutes for attempts that cannot work — left every chat started
+   * after it with no compaction at all: such a chat runs to the wall of its context, the
+   * model answers with a token of thinking, and the portal's carry-on line is sent to it,
+   * which is the shape the gunner chats ended in. The file reading off is never something
+   * the portal asked for as a global state — every chat's off it knows is one chat's — so
+   * it is the portal's own hand to take off the file:
+   *
+   * - each chat it stopped, its own by record or read back from the sentence it was told
+   *   (see db's `seedCompactionStopsFromNotices`), keeps its off on its own pi, which is
+   *   the only place one chat can be told, and its record is what names the room that
+   *   turns its attempts back on;
+   * - the file is given the switch back, which is what every chat the portal did not tell
+   *   off, and every chat opened later, is owed;
+   * - the chats open now are reloaded, so the switch reaches them where they sit, and each
+   *   one told off is put back off by that reload.
+   *
+   * `explainCompactionStops`, which the caller runs after this, says each stopped chat in
+   * its own transcript: left as a silent state of a file nobody has reason to open, the
+   * chat reads as broken with no reason attached to it.
+   */
+  async repairCompactionSwitch(): Promise<{ seeded: string[]; takenBack: boolean }> {
+    const seeded = seedCompactionStopsFromNotices();
+    // The records are honoured whatever the file says: a chat the portal stopped, a chat
+    // whose person switched it off, is put off on its own pi at this start — the chat
+    // seeded from an old transcript above included, which no chat start and no run start
+    // knows about yet. A file that reads on is not written by this.
+    const wasOff = readCompactionSettings().enabled === false;
+    await this.honorCompactionOffs({ fileSwitch: true });
+    // pi reading its own file is how a chat takes the switch: the chats sitting at the wall
+    // of their context right now are idle by then, so this is what reaches them.
+    await this.refreshSettings();
+    return { seeded, takenBack: wasOff };
   }
 
   /** A changed context limit reaches the chats that are open, not just the ones started later. */
@@ -1229,6 +1576,28 @@ class SessionManager extends EventEmitter {
    * limit listing class names). Read at agent_settled to spot that end.
    */
   private lastStopReason = new Map<string, string>();
+
+  /**
+   * What the last assistant message of a run wrote: its token count, and whether any of
+   * it was an answer (text or a tool call) rather than only the model's thinking. Read
+   * together with `lastStopReason` at `agent_settled`: a run that stopped on `length`
+   * having written nothing the person can see is the model stopping inside its own
+   * reasoning, with the chat's context already full — the sentence carried on from that
+   * is written the same way, and again, which is how a chat came to show the same
+   * carry-on line four times in half a minute (measured in chat aCSvv1KGQ9yf, where each
+   * of the four answers was a single token of thinking).
+   */
+  private cutOffAnswer = new Map<string, CutOffAnswer>();
+
+  /**
+   * The chat's model's own output limit — what one answer gets, in tokens. pi's models
+   * carry it (16,384 for a model that says nothing else), and a chat's answer is measured
+   * against it: a run that stopped on `length` having used all of it was cut off in
+   * mid-answer, and one that stopped having used a few hundred of it stopped because the
+   * context left it no room. Read at the run's start; 0/absent when the executor cannot
+   * say, where the answer's own shape is the test instead.
+   */
+  private modelOutputLimit = new Map<string, number>();
 
   /**
    * How many times a session's run has been carried on after the model was cut
@@ -1557,6 +1926,17 @@ class SessionManager extends EventEmitter {
     };
     rememberSessionFile();
 
+    // A chat reopened after it was told to keep its compaction off — by its person, or
+    // by the portal's stop — keeps that. pi's switch is one switch in its own file, and
+    // a reopened chat reads it, and the file is left the switch for every chat nobody
+    // told off: the record is the only place this chat's own off is kept, and this pi
+    // is not in `live` yet, so it is handed along. A chat that reads an off belonging to
+    // no record of its own takes its compaction back: the portal's start, its saving of
+    // a chat's settings and its timer answer that. A chat opening in the middle of its
+    // own run is not the place to ask its pi what it is running: that asks between the
+    // run's own steps, and a chat opened while its run is in flight waits on the answer.
+    void this.honorCompactionOffs({ ids: [sessionId], clients: new Map([[sessionId, client]]) });
+
     // What this session registered, written down as soon as it exists. The
     // settings page offers a default per tool, and needing to open a chat
     // before you can say "off everywhere" would be the wrong way round.
@@ -1715,7 +2095,11 @@ class SessionManager extends EventEmitter {
         // kept, not reset here — the resume that carries a cut-off turn on is
         // itself a run, and resetting it there would never count the carries.
         this.lastStopReason.delete(sessionId);
+        this.cutOffAnswer.delete(sessionId);
         this.failuresSaid.delete(sessionId);
+        // What one answer gets in this chat's model, for the cut-off test at the run's
+        // end: read while the run is going, so the settle that needs it has it.
+        void this.noteOutputLimit(sessionId, client);
         this.mark(sessionId, "running");
       }
       if (msg.type === "message_start" && msg.message?.role === "user") this.takeIn(sessionId, msg.message.content);
@@ -1724,6 +2108,7 @@ class SessionManager extends EventEmitter {
       if (msg.type === "message_end" && msg.message?.role === "assistant") {
         const reason = msg.message.stopReason;
         if (typeof reason === "string") this.lastStopReason.set(sessionId, reason);
+        this.cutOffAnswer.set(sessionId, answerShape(msg.message));
       }
       // agent_settled, not agent_end: agent_end fires once per agent run, and
       // a run is followed by retries, auto-compaction and any queued message,
@@ -1738,15 +2123,23 @@ class SessionManager extends EventEmitter {
         // from nothing. Held before the idle is published below, so neither the
         // watcher nor the queue sees the room as free in the gap.
         const carries = this.cutOffCarries.get(sessionId) ?? 0;
-        if (this.lastStopReason.get(sessionId) === "length" && carries < 3) {
+        const cutOff = this.lastStopReason.get(sessionId) === "length" ? this.cutOffAnswer.get(sessionId) : undefined;
+        const limit = this.modelOutputLimit.get(sessionId) ?? 0;
+        let carryingOn = false;
+        if (cutOff && this.answerWasCutOff(cutOff, limit) && carries < 3) {
+          carryingOn = true;
           this.cutOffCarries.set(sessionId, carries + 1);
           this.cutOffResumePending.add(sessionId);
           // The idle coming up is not a finished chat: a carry-on is following
           // it, and only the end of that gets announced. Same suppression the
           // compaction resume uses.
           markCompactionResume(sessionId);
-          this.scheduleResumeAfterCompaction(sessionId, "Carry on where you left off. Your last answer was cut off at the model's output limit, mid-sentence, not at the end of the work.");
+          this.scheduleResumeAfterCompaction(sessionId, "Carry on where you left off. Your last answer was cut off at the model's output limit, mid-sentence, not at the end of the work.", "cut-off");
         } else {
+          // A stop that was not a cut-off answer, or the budget spent: said once,
+          // where the person sees the chat end, so the chat's last line is why it
+          // stopped and not the carry-on that stopped the same way.
+          if (cutOff) this.noteCutOffEnd(sessionId, cutOff, limit, carries);
           // Ended on its own terms: the carry-on budget is spent, so a later run
           // in this session gets a fresh one.
           this.cutOffCarries.delete(sessionId);
@@ -1758,8 +2151,14 @@ class SessionManager extends EventEmitter {
         // a run of its own. Decided here, at the run's end, and only here: a run
         // that went on after the compaction dropped the marker at its turn_start
         // and wants no resume beside the work already going.
-        if (this.compactionResumePending.has(sessionId) && client.isIdle?.() !== false) {
-          this.scheduleResumeAfterCompaction(sessionId);
+        // Only one line picks the turn up. The carry-on of a cut-off answer is
+        // already that line: both are decided in the same breath, and a second
+        // resume landing in the run the first starts is queued into it, where the
+        // model reads it as an order to work — the chat answering "resume where you
+        // left off" every turn, which is what a person sees as a repeated message.
+        if (this.compactionResumePending.has(sessionId)) {
+          if (carryingOn) this.compactionResumePending.delete(sessionId);
+          else if (client.isIdle?.() !== false) this.scheduleResumeAfterCompaction(sessionId);
         }
         // Any claim this session still held — a message queued into the run
         // going added one — ends with the run; drop it here too, or it would
@@ -1889,6 +2288,7 @@ class SessionManager extends EventEmitter {
   }
 
   private reaper?: NodeJS.Timeout;
+  private tender?: NodeJS.Timeout;
 
   /**
    * Lets the pi of a chat nobody has used for a while go, every minute.
@@ -1906,6 +2306,27 @@ class SessionManager extends EventEmitter {
     if (this.reaper) return;
     this.reaper = setInterval(() => void this.reapIdle().catch((e) => console.error(`[portal] could not stop idle sessions: ${(e as Error).message}`)), everyMs);
     this.reaper.unref();
+  }
+
+  /**
+   * The shared compaction switch, kept the file's: one chat's stop is one chat's off,
+   * and the chats that read that off when they start are not the chat that was stopped.
+   *
+   * Tended on a timer, not in a chat's hot paths. A state fetch asked of a chat that is
+   * mid-run is a request among the run's own — it lands among the answers a command sent
+   * into the run is waiting for, and a chat opened while its run is in flight waits on
+   * it, which is worse than the leak it repairs. So: at the portal's own start, at the
+   * start of a chat nobody switched off, when a chat's settings are saved, and here.
+   */
+  startSwitchTender(everyMs = 5 * 60_000): void {
+    if (this.tender) return;
+    this.tender = setInterval(
+      () => void this.honorCompactionOffs({ fileSwitch: true })
+        .then((repaired) => (repaired ? this.refreshSettings() : undefined))
+        .catch((e) => console.error(`[portal] could not tend the compaction switch: ${(e as Error).message}`)),
+      everyMs,
+    );
+    this.tender.unref();
   }
 
   /** The sessions whose pi it stopped. `now` and `idleMs` are for a test to set. */
@@ -2105,6 +2526,7 @@ class SessionManager extends EventEmitter {
         ...(options?.voice ? { voice: true } : {}),
         ...(images.length ? { images: forLog(images) } : {}),
         queued: true,
+        ...(options?.resume ? { resume: options.resume } : {}),
       };
       const row = this.record(sessionId, "portal_prompt", prompt);
       if (row) {
@@ -2195,6 +2617,8 @@ class SessionManager extends EventEmitter {
       ...(queued ? { queued: true } : {}),
       // Taken in after the current step, rather than when the run ends.
       ...(queued && options?.steer ? { steer: true } : {}),
+      // The portal's own line carrying an unfinished turn on, not the person's words.
+      ...(options?.resume ? { resume: options.resume } : {}),
     };
     const row = isCommand ? undefined : this.record(sessionId, "portal_prompt", prompt);
     if (row) {
@@ -3416,6 +3840,10 @@ class SessionManager extends EventEmitter {
         }
         try {
           await this.withEdit(sessionId, () => client.reload());
+          // A reload is pi reading its own file, and its file has one compaction switch
+          // for every chat: the chat told off would come back on with it. See
+          // honorCompactionOffs; the file is left as this reload read it.
+          await this.honorCompactionOffs({ ids: [sessionId] });
           return true;
         } catch (e) {
           // Due still, as a reload that fails leaves it: see PiClient.reloadDue.
@@ -3456,6 +3884,9 @@ class SessionManager extends EventEmitter {
     if (client.isIdle?.() === false || this.reloadCutsOff(sessionId)) return;
     try {
       await this.withEdit(sessionId, () => client.reload());
+      // The same as in reloadIdle: the reload is pi reading the file that holds the one
+      // switch, and a chat told off is put back off on its own pi.
+      await this.honorCompactionOffs({ ids: [sessionId] });
     } catch (e) {
       console.error(`[portal] could not reload ${sessionId}: ${(e as Error).message}`);
     }
@@ -3653,6 +4084,8 @@ class SessionManager extends EventEmitter {
     this.singleActiveClaiming.delete(sessionId);
     this.clearResumePending(sessionId);
     this.lastStopReason.delete(sessionId);
+    this.cutOffAnswer.delete(sessionId);
+    this.modelOutputLimit.delete(sessionId);
     this.cutOffCarries.delete(sessionId);
     this.calls.delete(sessionId);
     toolCallsCutOff(sessionId);
@@ -3981,8 +4414,7 @@ class SessionManager extends EventEmitter {
 
   async shutdown(): Promise<void> {
     this.closing = true;
-    if (this.reaper) clearInterval(this.reaper);
-    this.reaper = undefined;
+    if (this.reaper) clearInterval(this.reaper);    this.reaper = undefined;
     // A run that is going is aborted first, as a Stop does. Disposing alone
     // dropped the answer being written: its text reaches the transcript and pi's
     // file only as its message ends, and the abort is what ends it.
@@ -4033,6 +4465,30 @@ function compactionFailureText(message: unknown): string {
   const text = plainFailure(raw || "the model did not produce a summary");
   return text.endsWith(".") ? text : `${text}.`;
 }
+
+/**
+ * How much an assistant message wrote, and whether any of it was an answer.
+ *
+ * `output` is the model's own token count for the message — thinking included, so a
+ * message of nothing but thinking has a count and says nothing. `wrote` is whether the
+ * message contains an answer the person sees (text) or work it asked for (a tool call):
+ * pi's own tool-call parts are how a turn does things, and a message that carries one is
+ * an answer in progress.
+ */
+function answerShape(message: any): CutOffAnswer {
+  const parts = Array.isArray(message?.content) ? message.content : [];
+  const wrote = parts.some((part: any) => (part?.type === "text" && String(part.text ?? "").trim()) || part?.type === "toolCall");
+  const output = Number(message?.usage?.output);
+  return { output: Number.isFinite(output) && output > 0 ? output : 0, wrote };
+}
+
+/** A token count as the chat says it: 16384 is "16,384", which reads as a size. */
+function tokensOf(tokens: number): string {
+  return String(Math.round(tokens)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+/** What the last assistant message of a run wrote; see the cutOffAnswer map on SessionManager. */
+type CutOffAnswer = { output: number; wrote: boolean };
 
 /**
  * Thrown by prompt() when only one session may be active at a time and another

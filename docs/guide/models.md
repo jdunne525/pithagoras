@@ -23,7 +23,10 @@ models are looked up as soon as it answers, and you tick the ones to offer.
 **Filter models** narrows a long list; **Add a model by its id** covers a server
 that lists none. A chosen model the server no longer lists is marked *Not listed
 by the server right now* rather than dropped. Each model shows whether it *Sees
-images* and *Thinks*, and its context **Window**.
+images* and *Thinks*, its context **Window**, and **Answer** — how many tokens
+one answer of its own gets (pi's `maxTokens`, 16k when the model says nothing
+else). Both are typed as numbers, refused when they are not whole tokens, and
+cleared back to pi's default by emptying the field.
 
 A hosted service needs no address: pi ships its catalogue, and every model from
 it is in the model menu once a key is set.
@@ -94,6 +97,10 @@ choice under the chat box, and a running chat is never rewritten.
 - **Kept when compacting** — how much of the most recent conversation is kept
   word for word; only what is older becomes a summary. pi's default is a third of
   a 64k window, which is why compacting can look as though it did nothing.
+- **Kept free at the end** — what pi leaves empty at the top of the window: a
+  chat is compacted above window minus this. It is the other half of the same
+  arithmetic, and it decides how much the model has to write in one answer when
+  it compacts — see [When a chat compacts](/guide/sessions#when-a-chat-compacts).
 - **Routine reports** — where a scheduled run reports to. See
   [Routines](/guide/routines).
 

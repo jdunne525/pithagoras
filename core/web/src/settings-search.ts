@@ -30,6 +30,8 @@ export const SETTINGS_INDEX: SettingEntry[] = [
   { tab: "general", section: msg("For new chats"), title: msg("Effort"), words: "thinking reasoning level effort denken nachdenken" },
   { tab: "general", section: msg("Context"), title: msg("Context window"), words: "tokens ctx context window size length kontext fenster" },
   { tab: "general", section: msg("Context"), title: msg("Kept when compacting"), words: "compaction compact keep recent summary kompaktieren zusammenfassung" },
+  { tab: "general", section: msg("Context"), title: msg("Kept free at the end"), words: "compaction compact keep free reserve threshold room summary chat too big fails kompaktieren freier platz zusammenfassung" },
+  { tab: "models", section: msg("Providers"), title: msg("Max output tokens"), words: "max output tokens answer length summary compaction cut off one answer gets room maximale ausgabe tokens antwort zusammenfassung" },
   { tab: "general", section: msg("One chat at a time"), title: msg("Only one active session"), words: "active single one chat concurrent simultaneously only session eins gleichzeitig" },
   { tab: "general", section: msg("Routine reports"), title: msg("Routine reports"), words: "routine schedule cron report destination channel bericht" },
   { tab: "general", section: msg("Voice mode"), title: msg("Voice mode"), words: "voice speech speak source vad detection silence threshold speaking instructions model thinking stimme sprache sprachmodus quelle" },

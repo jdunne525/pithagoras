@@ -1687,6 +1687,11 @@ function removeSession(id: string): void {
   d.prepare("DELETE FROM sessions WHERE id = ?").run(id);
   d.prepare("DELETE FROM open_subagents WHERE session_id = ?").run(id);
   d.prepare("DELETE FROM settings WHERE key = ?").run(trustedKey(id));
+  // The chat's compaction records go with it: a stop nothing can answer any more,
+  // and a switch nobody will ever put back on.
+  d.prepare("DELETE FROM settings WHERE key = ?").run(compactionStopKey(id));
+  d.prepare("DELETE FROM settings WHERE key = ?").run(compactionStopAnsweredKey(id));
+  d.prepare("DELETE FROM settings WHERE key = ?").run(compactionChoiceKey(id));
 }
 
 /**
@@ -2599,6 +2604,183 @@ export function contextLimitProblem(tokens: unknown): string | undefined {
   }
   // en-US, not the server's locale: the message is English whatever the host is.
   return `The context window must be a whole number between ${CONTEXT_LIMIT_MIN.toLocaleString("en-US")} and ${CONTEXT_LIMIT_MAX.toLocaleString("en-US")} tokens`;
+}
+
+/**
+ * A chat whose auto-compaction the portal switched off, and the model it is on.
+ *
+ * pi has one auto-compaction switch for every chat (`compaction.enabled` in its
+ * own settings file): a chat whose summary cannot be written stops the attempts
+ * for all of them, and a chat started after that gets no compaction at all —
+ * which is how a chat came to run into the wall of its context and answer the
+ * portal's carry-on line with a token of thinking, over and over. So the stop is
+ * recorded, with the model it was asked for:
+ *
+ * - the switch's being off is then explained, in the chat's own words, after a
+ *   restart rather than being a silent state of pi's file;
+ * - giving that model room (keep recent, keep free, its Max output tokens)
+ *   switches auto-compaction back on for exactly the chats that were left
+ *   waiting for it, and nothing a person switched off by hand.
+ */
+const compactionStopKey = (sessionId: string) => `compaction_stop:${sessionId}`;
+
+/**
+ * A chat whose stop the portal was already answered, and so is not to be read back as stopped.
+ *
+ * The notice a stopped chat was told with stays in its transcript for good — it is the
+ * person's record of why their chat stopped trying. `seedCompactionStopsFromNotices` reads
+ * that sentence to find the chats a portal that kept no record left off, and left to itself
+ * it finds every chat that was ever stopped, the ones whose room arrived long ago included:
+ * such a chat is recorded as stopped again at the next restart, switched off on its own pi,
+ * and told its own stop sentence a second time. The chat that was given its room, and the
+ * chat whose person took the switch over in its card, are the chats that must never be read
+ * back, so their answered stop is kept as a row of its own. Nothing in the transcript says
+ * it, because the transcript is the person's and says what was said.
+ */
+const compactionStopAnsweredKey = (sessionId: string) => `compaction_stop_answered:${sessionId}`;
+
+/** Whether this chat's stop is on the books as answered: its room arrived, or its person took the switch over. */
+export function compactionStopWasAnswered(sessionId: string): boolean {
+  return getSetting(compactionStopAnsweredKey(sessionId)) !== undefined;
+}
+
+/**
+ * The model of a chat whose pi cannot say what it is running.
+ *
+ * An empty value is what `putSetting` writes as no row at all, which would leave
+ * this chat's stop unrecorded: never explained after a restart, and never
+ * answered by the plain compaction numbers, which are exactly the remedy for a
+ * chat with no name to give its room to. A marker keeps the row alive, and names
+ * nothing, so a model's own number (which is named) is not read as this chat's.
+ */
+export const COMPACT_STOP_NO_MODEL = "?";
+
+/** The model a recorded stop names, as the chat says it: nothing for a chat that could not. */
+export const compactionStopModel = (modelKey: string): string =>
+  modelKey === COMPACT_STOP_NO_MODEL ? "" : modelKey;
+
+/** The chat's failure asked for the stop: remember it, and for which model. */
+export function noteCompactionStop(sessionId: string, modelKey: string): void {
+  putSetting(compactionStopKey(sessionId), modelKey.trim() || COMPACT_STOP_NO_MODEL);
+}
+
+/** Every chat left with auto-compaction off by the portal, with its model. */
+export function compactionStops(): { sessionId: string; modelKey: string }[] {
+  const prefix = compactionStopKey("");
+  return Object.entries(settingValuesWithPrefix(prefix)).map(([key, modelKey]) => ({
+    sessionId: key.slice(prefix.length),
+    modelKey,
+  }));
+}
+
+/**
+ * The chats whose stop is being answered, and so cleared.
+ *
+ * Nothing named: every one the portal stopped, which is what the plain
+ * compaction numbers do — they are every model's. `modelKey`: the chats on that
+ * model, which is what one model's own room does. `providerPrefix` ("strata/"):
+ * every chat on that provider, which is what a provider's saved Max output
+ * tokens does. `sessionId`: one chat, which is what the person's own toggle in
+ * the chat's card does — from here the switch is theirs, not the portal's.
+ */
+export interface CompactionStopWipe {
+  modelKey?: string;
+  providerPrefix?: string;
+  sessionId?: string;
+}
+
+/**
+ * Clear the recorded stops for the chats asked for, and return their ids in the
+ * order they asked for it. A chat whose stop is cleared is a chat the portal is
+ * free to try compaction in again.
+ */
+export function clearCompactionStops(wipe: CompactionStopWipe = {}): string[] {
+  const stops = compactionStops().filter((s) =>
+    (wipe.modelKey === undefined || s.modelKey === wipe.modelKey) &&
+    (wipe.providerPrefix === undefined || s.modelKey.startsWith(wipe.providerPrefix)) &&
+    (wipe.sessionId === undefined || s.sessionId === wipe.sessionId)
+  );
+  for (const s of stops) {
+    putSetting(compactionStopKey(s.sessionId), "");
+    // Answered, and off the notices' reach: see compactionStopAnsweredKey.
+    putSetting(compactionStopAnsweredKey(s.sessionId), s.modelKey);
+  }
+  return stops.map((s) => s.sessionId);
+}
+
+/**
+ * The chat's own switch on auto-compaction, in the portal's record as well as pi's file.
+ *
+ * pi's switch is one switch: a chat's Context card writes `compaction.enabled` in pi's
+ * settings file, so the person switching compaction off for *this* chat switches it off
+ * for every chat, and a later room given to some other chat — written to the same
+ * switch, because pi has no other — switches this chat's compaction back on under them.
+ * So their own move is kept here, and the portal holds the chat off through it: pi's file
+ * keeps the room (compaction enabled, the numbers), and the chat that was told to be off
+ * is put back off on its own pi, which is the whole of what the portal can do with one
+ * global switch. A chat with no record is a chat nobody switched off, and the room reaches it.
+ */
+const compactionChoiceKey = (sessionId: string) => `compaction_choice:${sessionId}`;
+
+/** The person's own off, as the row says it. */
+const COMPACT_CHOICE_OFF = "off";
+
+/** The person switched this chat's compaction on, or off: the record is their move, not the portal's. */
+export function noteCompactionChoice(sessionId: string, enabled: boolean): void {
+  putSetting(compactionChoiceKey(sessionId), enabled ? "" : COMPACT_CHOICE_OFF);
+}
+
+/**
+ * The sentence the portal says in a chat when its compaction failures asked for the stop.
+ *
+ * A stop is a write to pi's one switch, which is every chat's. A portal older than the
+ * record above left that write with nothing on the books to explain it and nothing to
+ * take it back, and the only place such a chat says what happened to it is this sentence
+ * in its own transcript — which is where `seedCompactionStopsFromNotices` finds them.
+ * Kept in the words the portal says, so the sentence it speaks and the sentence it
+ * looks for are one sentence.
+ */
+export const COMPACT_STOP_NOTICE = "Auto-compaction is off for this chat after failing twice in a row";
+
+/**
+ * The chats a portal that kept no record stopped, read back from what they were told.
+ *
+ * Each is recorded with the model the room is asked for: the chat's own row where it
+ * names one, the model the chat opens on otherwise, and the marker for a chat where
+ * neither has a name — which is the chat the plain numbers alone answer. A chat whose
+ * stop is already on the books keeps the model its own record named; a chat whose stop
+ * was answered is left out — its room arrived, or its person took the switch over, and
+ * the sentence that tells of the stop is older than that answer (see
+ * compactionStopAnsweredKey); and a chat that has been deleted is left out: no transcript
+ * to explain itself in, and no pi to bring back.
+ */
+export function seedCompactionStopsFromNotices(): string[] {
+  const d = getDb();
+  const told = d
+    .prepare("SELECT DISTINCT session_id FROM events WHERE type = 'portal_notice' AND payload LIKE ?")
+    .all(`%${COMPACT_STOP_NOTICE}%`) as { session_id: string }[];
+  const getRow = d.prepare("SELECT id, provider, model FROM sessions WHERE id = ?");
+  const seeded: string[] = [];
+  for (const { session_id: sessionId } of told) {
+    const row = getRow.get(sessionId) as { id: string; provider: string | null; model: string | null } | undefined;
+    if (!row) continue;
+    // A stop already on the books keeps its own model; a stop already answered is a chat
+    // whose room arrived, or whose person took the switch over — read back as stopped it
+    // would be switched off again, on the strength of a sentence from its past.
+    if (getSetting(compactionStopKey(sessionId)) || compactionStopWasAnswered(sessionId)) continue;
+    const { provider, model } = chatModel(row);
+    noteCompactionStop(sessionId, provider && model ? `${provider}/${model}` : "");
+    seeded.push(sessionId);
+  }
+  return seeded;
+}
+
+/** Every chat whose person switched its compaction off, and has not switched it back on. */
+export function chatsWithCompactionOffByChoice(): string[] {
+  const prefix = compactionChoiceKey("");
+  return Object.entries(settingValuesWithPrefix(prefix))
+    .filter(([, said]) => said === COMPACT_CHOICE_OFF)
+    .map(([key]) => key.slice(prefix.length));
 }
 
 /** Where reports go when a routine does not name a destination of its own. */

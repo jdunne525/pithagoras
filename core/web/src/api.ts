@@ -307,6 +307,17 @@ export interface CompactionSettings {
   enabled: boolean;
   /** The floor a compaction cannot go below — kept verbatim, never summarised. */
   keepRecentTokens: number;
+  /**
+   * What pi keeps free at the top of the window: the chat compacts at window − this.
+   * Absent when pi's file names none, which is pi's own 16,384 — the card says so.
+   */
+  reserveTokens?: number;
+  /**
+   * One model's own numbers, keyed "provider/model" as pi keys it. The only
+   * compaction number pi scopes to a single model, which is why the room a
+   * chat's summary needs is given through its model.
+   */
+  modelOverrides?: Record<string, { keepRecentTokens?: number; reserveTokens?: number }>;
 }
 
 /** A tool a conversation could use, and whether it is switched on for it. */
@@ -1202,10 +1213,12 @@ export const api = {
       executor: string;
       workspaceRoot: string;
     }>("/api/settings"),
-  saveSettings: (patch: Partial<GlobalSettings> & { keepRecentTokens?: number }) =>
+  saveSettings: (patch: Partial<GlobalSettings> & { keepRecentTokens?: number; reserveTokens?: number; forModel?: string }) =>
     json<{
       settings: GlobalSettings;
       compaction: CompactionSettings;
+      /** What a chat on that model compacts at, resolved server-side; the plain numbers when no model was named. */
+      effective?: { keepRecentTokens: number; reserveTokens: number };
       /** How many open sessions took the new compaction settings. */
       refreshed: number;
       note: string;

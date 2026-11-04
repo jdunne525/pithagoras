@@ -1,6 +1,7 @@
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { freePort, inProcessHome, serverEnv, startServer } from "./server-harness.mjs";
 
@@ -13,7 +14,7 @@ import { freePort, inProcessHome, serverEnv, startServer } from "./server-harnes
 const home = inProcessHome("pithagoras-pi-settings-");
 const agent = path.join(home, "agent");
 const file = path.join(agent, "settings.json");
-const { updatePiSettings, writePiSettingsText, inTurnWithSettings, readPiSettings } = await import("../dist/pi-settings.js");
+const { updatePiSettings, writePiSettingsText, inTurnWithSettings, readPiSettings, readCompactionSettings, piAgentDir } = await import("../dist/pi-settings.js");
 const db = await import("../dist/db.js");
 
 /** What a hand edit leaves: a comma too many. It is not what pi reads, and not a file to write over. */
@@ -133,6 +134,102 @@ test("the compaction slider does not start over from a file that does not parse"
   assert.equal(readFileSync(file, "utf8"), BROKEN);
 });
 
+// Compaction is two numbers, and pi has two shapes for each of them: the plain one every
+// chat inherits, and one model's own (`compaction.modelOverrides["provider/model"]`), which
+// is the only compaction number pi scopes to a single model. A chat whose summary cannot be
+// written in one answer is given room through its model — the model's answer is what writes
+// it — so the form has to write one number at a time, into the shape it was asked for,
+// and refuse a value pi would choke on when it reads the file back.
+test("the two compaction numbers are written as the plain setting, and only the one asked for", async () => {
+  reset(GOOD);
+  const both = await send("/api/settings", "PUT", { keepRecentTokens: 40000, reserveTokens: 24000 });
+  assert.equal(both.status, 200);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).compaction, { keepRecentTokens: 40000, reserveTokens: 24000 });
+  const body = await both.json();
+  assert.deepEqual(body.effective, { keepRecentTokens: 40000, reserveTokens: 24000 }, "what a chat on any model compacts at");
+
+  // One number on its own: the slider released first must not write the other number as a
+  // side effect — pi reads a written value as the model's own, overwriting what was there.
+  const one = await send("/api/settings", "PUT", { reserveTokens: 30000 });
+  assert.equal(one.status, 200);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).compaction, { keepRecentTokens: 40000, reserveTokens: 30000 }, "keep-recent was left as it stood");
+
+  // A value outside the range pi is given for it is refused, named by the field, before
+  // anything is written: pi throws on a token setting it cannot read, and that takes the
+  // whole settings file away from every chat.
+  for (const bad of [0, 999, 500_001, "nonsense"]) {
+    const res = await send("/api/settings", "PUT", { reserveTokens: bad });
+    assert.equal(res.status, 400, String(bad));
+    assert.match((await res.json()).error, /Keep free must be between/);
+  }
+  for (const bad of [0, 999, 500_001]) {
+    const res = await send("/api/settings", "PUT", { keepRecentTokens: bad });
+    assert.equal(res.status, 400, String(bad));
+    assert.match((await res.json()).error, /Keep recent must be between/);
+  }
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).compaction, { keepRecentTokens: 40000, reserveTokens: 30000 }, "the refused saves wrote nothing");
+});
+
+test("one model's own compaction room is written beside the plain numbers, and names the model it is for", async () => {
+  reset(JSON.stringify({ packages: ["npm:pi-example"], compaction: { keepRecentTokens: 20000, reserveTokens: 16384 } }, null, 2) + "\n");
+  const res = await send("/api/settings", "PUT", { keepRecentTokens: 60000, forModel: "strata/qwen3.8" });
+  assert.equal(res.status, 200);
+  const written = JSON.parse(readFileSync(file, "utf8")).compaction;
+  assert.deepEqual(written.modelOverrides, { "strata/qwen3.8": { keepRecentTokens: 60000 } });
+  assert.deepEqual(written, { keepRecentTokens: 20000, reserveTokens: 16384, modelOverrides: { "strata/qwen3.8": { keepRecentTokens: 60000 } } }, "the plain numbers, which every other model keeps, were left alone");
+  const body = await res.json();
+  assert.deepEqual(body.effective, { keepRecentTokens: 60000, reserveTokens: 16384 }, "the model's own keep-recent, the plain keep-free");
+  assert.match(body.note, /Keep recent for strata\/qwen3\.8/);
+  assert.match(body.note, /this model's own number/);
+
+  // A second number for the same model merges into its entry; the model's other number is
+  // left as it has it, as pi reads it.
+  await send("/api/settings", "PUT", { reserveTokens: 24000, forModel: "strata/qwen3.8" });
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).compaction.modelOverrides, {
+    "strata/qwen3.8": { keepRecentTokens: 60000, reserveTokens: 24000 },
+  });
+
+  // A model named the way pi does not name one is a number stored where nothing reads it.
+  // A model ID carrying a slash is a key pi reads ("a/b/c": provider a, model b/c), so the
+  // shape asked for is one provider, one slash, and a model that is not empty.
+  for (const bad of ["strata", "", "/x", "a//b", "a/b\nc"]) {
+    const r = await send("/api/settings", "PUT", { reserveTokens: 20000, forModel: bad });
+    assert.equal(r.status, 400, bad);
+    assert.match((await r.json()).error, /forModel names a model as pi names it/);
+  }
+  // A model ID carrying a slash is keyed as pi keys it, slashes inside the ID included.
+  const sl = await send("/api/settings", "PUT", { keepRecentTokens: 30000, forModel: "a/b/c" });
+  assert.equal(sl.status, 200);
+  assert.equal(JSON.parse(readFileSync(file, "utf8")).compaction.modelOverrides["a/b/c"].keepRecentTokens, 30000);
+
+  // A model with no number asks for nothing: it would be read as a change, write nothing,
+  // and be reported as applied.
+  const none = await send("/api/settings", "PUT", { forModel: "strata/qwen3.8" });
+  assert.equal(none.status, 400);
+  assert.match((await none.json()).error, /forModel is only sent with the number it is for/);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).compaction.modelOverrides, {
+    "strata/qwen3.8": { keepRecentTokens: 60000, reserveTokens: 24000 },
+    "a/b/c": { keepRecentTokens: 30000 },
+  }, "nothing of the refused saves landed");
+
+  // A model with no number of its own answers the plain numbers, as pi resolves them.
+  const plain = await send("/api/settings", "PUT", { reserveTokens: 18000 });
+  assert.deepEqual((await plain.json()).effective, { keepRecentTokens: 20000, reserveTokens: 18000 });
+});
+
+test("a compaction value pi could not read is not carried into what the portal says about it", () => {
+  // The portal reads pi's file, and pi throws on a token setting that is not a positive
+  // whole number — so what the portal reads is what pi can use, and a field mid-edit in pi's
+  // file is left out rather than passed on as a size.
+  writeFileSync(file, JSON.stringify({
+    compaction: { keepRecentTokens: 0, reserveTokens: "16k", modelOverrides: { "a/b": { keepRecentTokens: 1.5, reserveTokens: 24000 }, "c/d": "nope", "e/f": { reserveTokens: -4 } } },
+  }));
+  const c = readCompactionSettings();
+  assert.equal(c.keepRecentTokens, 20000, "pi's default for a value that is no number");
+  assert.equal(c.reserveTokens, 16384);
+  assert.deepEqual(c.modelOverrides, { "a/b": { reserveTokens: 24000 } }, "the model's valid number, and no entry shaped otherwise");
+});
+
 test("the raw editor puts a file that does not parse right, refuses what pi could not use, and keeps the old one", async () => {
   reset(BROKEN);
   for (const content of ["[1]", "null", '"text"']) {
@@ -148,4 +245,56 @@ test("the raw editor puts a file that does not parse right, refuses what pi coul
   assert.equal(ok.status, 200);
   assert.equal(readFileSync(file, "utf8"), content);
   assert.equal(readFileSync(bak, "utf8"), BROKEN);
+});
+
+// One chat's switch is a write to this file, because pi has one auto-compaction
+// switch for every chat. Left alone, one chat's own off would be every chat's off —
+// the chats started after it included — and the room given to some other chat,
+// which writes this same switch back on, would run compaction in the chat whose
+// person turned it off. So the chat's move is recorded in the portal, the file is
+// given its switch back, and the chat is put back off on its own pi.
+test("a chat's own switch off is recorded, and the file keeps the switch for every chat nobody switched off", async () => {
+  reset(JSON.stringify({ packages: ["npm:pi-example"], compaction: { enabled: true, keepRecentTokens: 20000, reserveTokens: 16384 } }, null, 2) + "\n");
+  const chat = await (await send("/api/sessions", "POST", {})).json();
+
+  const off = await send(`/api/sessions/${chat.id}/config`, "POST", { autoCompaction: false });
+  assert.equal(off.status, 200);
+  const said = await off.json();
+  assert.equal(said.state.autoCompactionEnabled, false, "this chat's pi is off");
+  assert.deepEqual(db.chatsWithCompactionOffByChoice(), [chat.id], "the chat's own off is on the books");
+  assert.equal(JSON.parse(readFileSync(file, "utf8")).compaction.enabled, true, "the file keeps the switch: a chat nobody switched off is not left without compaction");
+
+  // Their own way back: the switch on leaves nothing recorded, and nothing to apply.
+  const on = await send(`/api/sessions/${chat.id}/config`, "POST", { autoCompaction: true });
+  assert.equal(on.status, 200);
+  assert.equal((await on.json()).state.autoCompactionEnabled, true, "the chat is on again");
+  assert.deepEqual(db.chatsWithCompactionOffByChoice(), [], "and their move is off the books");
+  assert.equal(JSON.parse(readFileSync(file, "utf8")).compaction.enabled, true, "and the file says the same");
+});
+
+// The door to pi's file, and the way it went shut: pi builds its own directory from the
+// home the OS reports, and the portal read it out of HOME in its own environment. On a
+// Windows machine the two differ — the portal's HOME is a container's /data/home, pi's
+// home is the user's profile — and every symptom of that is the one reported about a
+// chat: compaction numbers written where no pi reads them, a slider reading back the
+// default it never changed, and a compaction switch reported as pi's default while pi,
+// reading its own file, ran with it off for every chat started after one chat was
+// stopped. The same door is every one of the reads and writes above.
+test("pi's settings are found by the home the OS reports, not by HOME in the portal's environment", () => {
+  const savedHome = process.env.HOME;
+  const savedDir = process.env.PI_CODING_AGENT_DIR;
+  delete process.env.PI_CODING_AGENT_DIR; // the tests run under the override; this asks about the fallback
+  process.env.HOME = process.platform === "win32" ? "C:/not-the-user-home" : "/not-the-user-home";
+  try {
+    assert.equal(piAgentDir(), path.join(os.homedir(), ".pi", "agent"), "the directory pi itself builds");
+    assert.notEqual(piAgentDir(), path.join(process.env.HOME, ".pi", "agent"), "and not the HOME the shell put in the portal's way");
+    // An install that says where pi's home is is answered, trimmed: it wins over both.
+    process.env.PI_CODING_AGENT_DIR = `  ${agent}  `;
+    assert.equal(piAgentDir(), agent, "an install told where pi's home is, by its own variable");
+  } finally {
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    if (savedDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = savedDir;
+  }
 });

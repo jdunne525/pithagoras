@@ -335,6 +335,15 @@ If an edit's replacement is refused — the model is unreachable, say — the
 conversation is put back as it was, rather than left without the messages the
 edit meant to replace.
 
+The portal sends two sentences of its own that carry an unfinished turn on: after
+a compaction that caught the run mid-turn, and after an answer the model stopped
+in mid-sentence. Those are drawn as one muted line naming what the portal asked,
+not as a message with Copy/Retry/Edit/Delete below it — see
+[When a chat compacts](/guide/sessions#when-a-chat-compacts). A chat that ran
+before the record said whose line such a sentence was is recognised by the
+sentence itself; your own message that happens to ask for the same thing stays
+yours.
+
 ## Pictures the agent makes
 
 With [image generation](/guide/features#image-generation) on, a `generate_image`
@@ -600,6 +609,8 @@ waiting for it to finish. Clicking it opens everything context-related:
 - the exact usage — tokens used, window size, tokens left
 - the **context window**, which you can change (below)
 - **auto-compact**, on by default, which summarises before the window fills
+- **keep recent** and **keep free**, the two numbers that decide when a chat is
+  compacted and how much of it the model has to write (below)
 - **compact now**, to do it immediately
 - input and output tokens, message count, tool calls, cost
 
@@ -631,6 +642,48 @@ its pill wins over it. Leave it empty to use what each model says.
 Neither is available with `EXECUTOR=container`. pi runs inside the container
 there and the portal cannot change its model, so the field and the default are
 turned off rather than accepting a number that would do nothing.
+
+### When a chat compacts
+
+A chat is compacted once it passes **its window minus what it keeps free**, and
+the summariser keeps the most recent stretch word for word: the two numbers are
+the whole of compaction, and both are on the chat's context card — **Keep
+recent** and **Keep free** — with a single switch for auto-compaction.
+
+They matter together, because the summary is written by the chat's own model, in
+one answer. A chat that keeps little free is compacted late, arrives at the
+summariser with a head too big for one answer to write, and pi reports the
+summary stopped mid-way ("generation hit the token cap"): nothing is compacted,
+the chat stays over the threshold, and the next turn tries again. The room the
+summary needs is the model's, so the card saves both numbers as **that model's
+own** (`compaction.modelOverrides` in pi's file, the only compaction number pi
+scopes to one model), and the third number of the trio — **Answer**, what one
+answer gets — is on the model's row in Settings → Providers. Every chat on that
+model takes the same room, which is what the arithmetic needs.
+
+After a compaction fails twice in a row the chat says so in one line and
+switches auto-compaction off for itself, rather than paying for an attempt that
+cannot work at every turn for hours. The line names the three numbers; turn the
+switch back on once the chat has room.
+
+The same full context shows up at the end of an answer, and there the portal
+distinguishes the two shapes of a model that stops on `length`:
+
+- It stopped having written all of the output it was allowed: the answer was cut
+  off mid-sentence. The portal sends one line asking the agent to carry on where
+  it stopped, in the same chat, so the work keeps its context. This is bounded to
+  three carries in a row; the fourth is said as an end, with the reason.
+- It stopped having written a fraction of that — often a single token of thinking
+  — which is the context leaving the model no room to answer at all. Carrying
+  that on is answered the same way, and the same sentence comes back every turn:
+  this is the shape that made a chat show its own carry-on line four times in a
+  few seconds. Nothing is sent, the room is handed over, and the chat gets one
+  line saying the context is full and what would give it room.
+
+Those carry-on lines are the portal's, not yours: they are recorded as such, and
+drawn as one short muted line — *the portal asked the agent to carry on where its
+answer was cut off* — so three of them are not three messages of yours, and ↑ in
+an empty composer still opens the last thing you actually said.
 
 ## Persistence
 

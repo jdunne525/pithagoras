@@ -1,6 +1,6 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { DiagramPlugin } from "streamdown";
-import { LuAudioLines, LuCheck, LuChevronLeft, LuChevronRight, LuClock, LuCopy, LuPencil, LuRotateCw, LuSend, LuShieldAlert, LuTrash2 } from "react-icons/lu";
+import { LuAudioLines, LuArrowDownToLine, LuCheck, LuChevronLeft, LuChevronRight, LuClock, LuCopy, LuPencil, LuRotateCw, LuSend, LuShieldAlert, LuTrash2 } from "react-icons/lu";
 import { api } from "../api";
 import { copyText } from "../clipboard";
 import { sentPictureId } from "../chat-pictures";
@@ -162,6 +162,28 @@ export const TranscriptRow = memo(function TranscriptRow({
   const context = useMemo(() => (item.kind === "user" ? splitContext(item.text) : null), [item]);
   // An open question is drawn above the message box (see QuestionCard); what is kept here is its record.
   if (item.kind === "question") return item.state === "open" ? null : <QuestionRecord item={item} enter={enter} />;
+  // The portal's own line carrying an unfinished turn on: a compaction that caught
+  // the run mid-turn, or an answer the model stopped in mid-sentence. Not a
+  // message, and not a bubble — one muted line. As a message it read as the person
+  // saying the same sentence again, which is what a chat that carried a cut-off
+  // answer on three times came to look like.
+  if (item.kind === "user" && item.resume) {
+    const asked = item.resume === "compaction" ? t("The portal asked the agent to pick the turn back up after the compaction") : t("The portal asked the agent to carry on where its answer was cut off");
+    return (
+      <div data-key={item.id} className={`flex flex-wrap items-center justify-end gap-1.5${enter}${mine}`}>
+        <LuArrowDownToLine aria-hidden className="h-3.5 w-3.5 shrink-0 text-fg-faint" />
+        <span className="text-[11px] text-fg-subtle" title={item.text}>
+          {item.unsent === "unsure"
+            ? t("May not have been sent — the portal restarted, and could not tell whether the agent took it in")
+            : item.unsent === "restarted"
+              ? t("Not sent — the portal restarted before the agent took it in")
+              : item.unsent === "stopped"
+                ? t("Not sent — the run was stopped before the agent took it in")
+                : asked}
+        </span>
+      </div>
+    );
+  }
   if (item.kind === "user") {
     const { text, blocks } = context!;
     // Nothing but framing: the portal spoke, not a person. Drawing it as

@@ -21,7 +21,7 @@ import { LuGripVertical, LuMenu, LuArrowDown, LuSquare, LuArrowUp, LuPaperclip, 
 import { Link } from "react-router-dom";
 import { api, EXTENSIONS_CHANGED, MODES_CHANGED, type ChatMode, type PiCommand, type PortalEvent, type PromptOptions, type Session } from "../api";
 import { pending, refetchImage, sortFiles, uploadedNote, type Attachment } from "../attachments";
-import { activity, buildTranscript, keepItems, type Item, type SentImage } from "../transcript";
+import { activity, buildTranscript, keepItems, lastSaid, lastWaiting, type Item, type SentImage } from "../transcript";
 import { HAS_MERMAID, loadMermaidPlugin } from "../mermaid";
 import { useResolvedTheme } from "../theme";
 import { ComposerBar } from "./ComposerBar";
@@ -888,14 +888,9 @@ export function Chat({
     if (taken.current && settle(taken.current)) taken.current = null;
   }, [items]);
   // The last thing the person said. Retrying it replaces it and what came of
-  // it, which is only safe where nothing follows that would go too.
-  const lastSaid = useMemo(() => {
-    for (let i = items.length - 1; i >= 0; i--) {
-      const it = items[i];
-      if (it.kind === "user" && !it.queued && !it.unsent && (splitContext(it.text).text || it.images)) return it.id;
-    }
-    return undefined;
-  }, [items]);
+  // it, which is only safe where nothing follows that would go too. The rule is
+  // in the transcript (see lastSaid): a portal resume is not the person's line.
+  const lastSaidId = useMemo(() => lastSaid(items)?.id, [items]);
   // A switch to another version, by the message clicked: until the chat has
   // loaded again without it, a second click would ask about a message that is
   // on its way out, and fail after the first had worked.
@@ -1956,7 +1951,7 @@ export function Chat({
               entering={entering}
               running={running}
               editing={seq !== undefined && editing === seq}
-              last={item.id === lastSaid}
+              last={item.id === lastSaidId}
               seqs={seq === undefined ? undefined : versions[seq]}
               switching={switching !== null}
               sessionId={session.id}
@@ -2194,7 +2189,9 @@ export function Chat({
               !isComposing(e) &&
               !input && !attached.length
             ) {
-              const waiting = [...items].reverse().find((it) => it.kind === "user" && it.queued);
+              // The portal's own carry-on lines are not taken back: sent again
+              // from the composer they are the same sentence a second time.
+              const waiting = lastWaiting(items);
               if (waiting?.kind === "user") {
                 e.preventDefault();
                 void attempt(() => takeBackLatest(waiting));
@@ -2209,7 +2206,7 @@ export function Chat({
               !isComposing(e) &&
               !input && !attached.length && !running
             ) {
-              const last = items.find((it) => it.id === lastSaid);
+              const last = items.find((it) => it.id === lastSaidId);
               if (last?.kind === "user") {
                 e.preventDefault();
                 setEditing(last.seq);

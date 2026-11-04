@@ -1,4 +1,5 @@
 import type { PortalEvent } from "./api";
+import { splitContext } from "./context-blocks";
 import { unwrapCall } from "./tool-activity";
 import { argsSummary } from "./tool-args";
 import { toolArgsOf, toolNameOf } from "./tool-payload";
@@ -91,6 +92,15 @@ export type Item =
       images?: SentImage[];
       queued?: boolean;
       steer?: boolean;
+      /**
+       * The portal's own line carrying an unfinished turn on — after a compaction that
+       * caught the run mid-turn, or after a run the model cut itself off on. Drawn as the
+       * portal speaking for the work, not as a message of the person's: left as a message,
+       * a chat that carried a cut-off answer on three times showed the person having said
+       * the same sentence three times, which is what they came to report as "a repeated
+       * message".
+       */
+      resume?: "compaction" | "cut-off";
       unsent?: "stopped" | "restarted" | "unsure";
     }
   /** `thinkingSince`/`thinkingUntil`: when the reasoning started and last grew, for "Thought for 12s". */
@@ -255,17 +265,40 @@ type AssistantItem = Extract<Item, { kind: "assistant" }>;
 function userItem(seq: number, p: any): UserItem {
   const raw = String(p?.message ?? "");
   const tagged = raw.startsWith("[Audio mode]\n");
+  const text = tagged ? raw.slice("[Audio mode]\n".length) : raw;
   const images = sentImages(p?.images);
+  // Whose line it is: the record says, and a chat that ran this before the record
+  // said it is recognised by the sentence the portal sends.
+  const resume =
+    p?.resume === "compaction" || p?.resume === "cut-off"
+      ? (p.resume as "compaction" | "cut-off")
+      : PORTAL_LINES.find((line) => line.text === text)?.resume;
   return {
     kind: "user",
     id: `u${seq}`,
     seq,
-    text: tagged ? raw.slice("[Audio mode]\n".length) : raw,
+    text,
     audio: p?.voice === true || tagged,
     ...(images ? { images } : {}),
     ...(p?.steer === true ? { steer: true } : {}),
+    ...(resume ? { resume } : {}),
   };
 }
+
+/**
+ * The portal's own carry-on sentences, as they read before its record said whose line they were.
+ *
+ * A resume is recorded with `resume` (see `Item`) so the chat draws it as the portal speaking for
+ * the work; the chats that went through a compaction or a cut-off answer before that marker exists
+ * carry only the sentence, and left as it is they read as the person having said the same thing
+ * three times over — which is what a person reported as "a repeated message". Matched whole, on
+ * purpose: a Task's prompt that quotes the same sentence inside its own text is the person's
+ * message and stays one.
+ */
+const PORTAL_LINES: { text: string; resume: "compaction" | "cut-off" }[] = [
+  { text: "Compaction detected, resume where you left off if needed.", resume: "compaction" },
+  { text: "Carry on where you left off. Your last answer was cut off at the model's output limit, mid-sentence, not at the end of the work.", resume: "cut-off" },
+];
 
 /** Whether two values hold the same, however deep: what an entry is made of is strings, numbers and plain objects. */
 function sameValue(a: any, b: any, depth = 0): boolean {
@@ -292,6 +325,43 @@ export function keepItems(was: Item[], next: Item[]): Item[] {
     const old = before.get(item.id);
     return old && sameValue(old, item) ? old : item;
   });
+}
+
+/**
+ * The last thing the person said: the message the composer opens for editing and
+ * the one a retry sends again.
+ *
+ * Not one still waiting for the agent, not one that never got there, and not one
+ * of the portal's own lines carrying a turn on (`Item.resume`, see there). A
+ * carry-on of ours counted as the person's last words, a chat that stopped
+ * mid-answer reads as the person having asked the same sentence three times over
+ * — the shape the gunner chats ended in (aCSvv1KGQ9yf, GOsEdmK85mMO) — and ↑ in
+ * an empty box opens the portal's line for rewriting.
+ */
+export function lastSaid(items: Item[]): Item | undefined {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i];
+    if (it.kind === "user" && !it.queued && !it.unsent && !it.resume && (splitContext(it.text).text || it.images)) return it;
+  }
+  return undefined;
+}
+
+/**
+ * The latest message still waiting for the agent, which ↑ in an empty box takes
+ * back for editing and sending again.
+ *
+ * None of the portal's own carry-on lines (`Item.resume`, see there): taking one
+ * of those back puts the portal's sentence in the composer as your words, and
+ * sending it is the same line a second time — the repeated message the gunner
+ * chats ended in. The portal sends its carry-on where the run has ended and
+ * nothing is going; a person's own waiting message is what is meant here.
+ */
+export function lastWaiting(items: Item[]): Item | undefined {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i];
+    if (it.kind === "user" && it.queued && !it.resume) return it;
+  }
+  return undefined;
 }
 
 /**

@@ -1,4 +1,5 @@
 import { mkdirSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import { writeFileAtomic } from "./atomic-write.js";
 
@@ -9,9 +10,30 @@ import { writeFileAtomic } from "./atomic-write.js";
  * `default*` entries as the fallback for new sessions, so the path lives in one
  * place rather than being rebuilt at each call site.
  */
-export const piAgentDir = (): string =>
-  process.env.PI_CODING_AGENT_DIR?.trim() ||
-  path.join(process.env.HOME || "/data/home", ".pi", "agent");
+export const piAgentDir = (): string => {
+  // pi builds this from `os.homedir()`, and the portal's whole business with
+  // pi's file — its compaction numbers, its provider writes, its repair of the
+  // compaction switch — is worth nothing unless it lands on the file pi opens.
+  // `os.homedir()` is what answers that: on Linux (the portal's own container,
+  // where HOME is `/data/home`) it is HOME; on Windows it comes from
+  // USERPROFILE, which is where pi's CLI keeps its file.
+  //
+  // `process.env.HOME` alone is not that. A portal started from a Windows shell
+  // has no HOME, and fell back to `/data/home` — the container's home, read as a
+  // path on the current drive — so it read a file that does not exist (compaction
+  // as pi's defaults, every time) and wrote its own numbers where pi never looks,
+  // while pi's real file kept the state one chat's failed compaction left in it.
+  const fromEnv = process.env.PI_CODING_AGENT_DIR?.trim();
+  if (fromEnv) return fromEnv;
+  let home = "";
+  try {
+    home = homedir();
+  } catch {
+    // No answer at all (no HOME, no password entry, no USERPROFILE): the
+    // container's home, as before — a guess, and the only one left.
+  }
+  return path.join(home || process.env.HOME?.trim() || "/data/home", ".pi", "agent");
+};
 
 export const piSettingsPath = (): string => path.join(piAgentDir(), "settings.json");
 
@@ -52,23 +74,68 @@ export function piSetting(key: string): string | undefined {
 export interface CompactionSettings {
   enabled: boolean;
   keepRecentTokens: number;
+  reserveTokens: number;
+  /**
+   * pi's own per-model tuning, keyed "provider/model": a model given its own
+   * numbers uses them and the plain values above are left to every other model.
+   * This is the only compaction knob pi scopes to one model, which is why the
+   * portal's remedy for a chat whose summary cannot be written goes here.
+   */
+  modelOverrides: Record<string, CompactionModelSettings>;
+}
+
+/** What one model is given its own, in pi's `compaction.modelOverrides`. */
+export interface CompactionModelSettings {
+  keepRecentTokens?: number;
+  reserveTokens?: number;
 }
 
 /** pi's own defaults, repeated here so the UI can show what it is inheriting. */
 export const COMPACTION_DEFAULTS: CompactionSettings = {
   enabled: true,
   keepRecentTokens: 20_000,
+  reserveTokens: 16_384,
+  modelOverrides: {},
 };
+
+/** A token count pi would accept for itself, or undefined for anything else. */
+function tokenSetting(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
 
 export function readCompactionSettings(): CompactionSettings {
   const stored = readPiSettings().compaction;
   const c = stored && typeof stored === "object" ? (stored as Record<string, unknown>) : {};
+  const raw = c.modelOverrides && typeof c.modelOverrides === "object" ? (c.modelOverrides as Record<string, unknown>) : {};
+  const modelOverrides: Record<string, CompactionModelSettings> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (!value || typeof value !== "object") continue;
+    const entry = value as Record<string, unknown>;
+    const keep = tokenSetting(entry.keepRecentTokens);
+    const reserve = tokenSetting(entry.reserveTokens);
+    if (keep !== undefined) modelOverrides[key] = { ...(reserve !== undefined ? { reserveTokens: reserve } : {}), keepRecentTokens: keep };
+    else if (reserve !== undefined) modelOverrides[key] = { reserveTokens: reserve };
+  }
   return {
     enabled: c.enabled !== false,
-    keepRecentTokens:
-      typeof c.keepRecentTokens === "number" && c.keepRecentTokens > 0
-        ? c.keepRecentTokens
-        : COMPACTION_DEFAULTS.keepRecentTokens,
+    keepRecentTokens: tokenSetting(c.keepRecentTokens) ?? COMPACTION_DEFAULTS.keepRecentTokens,
+    reserveTokens: tokenSetting(c.reserveTokens) ?? COMPACTION_DEFAULTS.reserveTokens,
+    modelOverrides,
+  };
+}
+
+/**
+ * What a chat on this model compacts at: its own override when it has one,
+ * the plain setting for every other model. Same order pi resolves in.
+ */
+export function effectiveCompactionTokens(
+  settings: CompactionSettings,
+  modelKey?: string,
+): { keepRecentTokens: number; reserveTokens: number } {
+  const own = modelKey ? settings.modelOverrides[modelKey] : undefined;
+  return {
+    keepRecentTokens: own?.keepRecentTokens ?? settings.keepRecentTokens,
+    reserveTokens: own?.reserveTokens ?? settings.reserveTokens,
   };
 }
 
@@ -194,6 +261,37 @@ export async function writeCompactionSettings(
   await updatePiSettings((all) => {
     const current = all.compaction && typeof all.compaction === "object" ? all.compaction : {};
     all.compaction = { ...current, ...patch };
+  });
+  return readCompactionSettings();
+}
+
+/**
+ * One model's own compaction numbers, in pi's file, merged with what it has.
+ *
+ * pi scopes a compaction number to a model (`compaction.modelOverrides`), and
+ * nothing else in compaction: the switch is one switch for every chat, and the
+ * plain numbers are every chat's. So "this chat's summary needs more room" is
+ * said to pi in the only shape it has — the model's own number — and the chat
+ * that shares its model takes the same room, which is what the arithmetic
+ * needs anyway: it is the model's answer that has to write the summary.
+ *
+ * Only the fields given are written: a card that changes one number leaves the
+ * other as the model had it.
+ */
+export async function writeCompactionModelRoom(
+  modelKey: string,
+  patch: CompactionModelSettings,
+): Promise<CompactionSettings> {
+  await updatePiSettings((all) => {
+    const compaction = all.compaction && typeof all.compaction === "object" ? (all.compaction as Record<string, unknown>) : {};
+    const overrides = compaction.modelOverrides && typeof compaction.modelOverrides === "object"
+      ? (compaction.modelOverrides as Record<string, unknown>)
+      : {};
+    const entry = overrides[modelKey] && typeof overrides[modelKey] === "object"
+      ? (overrides[modelKey] as Record<string, unknown>)
+      : {};
+    overrides[modelKey] = { ...entry, ...patch };
+    all.compaction = { ...compaction, modelOverrides: overrides };
   });
   return readCompactionSettings();
 }
