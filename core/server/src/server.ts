@@ -2016,6 +2016,16 @@ void sessions
       console.log(`[portal] ${seeded.length} chat(s) had their compaction stopped before the portal kept records: recorded from what they were told, and explained in their own chats`);
   })
   .catch((e) => console.error(`[portal] could not take pi's compaction switch back: ${(e as Error).message}`));
+// The compaction numbers are arithmetic on a model's window and answer, so the portal does
+// not wait for a chat to hit the wall of its context before it notices: at its start it
+// sizes every model it has, in its own name, so the room reaches every chat at once rather
+// than only the one that complained. A person's numbers for a model are never written over.
+void sessions.sizeEveryModel()
+  .then((sized) => {
+    if (sized.models.length)
+      console.log(`[portal] sized the compaction of ${sized.models.length} model(s) the portal has, from each one's window and answer`);
+  })
+  .catch((e) => console.error(`[portal] could not size the compaction of the models it has: ${(e as Error).message}`));
 const server = (tls ? createHttpsServer(tls, app) : createHttpServer(app)).listen(
   PORT,
   host,

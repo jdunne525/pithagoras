@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { inProcessHome } from "./server-harness.mjs";
 
@@ -15,7 +15,7 @@ import { inProcessHome } from "./server-harness.mjs";
 const home = inProcessHome("pithagoras-compaction-gap-");
 mkdirSync(path.join(home, "work"), { recursive: true });
 
-const { createSession, COMPACT_STOP_NOTICE, COMPACT_STOP_NO_MODEL, appendEvent, chatsWithCompactionOffByChoice, chatModel, clearCompactionStops, compactionStopWasAnswered, compactionStops, eventsSince, getSession, getDb, noteCompactionChoice, setSingleActiveSession } = await import("../dist/db.js");
+const { createSession, COMPACT_STOP_NOTICE, COMPACT_STOP_NO_MODEL, appendEvent, chatsWithCompactionOffByChoice, chatModel, clearCompactionStops, compactionStopWasAnswered, compactionStops, eventsSince, getSession, getDb, noteCompactionChoice, setSingleActiveSession, noteCompactionPlan, compactionPlanFor, portalCompactionPlans } = await import("../dist/db.js");
 const { readCompactionSettings, writeCompactionSettings } = await import("../dist/pi-settings.js");
 const { SdkPiClient } = await import("../dist/pi/sdk-client.js");
 const { sessions, PromptQueuedForSingleActive } = await import("../dist/session-manager.js");
@@ -300,6 +300,76 @@ test("a run pi stops for a mid-turn compaction is carried on at its end", async 
     pi.settle();
     await flush();
     assert.deepEqual(pi.prompts, ["work on A", "Compaction detected, resume where you left off if needed."], "carried on once the run had ended");
+  } finally {
+    await reset();
+  }
+});
+
+// The same turn, from the other direction: the compaction is not pi's and not the
+// person's, it is the portal's — the ladder's attempt at a summary the chat's own
+// call could not write. pi stops the run for it exactly as it does for a manual
+// compaction, but the settled line for that run is emitted *before* the compact's
+// own start: the run reads over, and the chat reads idle, with the compaction still
+// to come. Detected from the events alone, the marker would be a beat late — the
+// Task watcher would settle the attempt on that idle and the queue would start a
+// brand-new session for the same Task — which is what six chats in a row on one
+// BlastRunHero brief did, each of them ending on a compaction that had worked.
+// The mark, then, is made where the portal starts its attempt.
+test("a compaction the portal runs for a chat is carried on when its run settles first", async () => {
+  try {
+    setSingleActiveSession(true);
+    const a = chat();
+    const b = chat();
+
+    await sessions.prompt(a, "work on A");
+    await flush();
+    const pi = pis.get(a);
+    assert.equal(sessions.inRun.has(a), true, "A is working");
+    await assert.rejects(sessions.prompt(b, "work on B"), PromptQueuedForSingleActive);
+    await flush();
+    assert.equal(sessions.singleActiveQueue.length, 1, "B waits its turn");
+
+    // pi's own attempt, at a turn boundary, with the summary it asked for stopping
+    // in the middle of its answer: the one shape the portal answers for.
+    pi.emit("event", { type: "compaction_start", reason: "threshold" });
+    pi.emit("event", { type: "compaction_end", ...COMPACT_FAILED });
+    assert.equal(
+      sessions.compactionInterruptedRun.has(a),
+      true,
+      "the portal's attempt marks the turn it will stop, before pi stops it",
+    );
+
+    // pi doing the portal's compact, as it does a manual one: the run it stops
+    // settles first, and only then does the compaction start and end.
+    pi.compact = async () => {
+      pi.emit("event", { type: "turn_end" });
+      pi.idle = true;
+      pi.emit("event", { type: "agent_settled", aborted: true });
+      assert.equal(getSession(a).status, "idle", "the aborted run marks the session idle");
+      assert.equal(sessions.isCompacting(a), true, "and the chat is not read as ended on it");
+      assert.equal(sessions.isActive(a), true, "and it still holds the room");
+      pi.emit("event", { type: "compaction_start", reason: "manual" });
+      pi.emit("event", { type: "compaction_end", reason: "manual", willRetry: false, result: { summary: "s" } });
+      assert.equal(sessions.compactionResumePending.has(a), true, "its end hands the turn to a resume");
+    };
+    await flush();
+    assert.equal(sessions.compactionResumePending.has(a), false, "the resume landed");
+    assert.deepEqual(
+      pi.prompts,
+      ["work on A", "Compaction detected, resume where you left off if needed."],
+      "the turn was carried on in the same chat, once the attempt had ended",
+    );
+    assert.match(
+      noticesOf(a).at(-1),
+      /That worked: the chat is compacted/,
+      "and the chat says what its compactor did just before it",
+    );
+    assert.equal(sessions.inRun.has(a), true, "the resumed run holds the room");
+    assert.deepEqual(started, [a], "B never took the room across the gap");
+
+    pi.settle();
+    await flush();
+    assert.deepEqual(started, [a, b], "only its own end hands the room over");
   } finally {
     await reset();
   }
@@ -638,4 +708,85 @@ test("a chat that reads pi's file off takes its compaction back, and the file it
   } finally {
     await reset();
   }
+});
+
+// What one chat's room costs the other chats. The numbers are arithmetic on a model's
+// window and answer, and both are on the model's row in pi's models file — the same file
+// Settings → Providers writes. So sizing is not something a chat has to ask for: the
+// portal sizes every model it has at its start, which is what reaches every chat at once
+// instead of only the one that hit the wall of its window and failed there. A pair of
+// plain numbers is not widened here, because one pair cannot be right for two windows —
+// which is why pi scopes the number to a model at all — and a person's numbers, plain or
+// for a model, are never written over.
+
+const piDir = () => path.join(home, "agent");
+/** The rows the portal has: a wide model that names its window and not its answer, as a
+    row added in Settings usually looks, a narrow one that names both, and one too small
+    for any room to fit in. `wideWindow` stands in for the row a person edits later. */
+const writeRows = (wideWindow) =>
+  writeFileSync(
+    path.join(piDir(), "models.json"),
+    JSON.stringify(
+      {
+        providers: {
+          testwide: { models: [{ id: "wide-1", contextWindow: wideWindow }] },
+          testmid: { models: [{ id: "mid-1", contextWindow: 32768, maxTokens: 8192 }] },
+          testtiny: { models: [{ id: "tiny-1", contextWindow: 8192 }] },
+        },
+      },
+      null,
+    ),
+  );
+
+test("every model the portal has is sized at its start, before a chat is asked", async () => {
+  mkdirSync(piDir(), { recursive: true });
+  writeRows(131072);
+  // The plain numbers are the person's, typed in the Settings card for every chat.
+  writeFileSync(path.join(piDir(), "settings.json"), JSON.stringify({ compaction: { enabled: true, keepRecentTokens: 30000, reserveTokens: 20000 } }, null));
+  const sized = await sessions.sizeEveryModel();
+  assert.deepEqual(
+    [...sized.models].sort(),
+    ["testmid/mid-1", "testwide/wide-1"],
+    "the models the portal has are sized; the one no room fits in is not asked for",
+  );
+  const settings = readCompactionSettings();
+  const wide = settings.modelOverrides?.["testwide/wide-1"];
+  const mid = settings.modelOverrides?.["testmid/mid-1"];
+  assert.ok(wide && mid, "each of them under its own name");
+  assert.ok(131072 - wide.reserveTokens <= 131072 * 0.9, "the wide one is asked for before the wall of its window, not at it");
+  assert.ok(wide.reserveTokens !== mid.reserveTokens && wide.keepRecentTokens !== mid.keepRecentTokens, "the numbers are each model's own, not one pair for both");
+  assert.ok(!settings.modelOverrides?.["testtiny/tiny-1"], "a model no room fits in is left as pi has it");
+  assert.equal(settings.keepRecentTokens, 30000, "the person's plain numbers stand for every chat");
+  assert.equal(settings.reserveTokens, 20000, "the person's plain numbers stand for every chat");
+});
+
+test("the portal's own sizing follows the row when the row changes", async () => {
+  const before = readCompactionSettings().modelOverrides?.["testwide/wide-1"];
+  assert.ok(before, "the wide one was sized with numbers");
+  assert.ok(compactionPlanFor("testwide/wide-1"), "as the portal's hand, on the books");
+  writeRows(200000);
+  const sized = await sessions.sizeEveryModel();
+  assert.ok(sized.models.includes("testwide/wide-1"), "a model the portal has sized is brought up to date");
+  const after = readCompactionSettings().modelOverrides?.["testwide/wide-1"];
+  assert.ok(after.reserveTokens !== before.reserveTokens, "the numbers follow the row, rather than being written once");
+  assert.ok(200000 - after.reserveTokens <= 200000 * 0.9, "at the new window, asked for before its wall too");
+});
+
+test("a person's numbers for one of the models stay their's, the others are sized", async () => {
+  const modelKey = "testwide/wide-1";
+  const theirs = { keepRecentTokens: 4000, reserveTokens: 4000 };
+  writeFileSync(
+    path.join(piDir(), "settings.json"),
+    JSON.stringify({ compaction: { enabled: true, keepRecentTokens: 30000, reserveTokens: 20000, modelOverrides: { [modelKey]: theirs } } }, null),
+  );
+  const sized = await sessions.sizeEveryModel();
+  assert.ok(!sized.models.includes(modelKey), "the model the person gave numbers is not sized");
+  assert.ok(sized.models.includes("testmid/mid-1"), "the model nobody gave numbers is");
+  const settings = readCompactionSettings();
+  assert.deepEqual(settings.modelOverrides?.[modelKey], theirs, "the person's numbers for that model are untouched");
+  // The portal's own earlier write is on the books; it does not pull the person's
+  // numbers back under its hand.
+  const again = await sessions.sizeEveryModel();
+  assert.ok(!again.models.includes(modelKey), "a record of the portal's earlier write does not size it again over what they typed");
+  assert.ok(portalCompactionPlans().includes("testmid/mid-1"), "what the portal sized is on the books, so it can tell its own write next time");
 });

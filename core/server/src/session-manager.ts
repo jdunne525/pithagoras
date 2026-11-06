@@ -112,9 +112,35 @@ import {
   noteCompactionStop,
   chatsWithCompactionOffByChoice,
   COMPACT_STOP_NOTICE,
+  clearCompactionStops,
   seedCompactionStopsFromNotices,
+  noteCompactionPlan,
+  compactionPlanFor,
+  portalCompactionPlans,
+  clearPortalCompactionPlans,
 } from "./db.js";
-import { readCompactionSettings, writeCompactionSettings } from "./pi-settings.js";
+import { readModelsJson } from "./providers.js";
+import {
+  readCompactionSettings,
+  writeCompactionSettings,
+  writeCompactionModelRoom,
+  eraseCompactionModelRooms,
+  effectiveCompactionTokens,
+  roomOwnership,
+  modelRoomMayBeSized,
+  COMPACTION_DEFAULTS,
+  type CompactionSettings,
+} from "./pi-settings.js";
+import {
+  COMPACT_SHORT_SUMMARY,
+  CONTEXT_AT_WALL_PERCENT,
+  planForModel,
+  planRoom,
+  summaryRanOutOfRoom,
+  PI_MODEL_ANSWER_DEFAULT,
+  PI_MODEL_WINDOW_DEFAULT,
+  type CompactionPlan,
+} from "./compaction-ladder.js";
 import { newChildChat, newPackageChat, type ChatAnswer, type ChildRun } from "./child-chats.js";
 
 /**
@@ -992,7 +1018,7 @@ class SessionManager extends EventEmitter {
    * showed nothing, and there was no Stop to press — a long compaction was
    * indistinguishable from a hung portal.
    */
-  async compact(sessionId: string): Promise<void> {
+  async compact(sessionId: string, instructions?: string): Promise<void> {
     // One at a time. A second request used to overwrite the tracked promise,
     // and whichever finished first then cleared it and published idle while
     // the other was still going — which is exactly the state prompt() checks
@@ -1009,7 +1035,7 @@ class SessionManager extends EventEmitter {
       // at the time, so it is honoured here instead of starting a compaction
       // that the user has already asked not to happen.
       if (this.cancelPending.delete(sessionId)) return;
-      await client.compact();
+      await client.compact(instructions);
     })();
     // Held so a Stop, and the next prompt, can wait for it — see abort().
     this.compacting.set(sessionId, run);
@@ -1047,6 +1073,12 @@ class SessionManager extends EventEmitter {
    * after it has failed twice in a row the attempts are stopped — see
    * `stopAutoCompaction` — instead of the chat quietly eating its time. A
    * compaction stopped by the person is not a failure.
+   *
+   * The one shape of failure with a remedy in numbers — the summary not fitting the answer
+   * the model has — is worked for first, by `giveCompactionRoom`, in the gap between the
+   * first failure and the second. Those attempts are the portal's, so they are not counted
+   * here: a ladder of three tries counted as three of the chat's would stop it for the
+   * portal's own attempt.
    */
   private noteCompactionFailure(sessionId: string, msg: any): void {
     // A compaction the person stopped is not a failure of the chat's.
@@ -1056,15 +1088,146 @@ class SessionManager extends EventEmitter {
       this.compactionFailures.delete(sessionId);
       return;
     }
+    // One of the portal's own attempts, which pi reports as a manual compaction: the ladder
+    // watches its own calls, and this is no failure of the chat's.
+    if (msg.reason === "manual" && this.compactionLadder.has(sessionId)) return;
     const why = compactionFailureText(msg.errorMessage);
     this.record(sessionId, "portal_notice", { text: `Auto-compaction failed: ${why}`, warning: true });
     const n = (this.compactionFailures.get(sessionId) ?? 0) + 1;
     if (n < 2) {
       this.compactionFailures.set(sessionId, n);
+      // The summary did not fit the answer: that is a shape with a remedy, and the remedy is
+      // numbers the portal can write. So they are tried for, before this chat is concluded
+      // to be one that cannot compact — see giveCompactionRoom.
+      if (summaryRanOutOfRoom(msg.errorMessage)) void this.giveCompactionRoom(sessionId);
       return;
     }
     this.compactionFailures.delete(sessionId);
     void this.stopAutoCompaction(sessionId, why);
+  }
+
+  /**
+   * Work the room, for a chat whose summary will not fit one answer.
+   *
+   * The two ends of the summarization call, cheapest first: what the model is asked to
+   * write, then the room it is given to write it in. See `compaction-ladder.ts` for the
+   * measurement this works from, and for the arithmetic behind the numbers it writes.
+   *
+   * It ends in one of three places: the chat compacted, the room arrived and the chat
+   * compacted with it, or there was nothing to give and the chat is left to its own count —
+   * the next failure of the same shape stops the attempts, as it always did. What it never
+   * does is decide the chat's compaction switch: that is the person's, and the count of the
+   * chat's own failures is untouched by these attempts.
+   */
+  private async giveCompactionRoom(sessionId: string): Promise<void> {
+    if (this.compactionLadder.has(sessionId)) return;
+    if (!this.live.has(sessionId)) return;
+    this.compactionLadder.add(sessionId);
+    // The compact() below is pi's own, and pi stops the run before it summarises:
+    // the turn that was going comes back to nobody. That is the case
+    // `compactionInterruptedRun` exists for, and it has to be marked here rather
+    // than where a compaction's start is read — pi's settled line for the run it
+    // aborted arrives *before* this compaction's own start does, so by the time
+    // that start is seen the run is over and the marker would be a beat late.
+    // Marked late or not at all, the idle the aborted run publishes reads as a
+    // finished chat: the Task watcher settles the attempt as failed and the queue
+    // launches a brand-new session that starts the Task again from nothing — which
+    // is what a chat whose compaction finally worked kept doing, six attempts in a
+    // row on one Task, each one starting the same brief over.
+    if (this.inRun.has(sessionId)) {
+      this.compactionInterruptedRun.add(sessionId);
+      // The idle before the resume lands is not a finished chat: the same
+      // suppression a compaction caught mid-turn asks for.
+      markCompactionResume(sessionId);
+    }
+    const worked = async (instructions?: string) => {
+      try {
+        await this.compact(sessionId, instructions);
+        return true;
+      } catch {
+        // The reason is pi's own sentence, which the chat hears from its compaction_end.
+        return false;
+      }
+    };
+    try {
+      const client = this.live.get(sessionId)?.client;
+      const state = await client?.getState?.().catch?.(() => undefined);
+      const window = Number(state?.model?.contextWindow);
+      const answer = Number(state?.model?.maxTokens);
+
+      // One: the same call, with the summary bounded in words and the model's own reasoning
+      // out of the answer's way. Reasoning is written from the same answer the summary is
+      // written in, and a model that thinks 4,000 tokens about a summary has 4,000 tokens
+      // less of it for the summary.
+      const thinking = String(state?.thinkingLevel ?? "");
+      this.record(sessionId, "portal_notice", {
+        text: `Auto-compaction asked for a summary longer than the model can write in one answer. Trying it once more with the summary asked for short — under 1,200 words, in bullets, with nothing quoted from the source it read${thinking && thinking !== "off" ? `, and thinking off for the attempt` : ""}.`,
+        warning: true,
+      });
+      if (thinking && thinking !== "off") await client?.setThinkingLevel?.("off").catch(() => {});
+      const short = await worked(COMPACT_SHORT_SUMMARY);
+      if (thinking && thinking !== "off") await client?.setThinkingLevel?.(thinking).catch(() => {});
+      if (short) {
+        this.compactionFailures.delete(sessionId);
+        this.record(sessionId, "portal_notice", { text: "That worked: the chat is compacted, and its compaction is left to run as it was." });
+        return;
+      }
+
+      // Two: the numbers this model's size asks for — its window, its answer, and the
+      // plan drawn from them. The chat is at the wall with them as they stand, so the
+      // plan is written as it computes them, in whichever direction that is: the chats
+      // that failed were keeping 90,000 of a 131,072 window verbatim, which is a head
+      // of 25,000 for a model with a 16,384-token answer, and the answer for that is a
+      // smaller keep-recent, not a bigger one.
+      const modelKey = await this.modelKeyOfClient(client);
+      const plan = Number.isFinite(window) && Number.isFinite(answer) ? planForModel({ contextWindow: window, maxTokens: answer }) : null;
+      if (!plan) {
+        this.record(sessionId, "portal_notice", {
+          text: `That did not work, and ${modelKey || "this chat's model"} has no compaction numbers that would: a summary of what its window leaves to write about is longer than one of its answers, so a compaction here costs a model call and takes no tokens out. What is left to make is the answer itself, or the window: Max output tokens and the context window on its row in Settings → Providers.`,
+          warning: true,
+        });
+        return;
+      }
+      const room = planRoom(plan);
+      const own = effectiveCompactionTokens(readCompactionSettings(), modelKey);
+      const changed = own.keepRecentTokens !== room.keepRecentTokens || own.reserveTokens !== room.reserveTokens;
+      if (changed) {
+        await writeCompactionModelRoom(modelKey, room);
+        noteCompactionPlan(modelKey, room);
+        await client?.refreshSettings?.().catch(() => {});
+      }
+      // The same numbers answer every chat the portal stopped on this model, and they are
+      // switched back where they are open — the same act the person's Context card does.
+      const answered = clearCompactionStops(modelKey ? { modelKey } : {});
+      void this.resumeStoppedCompaction(answered, modelKey);
+      this.record(sessionId, "portal_notice", {
+        text: `Giving ${modelKey || "this chat's model"} the compaction its own size asks for: keep-recent ${tokensOf(room.keepRecentTokens)}, keep-free ${tokensOf(room.reserveTokens)} — it compacts above ${tokensOf(plan.triggersAtTokens)} (${plan.triggersAtPercent}% of its ${tokensOf(window)} window), writes ${tokensOf(plan.headTokens)} of conversation into one summary, and a summary that works leaves it at ${tokensOf(plan.landsAtTokens)}.${answered.length ? ` That is the room ${answered.length === 1 ? `chat ${answered[0]}` : `${answered.length} chats`} the portal stopped earlier was waiting for.` : ""} Trying it again.`,
+        warning: true,
+      });
+      if (await worked()) {
+        this.compactionFailures.delete(sessionId);
+        this.record(sessionId, "portal_notice", { text: "That worked: the chat is compacted, and its compaction is left to run as it was." });
+        return;
+      }
+      this.record(sessionId, "portal_notice", {
+        text: "That did not work either. The chat keeps making its own attempts; the next one that fails for the same reason stops them, and says so here.",
+        warning: true,
+      });
+    } finally {
+      this.compactionLadder.delete(sessionId);
+      // A marker no compaction_end handed over: the attempt was stopped on the way
+      // out, or never reported, so nothing is coming for this turn and the room it
+      // was held for stops being held here.
+      this.compactionInterruptedRun.delete(sessionId);
+      // Where a compaction did take the turn and hand it on, the run had already
+      // settled by the time its end came — pi stops the run before it summarises —
+      // so the settle found no marker to schedule a resume at. With the attempts
+      // over, that is what is left to do; the line is the one a mid-turn
+      // compaction's end sends, and its own guards say whether anything is still
+      // in hand. Unsaid, the chat sits idle with its turn in nobody's hands and
+      // the Task it was working is settled as failed beside work that was not lost.
+      if (this.compactionResumePending.has(sessionId)) this.scheduleResumeAfterCompaction(sessionId);
+    }
   }
 
   /**
@@ -1125,6 +1288,162 @@ class SessionManager extends EventEmitter {
     const provider = state?.model?.provider;
     const id = state?.model?.id;
     return provider && id ? `${provider}/${id}` : "";
+  }
+
+  /**
+   * The compaction room for every model the portal has — the arithmetic
+   * `applyCompactionPlan` does for one chat's model, done for all of them at the
+   * portal's start.
+   *
+   * Waiting for a chat to reach the wall of its context before sizing its model
+   * asks the wrong thing of pi's defaults: they are one pair of numbers, read for
+   * whatever window a chat happens to be on, and on the window the chats on this
+   * machine run on that pair is a compaction at 87% of the window and a head
+   * bigger than one of its answers — the compaction that cannot finish, and the
+   * chat working at 91% with nothing compacted. Nothing about a model's size needs
+   * a chat: the window and the answer are on its row, in `models.json`, the same
+   * file Settings → Providers writes. So the portal sizes every model it has,
+   * under its own name, before any chat is asked to hit the wall — which is what
+   * reaches every chat in the portal at once, rather than the one that complained.
+   *
+   * A pair of plain numbers is not widened here: one pair cannot be right for two
+   * windows, which is why pi scopes the number to a model at all. What is left
+   * alone is the same question as everywhere else — a person's number for that
+   * model, or one they took back from its card, is never written over (see
+   * `modelRoomMayBeSized`). Their plain numbers are the fallback for a model
+   * nobody has, and they stay their words: a model this file does not name is
+   * sized at a chat's start only where nobody has tuned the plain numbers (see
+   * `roomOwnership`). Says what it sized, so the start can say it too.
+   */
+  async sizeEveryModel(): Promise<{ models: string[] }> {
+    const providers = (readModelsJson().providers ?? {}) as Record<string, unknown>;
+    const sized: string[] = [];
+    for (const [providerId, entry] of Object.entries(providers)) {
+      const table = entry && typeof entry === "object" ? (entry as Record<string, unknown>) : null;
+      const list = table && Array.isArray(table.models) ? (table.models as unknown[]) : [];
+      for (const listed of list) {
+        const model = listed && typeof listed === "object" ? (listed as Record<string, unknown>) : null;
+        const id = model && typeof model.id === "string" ? model.id.trim() : "";
+        if (!id || !providerId.trim()) continue;
+        const modelKey = `${providerId}/${id}`;
+        // A row that names no size is sized as pi reads it: its own defaults for a
+        // model that says nothing (see `PI_MODEL_WINDOW_DEFAULT` and friends).
+        const window = Number(model?.contextWindow ?? PI_MODEL_WINDOW_DEFAULT);
+        const answer = Number(model?.maxTokens ?? PI_MODEL_ANSWER_DEFAULT);
+        const plan = planForModel({ contextWindow: window, maxTokens: answer });
+        if (!plan) continue;
+        const room = planRoom(plan);
+        const settings = readCompactionSettings();
+        if (!modelRoomMayBeSized(settings, modelKey, compactionPlanFor(modelKey))) continue;
+        const own = effectiveCompactionTokens(settings, modelKey);
+        if (own.keepRecentTokens !== room.keepRecentTokens || own.reserveTokens !== room.reserveTokens) {
+          await writeCompactionModelRoom(modelKey, room);
+          noteCompactionPlan(modelKey, room);
+        }
+        sized.push(modelKey);
+      }
+    }
+    return { models: sized };
+  }
+
+  /**
+   * Size this chat's model's compaction from the model, so the chat compacts when it
+   * should and not at the wall of its context.
+   *
+   * pi compacts a chat above `contextWindow − compaction.reserveTokens`, and summarizes
+   * everything above `compaction.keepRecentTokens`: two numbers, pi's defaults being
+   * 16,384 and 20,000 for every model whatever its size. On the 131,072-token model
+   * these chats run on that is a compaction at 87% of the window, and a head of 95,000
+   * tokens handed to a model with a 16,384-token answer — which is the compaction that
+   * cannot finish, and the chat working at 91% of its window with nothing compacted.
+   * `compaction-ladder.ts` has the measurements, and the numbers they ask for.
+   *
+   * Written as the model's own numbers, because pi scopes compaction to a model and not
+   * to a chat, and it is the model's answer that has to write the summary. So every chat
+   * on this model compacts at the same point, which is what the arithmetic needs.
+   *
+   * Only where the numbers are nobody's: see `roomOwnership`. A person who has tuned the
+   * plain numbers, or given this model numbers of their own, is answered by the portal's
+   * plan only as a line saying what the numbers would be (`handleContextAtWall`), never
+   * as a write over what they typed.
+   */
+  async applyCompactionPlan(sessionId: string, client?: PiClient): Promise<CompactionPlan | null> {
+    const live = client ?? this.live.get(sessionId)?.client;
+    if (!live) return null;
+    const modelKey = await this.modelKeyOfClient(live).catch(() => "");
+    // A chat whose pi cannot name its model has no key to be sized under: pi reads the
+    // plain numbers for it, and the plain numbers are the person's to set.
+    if (!modelKey) return null;
+    const state = await live.getState?.().catch?.(() => undefined);
+    const window = Number(state?.model?.contextWindow);
+    const answer = Number(state?.model?.maxTokens);
+    const plan = planForModel({ contextWindow: window, maxTokens: answer });
+    // Nothing known about this model's size, or a model so small that a compaction takes
+    // no tokens out of it: the portal writes no numbers, and says nothing about them.
+    if (!plan) return null;
+    const room = planRoom(plan);
+    const settings = readCompactionSettings();
+    if (roomOwnership(settings, modelKey, compactionPlanFor(modelKey)) !== "plan") return null;
+    const own = effectiveCompactionTokens(settings, modelKey);
+    if (own.keepRecentTokens === room.keepRecentTokens && own.reserveTokens === room.reserveTokens) return plan;
+    await writeCompactionModelRoom(modelKey, room);
+    noteCompactionPlan(modelKey, room);
+    // pi reads its settings file at its start and on a reload; this chat has just started,
+    // so the numbers are in its hands before its first turn, not after it.
+    await live.refreshSettings?.().catch(() => {});
+    if (!this.compactionPlanSaid.has(modelKey)) {
+      this.compactionPlanSaid.add(modelKey);
+      this.record(sessionId, "portal_notice", {
+        text: `This chat's compaction is sized from ${modelKey}: keep-recent ${tokensOf(room.keepRecentTokens)}, keep-free ${tokensOf(room.reserveTokens)} — it compacts above ${tokensOf(plan.triggersAtTokens)} (${plan.triggersAtPercent}% of its ${tokensOf(window)}-token window), writes ${tokensOf(plan.headTokens)} of conversation into one summary, and a summary that works leaves it at ${tokensOf(plan.landsAtTokens)}, with ${tokensOf(plan.progressTokens)} of work before the next one. Change either number in this chat's Context card and the portal leaves them yours.`,
+      });
+    }
+    return plan;
+  }
+
+  /**
+   * A run that ends with the chat at the wall of its context, said in the chat.
+   *
+   * The question behind this is "why were we still working with the context at 91%?": a
+   * chat that settles there has a compaction behind it that did not land and one ahead of
+   * it that will not, and nothing in its transcript says so — the person sees a chat that
+   * is slow, answers in a token of thinking, and stops. So the line names the share, the
+   * numbers the chat is compacting on, and whose they are; where the portal owns the
+   * numbers it does not stop at saying, it sizes the model (see `applyCompactionPlan`),
+   * and the line is the sizing's own.
+   */
+  private async handleContextAtWall(sessionId: string, client: PiClient): Promise<void> {
+    const stats = await client.getStats?.().catch?.(() => undefined);
+    const percent = stats?.contextUsage?.percent;
+    const window = Number(stats?.contextUsage?.contextWindow);
+    if (typeof percent !== "number" || !Number.isFinite(percent)) return;
+    if (percent < CONTEXT_AT_WALL_PERCENT) {
+      this.contextWallSaid.delete(sessionId);
+      return;
+    }
+    const said = this.contextWallSaid.get(sessionId);
+    if (said !== undefined && percent < said + 5) return;
+    this.contextWallSaid.set(sessionId, percent);
+
+    const modelKey = await this.modelKeyOfClient(client).catch(() => "");
+    const state = await client.getState?.().catch?.(() => undefined);
+    const answer = Number(state?.model?.maxTokens);
+    const plan = planForModel({ contextWindow: window, maxTokens: answer });
+    const planNames = plan
+      ? `keep-recent ${tokensOf(plan.keepRecentTokens)}, keep-free ${tokensOf(plan.reserveTokens)}: it compacts above ${tokensOf(plan.triggersAtTokens)} (${plan.triggersAtPercent}% of the window), writes ${tokensOf(plan.headTokens)} into one summary, and lands at ${tokensOf(plan.landsAtTokens)}`
+      : "";
+
+    // The numbers are nobody's, and the chat is at the wall on them: that is the state
+    // the sizing exists for, and the sizing says its own line in this chat.
+    if (plan && modelKey && roomOwnership(readCompactionSettings(), modelKey, compactionPlanFor(modelKey)) === "plan") {
+      const sized = await this.applyCompactionPlan(sessionId, client).catch(() => null);
+      if (sized) return;
+    }
+    this.record(sessionId, "portal_notice", {
+      text: plan
+        ? `This chat ends its run at ${Math.round(percent)}% of ${modelKey || "its model"}'s ${tokensOf(window)}-token window, compacting on keep-recent ${tokensOf(effectiveCompactionTokens(readCompactionSettings(), modelKey).keepRecentTokens)} and keep-free ${tokensOf(effectiveCompactionTokens(readCompactionSettings(), modelKey).reserveTokens)} — that leaves it a head bigger than one of its answers can write, which is why it is working here with nothing compacted. The numbers that fit this model are ${planNames}. They are yours to type in this chat's Context card.`
+        : `This chat ends its run at ${Math.round(percent)}% of ${modelKey || "its model"}'s ${tokensOf(window)}-token window. No compaction numbers fit this model as it is set: a summary of what its window leaves to write about is longer than one of its answers. Max output tokens, and the context window, are on its row in Settings → Providers.`,
+      warning: true,
+    });
   }
 
   /**
@@ -1408,7 +1727,7 @@ class SessionManager extends EventEmitter {
       const client = clients.get(id);
       if (!client) continue;
       try {
-        const state = await client.getState?.().catch(() => undefined);
+        const state = await client.getState?.().catch?.(() => undefined);
         const said = state?.autoCompactionEnabled;
         if (off.has(id)) {
           // A chat whose pi already has it off needs no write: its off stands, and the
@@ -1567,6 +1886,36 @@ class SessionManager extends EventEmitter {
    * See noteCompactionFailure.
    */
   private compactionFailures = new Map<string, number>();
+
+  /**
+   * The chat a compaction ladder of the portal's is working through, see `giveCompactionRoom`.
+   *
+   * Its attempts are manual compactions, so they arrive as pi's own compaction events, and
+   * counted they are failures: three tries of the portal's would read as three of the
+   * chat's and stop it for the portal's own attempt. The ladder watches the outcome of its
+   * own calls, and these events are its business alone.
+   */
+  private compactionLadder = new Set<string>();
+
+  /**
+   * The models whose compaction the portal has sized this run, and said in a chat.
+   *
+   * The sizing is one model's numbers, so it is one act for every chat that opens on
+   * that model: the write happens per chat (a chat only knows its own model), the line
+   * is said once, in the chat that asked for it. A chat of the same model opening after
+   * it finds the numbers already in pi's file and writes nothing.
+   */
+  private compactionPlanSaid = new Set<string>();
+
+  /**
+   * How full a chat's context was when the portal last said "at the wall" in it.
+   *
+   * Said on the crossing, and again if it climbs further: a chat that settles at 91%
+   * of its window every run for a day is one line, not forty, and a chat that goes on
+   * to 96% has a new fact. Reset when it drops back under the wall, so the next time
+   * it climbs there is a crossing again.
+   */
+  private contextWallSaid = new Map<string, number>();
 
   /**
    * The stopReason the last assistant message pi wrote into a session ended on.
@@ -1937,6 +2286,13 @@ class SessionManager extends EventEmitter {
     // run's own steps, and a chat opened while its run is in flight waits on the answer.
     void this.honorCompactionOffs({ ids: [sessionId], clients: new Map([[sessionId, client]]) });
 
+    // A chat of a model nobody has tuned starts on the compaction its model's size asks
+    // for, not on pi's defaults for every model: the numbers decide where pi compacts,
+    // and pi's defaults (16,384 free of a 131,072 window) put that at 87% of the window,
+    // with a head no single answer of this model can write up. Said once per model, in
+    // the chat that opened first on it. See applyCompactionPlan.
+    void this.applyCompactionPlan(sessionId, client);
+
     // What this session registered, written down as soon as it exists. The
     // settings page offers a default per tool, and needing to open a chat
     // before you can say "off everywhere" would be the wrong way round.
@@ -2166,6 +2522,11 @@ class SessionManager extends EventEmitter {
         this.singleActiveClaiming.delete(sessionId);
         this.settleWaiting(sessionId);
         if (!this.failed.delete(sessionId)) this.mark(sessionId, "idle");
+        // The run is over, and this is the moment the portal can see how full the chat's
+        // context is: a chat that ends a run at 91% of its window has a compaction behind
+        // it that did not land. Said in the chat, and sized there where the numbers are
+        // the portal's to size. See handleContextAtWall.
+        void this.handleContextAtWall(sessionId, client);
         // A run ends here — no retry, no compaction left to land, no carry-on
         // to follow — so under the single-active setting the room may pass to
         // the next request waiting its turn. The exception is a compaction that
