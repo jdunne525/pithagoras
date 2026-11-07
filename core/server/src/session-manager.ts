@@ -116,7 +116,6 @@ import {
   seedCompactionStopsFromNotices,
   noteCompactionPlan,
   compactionPlanFor,
-  portalCompactionPlans,
 } from "./db.js";
 import { readModelsJson } from "./providers.js";
 import {
@@ -126,8 +125,6 @@ import {
   effectiveCompactionTokens,
   roomOwnership,
   modelRoomMayBeSized,
-  COMPACTION_DEFAULTS,
-  type CompactionSettings,
 } from "./pi-settings.js";
 import {
   COMPACT_SHORT_SUMMARY,
