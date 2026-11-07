@@ -117,14 +117,12 @@ import {
   noteCompactionPlan,
   compactionPlanFor,
   portalCompactionPlans,
-  clearPortalCompactionPlans,
 } from "./db.js";
 import { readModelsJson } from "./providers.js";
 import {
   readCompactionSettings,
   writeCompactionSettings,
   writeCompactionModelRoom,
-  eraseCompactionModelRooms,
   effectiveCompactionTokens,
   roomOwnership,
   modelRoomMayBeSized,
@@ -136,6 +134,8 @@ import {
   CONTEXT_AT_WALL_PERCENT,
   planForModel,
   planRoom,
+  roomShapeFor,
+  roomFaultFor,
   summaryRanOutOfRoom,
   PI_MODEL_ANSWER_DEFAULT,
   PI_MODEL_WINDOW_DEFAULT,
@@ -1313,11 +1313,15 @@ class SessionManager extends EventEmitter {
    * `modelRoomMayBeSized`). Their plain numbers are the fallback for a model
    * nobody has, and they stay their words: a model this file does not name is
    * sized at a chat's start only where nobody has tuned the plain numbers (see
-   * `roomOwnership`). Says what it sized, so the start can say it too.
+   * `roomOwnership`). Says what it sized, and what cannot work, so the start can
+   * say it too: the second half is the question "is this configuration going to
+   * compact anything at all", which a person's own pair of numbers answers before a
+   * chat has spent a run at the wall of its context finding out.
    */
-  async sizeEveryModel(): Promise<{ models: string[] }> {
+  async sizeEveryModel(): Promise<{ models: string[]; faults: string[] }> {
     const providers = (readModelsJson().providers ?? {}) as Record<string, unknown>;
     const sized: string[] = [];
+    const faults: string[] = [];
     for (const [providerId, entry] of Object.entries(providers)) {
       const table = entry && typeof entry === "object" ? (entry as Record<string, unknown>) : null;
       const list = table && Array.isArray(table.models) ? (table.models as unknown[]) : [];
@@ -1334,16 +1338,43 @@ class SessionManager extends EventEmitter {
         if (!plan) continue;
         const room = planRoom(plan);
         const settings = readCompactionSettings();
-        if (!modelRoomMayBeSized(settings, modelKey, compactionPlanFor(modelKey))) continue;
-        const own = effectiveCompactionTokens(settings, modelKey);
-        if (own.keepRecentTokens !== room.keepRecentTokens || own.reserveTokens !== room.reserveTokens) {
-          await writeCompactionModelRoom(modelKey, room);
-          noteCompactionPlan(modelKey, room);
+        if (modelRoomMayBeSized(settings, modelKey, compactionPlanFor(modelKey))) {
+          const own = effectiveCompactionTokens(settings, modelKey);
+          if (own.keepRecentTokens !== room.keepRecentTokens || own.reserveTokens !== room.reserveTokens) {
+            await writeCompactionModelRoom(modelKey, room);
+            noteCompactionPlan(modelKey, room);
+          }
+          sized.push(modelKey);
         }
-        sized.push(modelKey);
+        // What a chat on this model will actually compact on, once the write is in:
+        // a person's numbers for the model are left alone, and a pair that cannot
+        // work on this window is worth naming here rather than in a chat that has
+        // already lost a run at the wall of its context.
+        const fault = this.describeRoomFault(
+          `The compaction of ${modelKey}`,
+          modelKey,
+          { contextWindow: window, maxTokens: answer },
+          effectiveCompactionTokens(readCompactionSettings(), modelKey),
+        );
+        if (fault) faults.push(fault);
       }
     }
-    return { models: sized };
+    // The pair every chat inherits is what a chat on a model this file does not name
+    // reads, and there is no row to size it from: pi's own defaults for a model that
+    // says nothing about itself are the only window such a chat can be read against,
+    // so the plain pair is checked against that.
+    const plain = readCompactionSettings();
+    const plainFault = this.describeRoomFault(
+      "The plain numbers every chat inherits",
+      "",
+      { contextWindow: PI_MODEL_WINDOW_DEFAULT, maxTokens: PI_MODEL_ANSWER_DEFAULT },
+      {
+        keepRecentTokens: plain.keepRecentTokens,
+        reserveTokens: plain.reserveTokens,
+      },
+    );
+    if (plainFault) faults.push(plainFault);
+    return { models: sized, faults };
   }
 
   /**
@@ -1362,10 +1393,15 @@ class SessionManager extends EventEmitter {
    * to a chat, and it is the model's answer that has to write the summary. So every chat
    * on this model compacts at the same point, which is what the arithmetic needs.
    *
-   * Only where the numbers are nobody's: see `roomOwnership`. A person who has tuned the
-   * plain numbers, or given this model numbers of their own, is answered by the portal's
-   * plan only as a line saying what the numbers would be (`handleContextAtWall`), never
-   * as a write over what they typed.
+   * Only where the numbers may be the portal's at all: see `modelRoomMayBeSized`.
+   * A person who gave this model numbers of their own, or who took the portal's off
+   * its card, is answered by the portal's plan only as a line saying what the numbers
+   * would be (`handleContextAtWall`), never as a write over what they typed. Their
+   * plain numbers are different: one pair is read for whatever window a chat happens
+   * to be on, so it cannot be right for the model in hand — the model's own numbers
+   * are put beside them, in the model's own name, and their plain pair stays the
+   * fallback for a model the portal does not have. Nothing is said here either way:
+   * see the notice at the wall, and `warnCompactionRoom`.
    */
   async applyCompactionPlan(sessionId: string, client?: PiClient): Promise<CompactionPlan | null> {
     const live = client ?? this.live.get(sessionId)?.client;
@@ -1383,7 +1419,7 @@ class SessionManager extends EventEmitter {
     if (!plan) return null;
     const room = planRoom(plan);
     const settings = readCompactionSettings();
-    if (roomOwnership(settings, modelKey, compactionPlanFor(modelKey)) !== "plan") return null;
+    if (!modelRoomMayBeSized(settings, modelKey, compactionPlanFor(modelKey))) return null;
     const own = effectiveCompactionTokens(settings, modelKey);
     if (own.keepRecentTokens === room.keepRecentTokens && own.reserveTokens === room.reserveTokens) return plan;
     await writeCompactionModelRoom(modelKey, room);
@@ -1391,13 +1427,106 @@ class SessionManager extends EventEmitter {
     // pi reads its settings file at its start and on a reload; this chat has just started,
     // so the numbers are in its hands before its first turn, not after it.
     await live.refreshSettings?.().catch(() => {});
-    if (!this.compactionPlanSaid.has(modelKey)) {
-      this.compactionPlanSaid.add(modelKey);
-      this.record(sessionId, "portal_notice", {
-        text: `This chat's compaction is sized from ${modelKey}: keep-recent ${tokensOf(room.keepRecentTokens)}, keep-free ${tokensOf(room.reserveTokens)} — it compacts above ${tokensOf(plan.triggersAtTokens)} (${plan.triggersAtPercent}% of its ${tokensOf(window)}-token window), writes ${tokensOf(plan.headTokens)} of conversation into one summary, and a summary that works leaves it at ${tokensOf(plan.landsAtTokens)}, with ${tokensOf(plan.progressTokens)} of work before the next one. Change either number in this chat's Context card and the portal leaves them yours.`,
-      });
-    }
+    // Said nothing: a chat whose compaction works is silent about it. The numbers it
+    // runs on are in pi's file, under the model's name, and that is the whole answer —
+    // what a configuration does is read off the numbers in pi's file, and only a pair
+    // that cannot work is worth a line in the chat (see `warnCompactionRoom`), or the
+    // wall a run ended at (see `handleContextAtWall`).
     return plan;
+  }
+
+  /**
+   * The one thing wrong with a pair of compaction numbers, in the words a chat or a
+   * portal start can show.
+   *
+   * `roomShapeFor` says what a pair does, `roomFaultFor` says whether that is broken;
+   * this is the third half — the sentence, with the numbers it names written as
+   * thousands and the model named, and what to do about it. The five shapes each say
+   * what the chat ends up doing, which is the question a person asks when nothing was
+   * ever taken out: a configuration that does not work is not an error, pi does its
+   * job as told, and the only thing that can be noticed is what it leaves behind.
+   *
+   * `subject` is the noun the line is about — this chat's compaction, a model's, the
+   * plain numbers every chat inherits — and whose the numbers are says where they are
+   * changed, which is the other half a person needs: a pair of their own is never
+   * written over, so a line that could fix it silently is the wrong answer there.
+   */
+  private describeRoomFault(
+    subject: string,
+    modelKey: string,
+    size: { contextWindow: number; maxTokens: number },
+    room: { keepRecentTokens: number; reserveTokens: number },
+  ): string | null {
+    const shape = roomShapeFor(size, room);
+    const fault = roomFaultFor(shape);
+    if (!shape || !fault) return null;
+    const why = ({
+      "keeps-free-the-whole-window": `it keeps ${tokensOf(shape.reserveTokens)} free at the top of a ${tokensOf(shape.contextWindow)}-token window: a chat fills its context before pi asks for a compaction, which is where it stops with nothing compacted`,
+      "keeps-past-its-point": `it keeps ${tokensOf(shape.keepRecentTokens)} word for word of a ${tokensOf(shape.contextWindow)}-token window and asks for a compaction only above ${tokensOf(shape.triggersAtTokens)}: pi never reaches the point it would summarise from, so nothing is ever compacted`,
+      "compacts-at-the-wall": `it asks for a compaction only above ${tokensOf(shape.triggersAtTokens)} (${shape.triggersAtPercent}% of a ${tokensOf(shape.contextWindow)}-token window): a chat is at the wall of its context before that point, which is where it stops instead of being compacted`,
+      "head-too-small": `it leaves only ${tokensOf(shape.headTokens)} tokens of conversation to write about, and the document written about that is about as long: a compaction takes nothing out of the chat`,
+      "summary-wont-fit": `it leaves a head of ${tokensOf(shape.headTokens)} of conversation to write into one summary while this model's answer is ${tokensOf(shape.maxTokens)} tokens, and a head that big has been seen written up at ${tokensOf(shape.summaryWantedTokens)}: the summary does not fit one answer, so compaction stops in the middle and the chat keeps its whole context`,
+      "walks-to-the-cap": `a compaction that finishes leaves the chat at ${tokensOf(shape.landsAtTokens)} of its ${tokensOf(shape.contextWindow)} tokens and asks for the next one after ${tokensOf(shape.progressTokens)} of work: each summary is merged into the next, and it walks to the cap there`,
+    })[fault];
+    // A plan of this module's is offered only when it works: for a model whose answer is
+    // too small for any summary of a head that fits its window, the honest line is that
+    // no pair works, not a pair that is named as working and reported as broken below
+    // its own sentence.
+    const plan = planForModel(size);
+    const planWorks = plan && !roomFaultFor(roomShapeFor(size, planRoom(plan)));
+    const fit = planWorks
+      ? `The numbers that work for this model's size are keep-recent ${tokensOf(plan.keepRecentTokens)}, keep-free ${tokensOf(plan.reserveTokens)}: it compacts above ${tokensOf(plan.triggersAtTokens)} (${plan.triggersAtPercent}% of the window), writes ${tokensOf(plan.headTokens)} into one summary, and lands at ${tokensOf(plan.landsAtTokens)}.`
+      : `No pair works for a ${tokensOf(size.contextWindow)}-token window with a ${tokensOf(size.maxTokens)}-token answer: a summary of what its own size leaves to write about is longer than one answer.`;
+    const owner = roomOwnership(readCompactionSettings(), modelKey, compactionPlanFor(modelKey));
+    const where =
+      owner === "person-model"
+        ? `Those numbers are this model's own — this chat's Context card, or the model's row under Settings → Providers — and nothing the portal computes writes over them.`
+        : owner === "person-plain"
+          ? `They are the plain numbers every chat inherits; a model's own numbers — this chat's Context card, or the model's row under Settings → Providers — are what a window this big needs.`
+          : `The portal owns these numbers, so a pair that cannot work here means the model's row under Settings → Providers says a window or an answer that does not add up.`;
+    return `${subject} cannot work as configured: ${why}. ${fit} ${where}`;
+  }
+
+  /**
+   * A chat whose compaction cannot work says so at its start, before its first answer.
+   *
+   * `handleContextAtWall` says the same fact when a run ends with the context at 88% of
+   * the window — after the fact, and only after a run has been spent. The pair a chat
+   * compacts on is known before its first turn: the model's window and answer are on
+   * its row, or on what its pi reports, and which of the two numbers a chat reads is
+   * in pi's file. So the same arithmetic is read here, and said here, before a chat
+   * starts working with nothing that will ever be taken out of its context — and the
+   * case it exists for is a pair the portal will not fix by itself: a person's numbers,
+   * in the card or plain in pi's file, are theirs and nothing writes over them, so a
+   * chat running on a pair that cannot work would otherwise say nothing anywhere.
+   */
+  private async warnCompactionRoom(sessionId: string, client: PiClient): Promise<void> {
+    const state = await client.getState?.().catch?.(() => undefined);
+    // A chat whose pi cannot say its model's size has nothing to be read against:
+    // the numbers it runs on may belong to any window, and a line about a pair being
+    // wrong for a 128,000-token one would be a guess. (A model whose *row* says
+    // nothing is not this case: pi reads its own defaults for it, and the portal
+    // sizes such a row at its start — see `sizeEveryModel` and `PI_MODEL_WINDOW_DEFAULT`.)
+    const window = Number(state?.model?.contextWindow);
+    const answer = Number(state?.model?.maxTokens);
+    if (!Number.isFinite(window) || !Number.isFinite(answer)) return;
+    // A chat whose compaction is switched off has its own line, naming the room that
+    // answers it; a second one about numbers it is not using is one too many.
+    if (!readCompactionSettings().enabled) return;
+    const modelKey = await this.modelKeyOfClient(client).catch(() => "");
+    const text = this.describeRoomFault(
+      "This chat's compaction",
+      modelKey,
+      { contextWindow: window, maxTokens: answer },
+      effectiveCompactionTokens(readCompactionSettings(), modelKey),
+    );
+    if (!text) return;
+    // One line per model, not per chat: the numbers are the model's, and forty chats
+    // on one model would otherwise say the same thing forty times.
+    const said = modelKey || sessionId;
+    if (this.compactionRoomSaid.has(said)) return;
+    this.compactionRoomSaid.add(said);
+    this.record(sessionId, "portal_notice", { text, warning: true });
   }
 
   /**
@@ -1438,9 +1567,13 @@ class SessionManager extends EventEmitter {
       const sized = await this.applyCompactionPlan(sessionId, client).catch(() => null);
       if (sized) return;
     }
+    const where =
+      plan && modelKey && roomOwnership(readCompactionSettings(), modelKey, compactionPlanFor(modelKey)) === "person-plain"
+        ? `The portal has put this model's own numbers beside your plain pair, and the chat is compacting on those; your plain numbers are unchanged, and they stand for a model the portal does not have. Type either of the model's in this chat's Context card and the portal leaves them yours.`
+        : `They are yours to type in this chat's Context card.`;
     this.record(sessionId, "portal_notice", {
       text: plan
-        ? `This chat ends its run at ${Math.round(percent)}% of ${modelKey || "its model"}'s ${tokensOf(window)}-token window, compacting on keep-recent ${tokensOf(effectiveCompactionTokens(readCompactionSettings(), modelKey).keepRecentTokens)} and keep-free ${tokensOf(effectiveCompactionTokens(readCompactionSettings(), modelKey).reserveTokens)} — that leaves it a head bigger than one of its answers can write, which is why it is working here with nothing compacted. The numbers that fit this model are ${planNames}. They are yours to type in this chat's Context card.`
+        ? `This chat ends its run at ${Math.round(percent)}% of ${modelKey || "its model"}'s ${tokensOf(window)}-token window, compacting on keep-recent ${tokensOf(effectiveCompactionTokens(readCompactionSettings(), modelKey).keepRecentTokens)} and keep-free ${tokensOf(effectiveCompactionTokens(readCompactionSettings(), modelKey).reserveTokens)} — that leaves it a head bigger than one of its answers can write, which is why it is working here with nothing compacted. The numbers that fit this model are ${planNames}. ${where}`
         : `This chat ends its run at ${Math.round(percent)}% of ${modelKey || "its model"}'s ${tokensOf(window)}-token window. No compaction numbers fit this model as it is set: a summary of what its window leaves to write about is longer than one of its answers. Max output tokens, and the context window, are on its row in Settings → Providers.`,
       warning: true,
     });
@@ -1898,14 +2031,14 @@ class SessionManager extends EventEmitter {
   private compactionLadder = new Set<string>();
 
   /**
-   * The models whose compaction the portal has sized this run, and said in a chat.
+   * Which models the portal has said "these numbers cannot work" about.
    *
-   * The sizing is one model's numbers, so it is one act for every chat that opens on
-   * that model: the write happens per chat (a chat only knows its own model), the line
-   * is said once, in the chat that asked for it. A chat of the same model opening after
-   * it finds the numbers already in pi's file and writes nothing.
+   * One line per model, not per chat: the numbers are the model's, so the fact is one
+   * fact for every chat that opens on it, and forty chats on one model would otherwise
+   * say it forty times. A chat whose pi cannot name its model is only its own, and is
+   * keyed by the session.
    */
-  private compactionPlanSaid = new Set<string>();
+  private compactionRoomSaid = new Set<string>();
 
   /**
    * How full a chat's context was when the portal last said "at the wall" in it.
@@ -2291,7 +2424,14 @@ class SessionManager extends EventEmitter {
     // and pi's defaults (16,384 free of a 131,072 window) put that at 87% of the window,
     // with a head no single answer of this model can write up. Said once per model, in
     // the chat that opened first on it. See applyCompactionPlan.
-    void this.applyCompactionPlan(sessionId, client);
+    //
+    // What cannot work at all is said after the sizing, not before it: when the portal
+    // owns the numbers it fixes them, and the fix says its own line; a chat left on
+    // numbers it cannot work on is the case that has no other line.
+    void this.applyCompactionPlan(sessionId, client)
+      .catch(() => null)
+      .then(() => this.warnCompactionRoom(sessionId, client))
+      .catch(() => {});
 
     // What this session registered, written down as soon as it exists. The
     // settings page offers a default per tool, and needing to open a chat

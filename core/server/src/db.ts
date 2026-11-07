@@ -2783,6 +2783,49 @@ export function chatsWithCompactionOffByChoice(): string[] {
     .map(([key]) => key.slice(prefix.length));
 }
 
+/**
+ * What the portal wrote into pi's file as one model's own compaction numbers.
+ *
+ * The portal sizes a model's compaction from that model's window and its answer, and
+ * it does so in the same two sliders the chat's Context card has: `compaction.modelOverrides["provider/model"]`,
+ * which every chat on that model reads. So "is this number the portal's, or a person's?"
+ * cannot be read out of pi's file — a person's 58,000 and the portal's 58,000 are the
+ * same bytes — and it is the question every later write turns on. The portal's own
+ * writes are what it can be sure of, so they are kept here: a model's numbers that
+ * match this record are the portal's and it may bring them up to date; numbers that do
+ * not match are a person's, and nothing the portal computes writes over them. A model
+ * with no row is a model the portal has never sized.
+ */
+const compactionPlanKey = (modelKey: string) => `compaction_plan:${modelKey}`;
+
+/** The portal wrote these two numbers for this model. */
+export function noteCompactionPlan(modelKey: string, room: { keepRecentTokens: number; reserveTokens: number }): void {
+  const key = modelKey.trim();
+  if (!key) return;
+  putSetting(compactionPlanKey(key), JSON.stringify(room));
+}
+
+/** What the portal wrote for this model, or nothing where it has never sized it. */
+export function compactionPlanFor(modelKey: string): { keepRecentTokens: number; reserveTokens: number } | undefined {
+  const raw = getSetting(compactionPlanKey(modelKey.trim()));
+  if (!raw) return undefined;
+  try {
+    const room = JSON.parse(raw) as { keepRecentTokens?: unknown; reserveTokens?: unknown };
+    const keep = room.keepRecentTokens;
+    const reserve = room.reserveTokens;
+    if (typeof keep !== "number" || typeof reserve !== "number" || !Number.isSafeInteger(keep) || !Number.isSafeInteger(reserve)) return undefined;
+    return { keepRecentTokens: keep, reserveTokens: reserve };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Every model the portal has sized, as pi keys it. */
+export function portalCompactionPlans(): string[] {
+  const prefix = compactionPlanKey("");
+  return Object.keys(settingValuesWithPrefix(prefix)).map((key) => key.slice(prefix.length));
+}
+
 /** Where reports go when a routine does not name a destination of its own. */
 export interface ReportTo {
   channel: string;

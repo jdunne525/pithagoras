@@ -1887,8 +1887,10 @@ export class SdkPiClient extends EventEmitter implements PiClient {
     this.session.setAutoRetryEnabled(enabled);
   }
 
-  async compact(): Promise<void> {
-    await this.session.compact();
+  async compact(customInstructions?: string): Promise<void> {
+    // pi's own prompt, plus what to focus on. An older pi, or one built without the
+    // argument, is left the plain call.
+    await this.session.compact(customInstructions?.trim() || undefined);
   }
 
   /** See PiClient.reloadDue. */

@@ -139,6 +139,88 @@ export function effectiveCompactionTokens(
   };
 }
 
+/** The two numbers, as one of them was written for one model. */
+export interface RoomPair {
+  keepRecentTokens: number;
+  reserveTokens: number;
+}
+
+/** Whose numbers a model is compacting on, and what the portal may do about them. */
+export type RoomOwner =
+  /** Nobody has tuned this model, or the numbers there are the portal's own: it may write them. */
+  | "plan"
+  /** The person gave this model these numbers in the card: they are theirs, and the portal's plan is only offered as a suggestion. */
+  | "person-model"
+  /** The person tuned the plain numbers every model inherits: the portal sizes nobody's model. */
+  | "person-plain"
+  /** The portal's numbers were taken off this model in the card: leaving them off is the person's doing. */
+  | "taken-back";
+
+/**
+ * Whose compaction numbers this model is running on.
+ *
+ * The portal sizes a model's compaction from the model's own window and answer (see
+ * `compaction-ladder.ts`), which is a write to pi's file like any other, and the card
+ * has the same two sliders. So writing needs a rule about whose number a number is:
+ *
+ *  - the model's own numbers, where they are what the portal wrote: the portal's, and
+ *    it may bring them up to date when the model's row changes (a window typed in,
+ *    Max output tokens raised);
+ *  - the model's own numbers, where they are not what the portal wrote: the person's,
+ *    and nothing the portal computes writes over them;
+ *  - the plain numbers, left at what pi itself gives every model: nobody has tuned
+ *    anything, and this model is the portal's to size;
+ *  - the plain numbers, tuned: the person has spoken for every chat, and a per-model
+ *    number of the portal's would sit over their words;
+ *  - the plain numbers, untouched, on a model the portal has sized and the person has
+ *    since cleared from the card: taking the portal's numbers off is a move on them,
+ *    so they stay off.
+ *
+ * `portalWrote` is the portal's own record of what it wrote for this model, which is
+ * the only way to tell its write from a person's write of the same two numbers.
+ */
+export function roomOwnership(
+  settings: CompactionSettings,
+  modelKey: string,
+  portalWrote?: RoomPair,
+): RoomOwner {
+  const own = settings.modelOverrides[modelKey];
+  if (own) {
+    const ours =
+      portalWrote !== undefined &&
+      (own.keepRecentTokens === undefined || own.keepRecentTokens === portalWrote.keepRecentTokens) &&
+      (own.reserveTokens === undefined || own.reserveTokens === portalWrote.reserveTokens);
+    if (ours) return "plan";
+    return "person-model";
+  }
+  const untouched =
+    settings.keepRecentTokens === COMPACTION_DEFAULTS.keepRecentTokens &&
+    settings.reserveTokens === COMPACTION_DEFAULTS.reserveTokens;
+  if (!untouched) return "person-plain";
+  return portalWrote ? "taken-back" : "plan";
+}
+
+/**
+ * Whether the portal may put its numbers on this model at all.
+ *
+ * `roomOwnership` answers the fuller question — whose numbers a chat is running on —
+ * and it lets a person's plain numbers, which are every chat's, stand for a model the
+ * portal has not sized. The question a pass over the models the portal has asks is
+ * narrower: one pair of plain numbers cannot be right for more than one model, since
+ * pi reads them for whatever window a chat happens to be on, so they stay as the
+ * fallback and a model the portal has is sized under its own name anyway. What is
+ * never written over is a number for that model: the person's, or one they took back
+ * from the card.
+ */
+export function modelRoomMayBeSized(
+  settings: CompactionSettings,
+  modelKey: string,
+  portalWrote?: RoomPair,
+): boolean {
+  const owner = roomOwnership(settings, modelKey, portalWrote);
+  return owner === "plan" || owner === "person-plain";
+}
+
 /**
  * The file as a change starts from it: none yet is empty, but one that is there
  * and cannot be read stops the change. Taken as empty, the save would write back

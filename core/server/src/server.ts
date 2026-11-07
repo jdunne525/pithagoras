@@ -2024,6 +2024,10 @@ void sessions.sizeEveryModel()
   .then((sized) => {
     if (sized.models.length)
       console.log(`[portal] sized the compaction of ${sized.models.length} model(s) the portal has, from each one's window and answer`);
+    // A configuration that does not work is said here, and not only in the chat that
+    // finds out at the wall: pi does its job as told, so nothing else reports that a
+    // compaction was asked for and nothing was ever taken out.
+    for (const fault of sized.faults) console.log(`[portal] a compaction that cannot work: ${fault}`);
   })
   .catch((e) => console.error(`[portal] could not size the compaction of the models it has: ${(e as Error).message}`));
 const server = (tls ? createHttpsServer(tls, app) : createHttpServer(app)).listen(

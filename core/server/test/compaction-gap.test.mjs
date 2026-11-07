@@ -16,7 +16,8 @@ const home = inProcessHome("pithagoras-compaction-gap-");
 mkdirSync(path.join(home, "work"), { recursive: true });
 
 const { createSession, COMPACT_STOP_NOTICE, COMPACT_STOP_NO_MODEL, appendEvent, chatsWithCompactionOffByChoice, chatModel, clearCompactionStops, compactionStopWasAnswered, compactionStops, eventsSince, getSession, getDb, noteCompactionChoice, setSingleActiveSession, noteCompactionPlan, compactionPlanFor, portalCompactionPlans } = await import("../dist/db.js");
-const { readCompactionSettings, writeCompactionSettings } = await import("../dist/pi-settings.js");
+const { readCompactionSettings, writeCompactionSettings, writeCompactionModelRoom } = await import("../dist/pi-settings.js");
+const { planForModel, planRoom, roomShapeFor, roomFaultFor } = await import("../dist/compaction-ladder.js");
 const { SdkPiClient } = await import("../dist/pi/sdk-client.js");
 const { sessions, PromptQueuedForSingleActive } = await import("../dist/session-manager.js");
 test.after(() => getDb().close());
@@ -42,7 +43,11 @@ class FakePi extends EventEmitter {
   async getState() {
     // A chat whose pi cannot say what it is running: a container's pi, an older one.
     if (noModel.has(this.sessionId)) return { model: { name: "M" }, thinkingLevel: "off", autoCompactionEnabled: this.autoCompaction };
-    return { model: { id: "m", name: "M", provider: "p", input: ["text"] }, thinkingLevel: "off", autoCompactionEnabled: this.autoCompaction };
+    return {
+      model: { id: "m", name: "M", provider: "p", input: ["text"], ...(knownSizes.get(this.sessionId) ?? {}) },
+      thinkingLevel: "off",
+      autoCompactionEnabled: this.autoCompaction,
+    };
   }
   async abort() {}
   /**
@@ -90,6 +95,8 @@ const started = [];
 const pis = new Map();
 /** Chats whose pi cannot name its model. */
 const noModel = new Set();
+/** What each chat's pi reports its model's window and answer to be, for the tests that read a model's size. */
+const knownSizes = new Map();
 SdkPiClient.create = async (opts) => {
   started.push(opts.sessionId);
   const pi = new FakePi(opts);
@@ -116,9 +123,12 @@ async function reset() {
   sessions.compactionInterruptedRun.clear();
   sessions.compactionResumePending.clear();
   sessions.compactionFailures.clear();
+  // Nor one test's line about a model whose numbers cannot work the next one's.
+  sessions.compactionRoomSaid.clear();
   sessions.singleActiveClaiming.clear();
   sessions.singleActiveQueue = [];
   noModel.clear();
+  knownSizes.clear();
   // One test's stopped chats are not the next one's record.
   clearCompactionStops({});
   // Nor is one test's own switch on compaction the next one's.
@@ -789,4 +799,99 @@ test("a person's numbers for one of the models stay their's, the others are size
   const again = await sessions.sizeEveryModel();
   assert.ok(!again.models.includes(modelKey), "a record of the portal's earlier write does not size it again over what they typed");
   assert.ok(portalCompactionPlans().includes("testmid/mid-1"), "what the portal sized is on the books, so it can tell its own write next time");
+});
+
+/* ── A compaction that does not compact is said; a compaction that works is silent. ── */
+
+test("the shapes of a compaction that cannot work are read off the numbers, and this module plan is not one of them", async () => {
+  const wide = { contextWindow: 131_072, maxTokens: 16_384 };
+  const read = (keep, free) => roomFaultFor(roomShapeFor(wide, { keepRecentTokens: keep, reserveTokens: free }));
+  // The pair the chats on this machine ran on, and the same pair typed the other way
+  // round: both hand the summariser a head no single answer of this model writes up.
+  assert.equal(read(20_000, 30_000), "summary-wont-fit", "the pair pi leaves a 131,072-token model on");
+  assert.equal(read(30_000, 20_000), "summary-wont-fit", "the same shape, with the two numbers typed the other way round");
+  assert.equal(read(1_000, 131_072), "keeps-free-the-whole-window", "it keeps free as much of the window as the window has: pi is asked only past the end of it");
+  assert.equal(read(130_100, 1_000), "keeps-past-its-point", "it keeps more word for word than it compacts above, so there is nothing to summarise");
+  assert.equal(read(129_500, 1_000), "head-too-small", "the head it leaves is smaller than the document written about it");
+  assert.equal(read(110_000, 20_000), "walks-to-the-cap", "a compaction that finishes leaves the chat where the next one is asked for");
+  assert.equal(read(58_072, 33_000), null, "the numbers this portal writes for a model this big are not read as broken");
+  for (const size of [{ contextWindow: 200_000, maxTokens: 16_384 }, { contextWindow: 32_768, maxTokens: 8_192 }]) {
+    const plan = planForModel(size);
+    assert.ok(plan, "a model this module can size has a plan");
+    assert.equal(roomFaultFor(roomShapeFor(size, planRoom(plan))), null, "and its plan is never read as one of the shapes that cannot work");
+  }
+  assert.equal(planForModel({ contextWindow: 8_192, maxTokens: 4_096 }), null, "a model with no room that fits has no plan at all, and nothing is claimed about it");
+});
+
+/** The rows of a model whose numbers cannot work, and of one that is left to the portal. */
+const brokenRows = () =>
+  writeFileSync(
+    path.join(piDir(), "models.json"),
+    JSON.stringify(
+      {
+        providers: {
+          testbroken: { models: [{ id: "wide-1", contextWindow: 131_072 }, { id: "ok-1", contextWindow: 100_000 }] },
+        },
+      },
+      null,
+    ),
+  );
+
+test("a model that cannot compact is named at the portal start, with the numbers that would work", async () => {
+  brokenRows();
+  // A person has set one of these models to keep almost the whole window: pi will do
+  // as it is told, and nothing in a chat would say where the trouble is.
+  writeFileSync(
+    path.join(piDir(), "settings.json"),
+    JSON.stringify({ compaction: { enabled: true, keepRecentTokens: 30_000, reserveTokens: 20_000, modelOverrides: { "testbroken/wide-1": { keepRecentTokens: 130_000, reserveTokens: 5_000 } } } }, null),
+  );
+  const sized = await sessions.sizeEveryModel();
+  const broken = "testbroken/wide-1";
+  const ok = "testbroken/ok-1";
+  assert.ok(sized.models.includes(ok), "the model nobody gave numbers is sized from its row");
+  assert.ok(!sized.models.includes(broken), "the model a person gave numbers for is left theirs");
+  const named = sized.faults.filter((f) => f.includes(broken));
+  assert.equal(named.length, 1, "the model that cannot compact is named once at the start, under its own name");
+  assert.match(named[0], /it keeps 130,000 word for word of a 131,072-token window/, "with what its numbers do to that window");
+  assert.match(named[0], /keep-recent \d/, "and the numbers that would work for its size");
+  assert.match(named[0], /Settings → Providers/, "and where those numbers are changed");
+  assert.ok(!sized.faults.some((f) => f.includes(ok)), "a model sized with numbers that work is not named at all");
+});
+
+test("a chat whose compaction cannot work says so at its start, once for its model", async () => {
+  // The chat is on a model that says its size, and on numbers of the person's that
+  // keep almost the whole window: the chat will run to the wall of its context with
+  // nothing ever compacted. The line belongs to its model, so the next chat on it is
+  // silent.
+  await writeCompactionModelRoom("p/m", { keepRecentTokens: 129_000, reserveTokens: 5_000 });
+  const a = chat();
+  const b = chat();
+  knownSizes.set(a, { contextWindow: 131_072, maxTokens: 16_384 });
+  knownSizes.set(b, { contextWindow: 131_072, maxTokens: 16_384 });
+  await sessions.prompt(a, "work on A");
+  await flush();
+  const said = noticesOf(a).filter((t) => t.includes("cannot work as configured"));
+  assert.equal(said.length, 1, "the chat says once, before its first answer, what its compaction cannot do");
+  assert.match(said[0], /This chat's compaction cannot work as configured/, "of this chat's compaction, and not of a run that stopped");
+  assert.match(said[0], /it keeps 129,000 word for word of a 131,072-token window/, "naming the numbers it is left on and the window they belong to");
+  assert.match(said[0], /keep-recent \d/, "and the numbers that would work for a model this size");
+  assert.ok(
+    noticesOf(b).filter((t) => t.includes("cannot work as configured")).length === 0,
+    "the next chat on the same model is silent: the numbers, and the fact, are the model's",
+  );
+});
+
+test("a chat whose compaction works says nothing about it at its start", async () => {
+  // A clean file first: the numbers are nobody's, so the portal sizes them, and a
+  // configuration that works is left unmentioned.
+  writeFileSync(path.join(piDir(), "settings.json"), JSON.stringify({ compaction: { enabled: true } }, null));
+  const a = chat();
+  knownSizes.set(a, { contextWindow: 131_072, maxTokens: 16_384 });
+  await sessions.prompt(a, "work on A");
+  await flush();
+  assert.equal(
+    noticesOf(a).filter((t) => t.includes("cannot work as configured") || t.includes("is sized from")).length,
+    0,
+    "a compaction that works is not commented on, and the sizing that fixed one says nothing either",
+  );
 });

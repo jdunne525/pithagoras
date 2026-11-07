@@ -198,7 +198,12 @@ export interface PiClient extends EventEmitter {
   /** Take up a changed context limit for the current model. Optional, like the above. */
   applyContextLimit?(): void;
   setAutoRetry(enabled: boolean): Promise<void>;
-  compact(): Promise<void>;
+  /**
+   * Compact by hand. `instructions`, where the executor's pi takes it, is appended to
+   * pi's own summarization prompt as what to focus on — which is how the portal asks for
+   * a summary short enough to fit one answer. See `compaction-ladder.ts`.
+   */
+  compact(customInstructions?: string): Promise<void>;
   reload(): Promise<void>;
   /** Write the session to disk; returns the file path. */
   exportSession(target?: string): Promise<string>;
