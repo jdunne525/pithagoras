@@ -5,8 +5,8 @@
  * ## What the chats on this machine measure
  *
  * Every compaction pi wrote to `data/sessions/*` (165 of them) carries the usage of
- * the call that wrote the summary. Read as a set, they say three things, and the
- * plan below is built from all three.
+ * the call that wrote the summary. Read as a set, they say four things, and the
+ * plan below is built from all four.
  *
  * 1. **The summary's length is its own, not the head's.** pi's summarization call is
  *    given a serialized copy of the span it is summarising (tool results cut to 2,000
@@ -34,26 +34,63 @@
  *    with a token of thinking. That is the state this module exists to prevent; the
  *    ladder below is what is worked when it arrives anyway.
  *
+ * 4. **A compaction can only take out what the chat has added since its last one.**
+ *    pi's cut point never walks back past the newest compaction record, and the record
+ *    it stops at carries that record's summary *and the stretch of raw conversation it
+ *    kept*. So at the moment a chat meets the threshold its context is, in order: the
+ *    last summary, the last keep, and the conversation added since. The cut keeps the
+ *    most recent keep-recent of that newer part, so the head is what is left of it, and
+ *    the point it compacts above is the sum of all four:
+ *
+ *    `window − keep-free = last summary + 2 × keep-recent + head`
+ *
+ *    A keep-recent above half of that point leaves a cut that does not exist, whatever
+ *    the chat does, and pi answers `Nothing to compact (session too small)`. The pair the
+ *    chats on this machine were left on made this visible: keep-recent 58,072 of a
+ *    131,072 window, the portal's own numbers, asked a chat that had just compacted for
+ *    a head of 40,000 and pi answered `Nothing to compact` — in `0Mu35yqbfNWf` (7
+ *    November) that was the last compaction the chat ever got, and it then filled its
+ *    window to 96% of it and stopped there. A keep-recent is only worth writing where
+ *    the head it leaves is reachable *with the last keep and the last document beside
+ *    it*, not only under the point it compacts above.
+ *
  * ## The plan the numbers come from
  *
- * Two numbers, in the model's own `compaction.modelOverrides`, chosen so all three
+ * Two numbers, in the model's own `compaction.modelOverrides`, chosen so all four
  * facts above come out right:
  *
  *  - **keep-free (`reserveTokens`)** a quarter of the window, never under pi's own
  *    16,384: a chat is compacted at about three-quarters of its window, never at 91%,
  *    and the answer it writes next has the room it needs;
- *  - **keep-recent (`keepRecentTokens`)** the trigger point less a head of at least
- *    40,000 tokens, capped at two and a half answers: big enough that the nine-section
- *    document is a cut rather than a copy (fact 1), small enough that the document
- *    fits the answer the model has (fact 3), and far enough below the trigger that the
- *    chat lands at half its window and works a long time before the next one (fact 2).
+ *  - **keep-recent (`keepRecentTokens`)** the point it compacts above, less the last
+ *    document and two keeps and a head (fact 4), where the head is the biggest one
+ *    whose document fits one answer with room for the chain to grow (facts 1 and 2),
+ *    as large as the window and the measurement ask for, and far enough below the
+ *    trigger that the chat lands at half its window and works a long time before the
+ *    next one (fact 2).
  *
  * For the model these chats run on — a 131,072-token window, a 16,384-token answer —
- * that is keep-free 33,000 and keep-recent 58,000: compaction at 74% of the window,
- * 40,000 tokens written down to one summary, the chat landing at about 57% and working
- * ~24,000 tokens before the next one. The numbers the chats failed on were 24,000 and
- * 90,000, which compact at 82%, hand the summariser a 25,000-token head, land at the
- * trigger point they started from, and walk the summary to the cap.
+ * that is keep-free 33,000 and keep-recent 30,460: compaction at 74% of the window,
+ * 55,228 tokens of new conversation beside the 12,384 of summary its last compaction
+ * left and the 30,460 it keeps, 24,768 of that handed to the summariser, the chat
+ * landing at 42,844 — 33% of its window — and working 55,228 tokens before the next
+ * one. The pair the portal wrote before, 58,072, is not read as a smaller head: it is
+ * read as no cut at all. Its keep and the document beside it come to 131,072 against
+ * the 98,072 it compacts above, so the chat has to add a third of its window before a
+ * cut exists, and it meets the top of its window before it adds them.
+ *
+ * What the plan cannot do is stop a chain of summaries growing (fact 2): on this
+ * model's window a nine-section document and its next version do not both fit one
+ * answer at any head this model writes about, so a chat that walks there is worked by
+ * the ladder below — one compact with the summary asked for in words, then the
+ * numbers — rather than by a pair of numbers that would fit.
+ *
+ * It is sized for the state the chain settles in, not for the first compaction of a
+ * fresh chat: a chat that has never compacted has no last keep and no last document in
+ * front of the cut, so its first head is the whole of the trigger less one keep, which is
+ * bigger than these numbers name. That first compaction, and the one that follows a
+ * summary the ladder bounded in words, are the states the ladder's ask is written for —
+ * what the pair is written for is the state that runs for hours afterwards.
  */
 
 /** pi's own keep-free, and the floor for the portal's: a chat must compact before the answer is squeezed. */
@@ -78,9 +115,13 @@ const HEAD_MAX_SHARE = 0.5;
 const SUMMARY_FLOOR = 12_000;
 /** Measured on the large heads: 59,598 → 3,912, 46,984 → 14,474, 38,002 → 10,371. */
 const SUMMARY_OF_HEAD = 0.5;
+/** The room one answer must keep for the next document's additions: the chain of summaries grows, and a document at the answer's length has nothing to grow into (fact 2). */
+const SUMMARY_ROOM_TO_GROW = 4_000;
 
 /** Below this, a compaction buys minutes and nothing else. */
 const MINIMUM_PROGRESS = 1_000;
+/** The least a model keeps word for word: below this the whole of pi's job is a cut of one message. */
+const MIN_KEEP = 1_000;
 
 export interface ModelSize {
   /** The model's context window, in tokens. */
@@ -108,13 +149,15 @@ export interface CompactionPlan {
   triggersAtTokens: number;
   /** The same as a share of the window, which is the number a person reads it as. */
   triggersAtPercent: number;
-  /** The conversation handed to the summariser at that point. */
+  /** The summary a chat carries into this compaction, written by the one before it (fact 4). */
+  carriedSummaryTokens: number;
+  /** The conversation handed to the summariser at that point: what was added since the last compaction, less what the keep keeps. */
   headTokens: number;
   /** The document written about it, at the longest seen on this machine. */
   summaryTokens: number;
-  /** Where a compaction that works leaves the chat. */
+  /** Where a compaction that works leaves the chat: its keep, and the document beside it. */
   landsAtTokens: number;
-  /** Tokens of work the chat gets between two compactions. */
+  /** Tokens of conversation a chat adds between two compactions. */
   progressTokens: number;
 }
 
@@ -136,18 +179,52 @@ export function summaryWantedFor(headTokens: number): number {
   return Math.floor(Math.max(headTokens * SUMMARY_OF_HEAD, SUMMARY_FLOOR));
 }
 
-/** The same, capped at one of the model's answers: the longest summary that finishes. */
-export function summaryRoomFor(headTokens: number, maxTokens: number): number {
+/** The same, capped at one of the model's answers: the longest document that finishes inside one. */
+function summaryRoomFor(headTokens: number, maxTokens: number): number {
   return Math.floor(Math.min(summaryWantedFor(headTokens), maxTokens));
+}
+
+/**
+ * What a pair of numbers leaves reachable at the point a chat is asked to compact.
+ *
+ * This is fact 4 read as an equation: at the threshold a chat's context is its last
+ * summary, then its last keep, then the conversation it added since, and the cut keeps
+ * the newest keep-recent of that last part. So a head and the document written about
+ * it — which the next compaction carries beside it — share what is left of the point
+ * they compact above once two keeps are taken out, and the state a chain of these
+ * numbers gets to is the largest head that fits under that with its own document
+ * beside it. The document takes one of three forms (its floor, half the head, one
+ * answer), and the equation for each is closed by a candidate head; the largest
+ * candidate that fits is the state.
+ */
+function reachableAt(keepRecentTokens: number, triggersAtTokens: number, maxTokens: number): { headTokens: number; carriedSummaryTokens: number } {
+  const above = Math.floor(triggersAtTokens) - 2 * Math.floor(keepRecentTokens);
+  const answer = Math.floor(maxTokens);
+  let headTokens = 0;
+  let carriedSummaryTokens = 0;
+  for (const candidate of [above, answer > 0 ? above - answer : above, Math.floor(above / (1 + SUMMARY_OF_HEAD)), above - SUMMARY_FLOOR]) {
+    const head = Math.max(0, Math.floor(candidate));
+    const document = summaryRoomFor(head, answer);
+    if (head + document > above) continue;
+    if (head + document > headTokens + carriedSummaryTokens) {
+      headTokens = head;
+      carriedSummaryTokens = document;
+    }
+  }
+  return { headTokens, carriedSummaryTokens };
 }
 
 /**
  * The compaction numbers this model's size asks for, in its own keep-recent and keep-free.
  *
- * Returns null when the model is too small for a compaction to buy anything: the head
- * its window and answer leave is smaller than the document written about it, so every
- * compaction would leave the chat bigger than it started. That is the honest answer for
- * a 4k model with a 1k answer, and it is not a thing the portal can fix with numbers.
+ * Returns null when this model's size has no pair: its answer is smaller than the
+ * document this model writes at its own length, with room for the next version beside
+ * it, so no head worth asking it for exists (a 32k window with an 8k answer, a 4k
+ * window with a 1k answer); or the head its own keep leaves is shorter than the
+ * document written about it, and the chain of those documents walks to the answer's
+ * cap. Both are the honest answer that the size has no pair, and neither is a thing
+ * the portal can fix with numbers — the ladder's ask for a summary in words is, and
+ * is tried before this answer is given.
  */
 export function planForModel(size: ModelSize): CompactionPlan | null {
   const window = Math.floor(size.contextWindow);
@@ -158,25 +235,50 @@ export function planForModel(size: ModelSize): CompactionPlan | null {
   const triggersAt = window - reserve;
   if (triggersAt <= 0) return null;
 
-  const head = Math.floor(
+  // A head, and the document written about it, have to share one of the model's answers
+  // with room left for the chain's next additions (fact 2): the model writes the
+  // document it is asked for at up to half the head, so the head that leaves room is
+  // twice what is left of the answer's length. Below its floor a model writes at the
+  // floor whatever it reads, so a model whose answer cannot hold a document at the
+  // floor plus room has no head worth asking it for at all.
+  const headWritable = answer >= SUMMARY_FLOOR + SUMMARY_ROOM_TO_GROW ? Math.floor(2 * (answer - SUMMARY_ROOM_TO_GROW)) : 0;
+
+  const wanted = Math.floor(
     clamp(
       Math.min(Math.max(triggersAt / HEAD_OF_TRIGGER, MIN_HEAD), Math.max(MIN_HEAD, answer * HEAD_OF_ANSWER)),
       Math.max(MIN_HEAD, 1),
       Math.max(MIN_HEAD, Math.min(MAX_HEAD, triggersAt * HEAD_MAX_SHARE)),
     ),
   );
-  const keepRecent = Math.max(1_000, triggersAt - head);
-  const headTokens = triggersAt - keepRecent;
+  const head = Math.floor(Math.min(wanted, headWritable));
+
+  // The keep is the other half of fact 4: the point it compacts above, less this head,
+  // less the document the model writes about it, less that document again, which the
+  // next compaction carries beside the keep. Halved because the keep is counted twice
+  // there — the last compaction's, and this one's.
+  const keepRecent = Math.floor((triggersAt - head - summaryRoomFor(head, answer)) / 2);
+  const keep = Math.max(MIN_KEEP, keepRecent);
+
+  const reach = reachableAt(keep, triggersAt, answer);
+  const headTokens = reach.headTokens;
+  const carriedSummaryTokens = reach.carriedSummaryTokens;
   const summary = summaryRoomFor(headTokens, answer);
-  const landsAt = keepRecent + summary;
+  const landsAt = keep + summary;
   const progress = triggersAt - landsAt;
-  if (headTokens < MINIMUM_PROGRESS || summary <= 0 || progress < MINIMUM_PROGRESS) return null;
+
+  // A pair this module cannot put a cut in, or cannot keep out of the answer: with its
+  // keep, the last keep and the last document above the point it compacts at there is
+  // nothing to take out whatever the chat does (fact 4), and a document at the answer's
+  // length has nothing beside it to grow into (fact 2). Both are the honest answer that
+  // this model's size has no pair, as it was before for a model too small to buy anything.
+  if (headTokens < MINIMUM_PROGRESS || headTokens <= summary || summary >= answer || progress < MINIMUM_PROGRESS) return null;
 
   return {
     reserveTokens: reserve,
-    keepRecentTokens: keepRecent,
+    keepRecentTokens: keep,
     triggersAtTokens: triggersAt,
     triggersAtPercent: Math.round((triggersAt / window) * 100),
+    carriedSummaryTokens,
     headTokens,
     summaryTokens: summary,
     landsAtTokens: landsAt,
@@ -205,6 +307,17 @@ export const CONTEXT_AT_WALL_PERCENT = 88;
  */
 export function summaryRanOutOfRoom(errorMessage: unknown): boolean {
   return /hit the token cap/i.test(String(errorMessage ?? ""));
+}
+
+/**
+ * pi's other no-result answer, and the one a pair of numbers asks for by itself: the
+ * cut is out of reach, so there is nothing to summarise (`Nothing to compact
+ * (session too small)`). Nothing about the summary went wrong here, and no further
+ * try changes it — what is wrong is that the room was written where no cut can be
+ * reached, which is fact 4 read at the one chat rather than at the model.
+ */
+export function nothingLeftToCompact(errorMessage: unknown): boolean {
+  return /nothing to compact/i.test(String(errorMessage ?? ""));
 }
 
 /**
@@ -249,7 +362,7 @@ export function planRoom(plan: CompactionPlan): WrittenRoom {
  * what the warning about a configuration that does not work needs: a chat can be
  * running on numbers nobody computed — pi's defaults are one pair, read for whatever
  * window a chat happens to be on, and a person's two numbers in the Settings card
- * are every chat's — and a pair decided that way can be wrong in one of five ways,
+ * are every chat's — and a pair decided that way can be wrong in one of seven ways,
  * each of which is what "compaction did nothing" looks like. The shape is returned
  * for the sentence: the caller has the words, these are the numbers it names.
  */
@@ -264,17 +377,19 @@ export interface RoomShape {
   triggersAtTokens: number;
   /** The same as a share of the window: at `CONTEXT_AT_WALL_PERCENT` the chat is at the wall. */
   triggersAtPercent: number;
-  /** The conversation handed to the summariser at that point. */
+  /** The summary a chat carries into this compaction, written by the one before it (fact 4). */
+  carriedSummaryTokens: number;
+  /** The conversation handed to the summariser at that point: what was added since the last compaction, less what the keep keeps. */
   headTokens: number;
   /** What that head would be written up at, at the longest seen on this machine, uncapped by the answer. */
   summaryWantedTokens: number;
   /** A head bigger than this many answers is written up at more than one of them holds: `HEAD_OF_ANSWER`, the largest head whose document has been seen to fit. */
   headFitsAnswerTokens: number;
-  /** The longest summary that fits one answer. */
+  /** The longest document that finishes inside one answer. */
   summaryTokens: number;
-  /** Where a compaction that finishes leaves the chat. */
+  /** Where a compaction that finishes leaves the chat: its keep, and the document beside it. */
   landsAtTokens: number;
-  /** Tokens of work the chat gets before the next one is asked. */
+  /** Tokens of conversation the chat gets before the next one is asked. */
   progressTokens: number;
 }
 
@@ -286,8 +401,9 @@ export function roomShapeFor(size: ModelSize, room: WrittenRoom): RoomShape | nu
   const keepRecentTokens = Math.floor(room.keepRecentTokens);
   const reserveTokens = Math.floor(room.reserveTokens);
   const triggersAtTokens = contextWindow - reserveTokens;
-  const headTokens = Math.max(0, triggersAtTokens - keepRecentTokens);
-  const summaryWantedTokens = summaryWantedFor(headTokens);
+  const reach = reachableAt(keepRecentTokens, triggersAtTokens, maxTokens);
+  const headTokens = reach.headTokens;
+  const carriedSummaryTokens = reach.carriedSummaryTokens;
   const summaryTokens = summaryRoomFor(headTokens, maxTokens);
   const landsAtTokens = keepRecentTokens + summaryTokens;
   return {
@@ -297,8 +413,9 @@ export function roomShapeFor(size: ModelSize, room: WrittenRoom): RoomShape | nu
     reserveTokens,
     triggersAtTokens,
     triggersAtPercent: Math.round((triggersAtTokens / contextWindow) * 100),
+    carriedSummaryTokens,
     headTokens,
-    summaryWantedTokens,
+    summaryWantedTokens: summaryWantedFor(headTokens),
     headFitsAnswerTokens: Math.floor(maxTokens * HEAD_OF_ANSWER),
     summaryTokens,
     landsAtTokens,
@@ -310,29 +427,40 @@ export function roomShapeFor(size: ModelSize, room: WrittenRoom): RoomShape | nu
  * What is wrong with a pair of compaction numbers, or nothing when the compaction
  * it gives works. The keys are the ways a pair can be wrong; the sentence each
  * becomes is the caller's, which has the numbers and the model's name.
+ *
+ * `nothing-left-to-cut` is the pair fact 4 says never had a cut: its keep, counted
+ * twice — the last compaction's and this one's — and the document beside it come to
+ * more than the point they compact above, so pi has nothing to take out whatever the
+ * chat does, and answers `Nothing to compact (session too small)`. That is not the
+ * shape where a compaction finishes and the next one is asked for immediately, which
+ * is `walks-to-the-cap`: there a cut exists and works, and it is the chain of
+ * documents grown to one answer's length that has nothing left to add (fact 2).
  */
 export type RoomFault =
   /** It keeps free as much as the window has: a chat fills its context before pi asks for a compaction. */
   | "keeps-free-the-whole-window"
   /** It keeps more word for word than it compacts above: pi never reaches the point it would summarise from. */
   | "keeps-past-its-point"
+  /** It keeps word for word, and the summary its last compaction left, more than it compacts above: there is no cut for pi to take, and there never will be. */
+  | "nothing-left-to-cut"
   /** It asks for a compaction only at the top of the window: a chat is at the wall of its context before that point. */
   | "compacts-at-the-wall"
-  /** The head it leaves is smaller than the document written about it: a compaction changes nothing. */
-  | "head-too-small"
   /** A summary of the head it leaves is written up at more than one answer holds: the summary stops in the middle, and the chat keeps its whole context. */
   | "summary-wont-fit"
-  /** A compaction that finishes leaves the chat at the point it compacts at: the next one is asked almost immediately. */
-  | "walks-to-the-cap";
+  /** A compaction that finishes leaves the chat at its keep and its own summary beside it, and the next one is asked for before the chat has added its keep. */
+  | "walks-to-the-cap"
+  /** The span it leaves above its keep is smaller than the document written about it: a compaction changes nothing. */
+  | "head-too-small";
 
 /** Read a shape as a fault. Null for a shape whose compaction works, and for one there is no shape for. */
 export function roomFaultFor(shape: RoomShape | null): RoomFault | null {
   if (!shape) return null;
   if (shape.triggersAtTokens <= 0) return "keeps-free-the-whole-window";
   if (shape.keepRecentTokens >= shape.triggersAtTokens) return "keeps-past-its-point";
-  if (shape.headTokens < MINIMUM_PROGRESS) return "head-too-small";
+  if (shape.headTokens <= 0) return "nothing-left-to-cut";
   if (shape.triggersAtPercent >= CONTEXT_AT_WALL_PERCENT) return "compacts-at-the-wall";
   if (shape.headTokens > shape.maxTokens * HEAD_OF_ANSWER) return "summary-wont-fit";
-  if (shape.progressTokens < MINIMUM_PROGRESS) return "walks-to-the-cap";
+  if (shape.carriedSummaryTokens >= shape.maxTokens) return "walks-to-the-cap";
+  if (shape.headTokens < shape.summaryWantedTokens) return "head-too-small";
   return null;
 }

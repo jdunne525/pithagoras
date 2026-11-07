@@ -661,6 +661,42 @@ scopes to one model), and the third number of the trio — **Answer**, what one
 answer gets — is on the model's row in Settings → Providers. Every chat on that
 model takes the same room, which is what the arithmetic needs.
 
+A compaction can only take out what the chat has added since the compaction before it.
+The cut point never walks back past the last compaction record, and that record stays in
+the context beside the stretch of conversation it kept. So at the point a chat is asked,
+its context reads: the last summary, then the last keep, then what the chat has added
+since — and a cut only exists past all of them:
+
+```
+keep-recent × 2 + the summary a chat carries + the stretch the model is asked to write
+    ≤ the point the chat compacts above
+```
+
+The summary is not a small thing: it is a document this model writes at a length of its
+own, and what the portal's numbers keep is one of the model's answers less room for the
+next version of that document to grow into. For a 131,072-token model with a 16,384-token
+answer that is keep-free 33,000 (asked above 98,072, at 75% of the window) and keep-recent
+30,460: a chat that gets there has added 55,228 tokens since its last compaction, beside
+the 12,384 of summary that compaction left and the 30,460 it keeps, 24,768 of it goes to
+the summariser, and a summary that works leaves the chat at 42,844 — a third of its window
+— to work 55,228 more before the next one is asked.
+
+A keep above that boundary leaves no cut for pi to make at all, and the pair this portal
+wrote for these chats before — 58,072 of a 98,072-point — is well above it. The answer is
+`Nothing to compact (session too small)`: the chat keeps working to the top of its window
+and nothing is ever compacted. The portal says that in those words, rather than calling it
+a compaction that failed, and names the keep, the carried summary and the point they belong
+to. The room that answers it is **Answer** on the model's row in Settings → Providers —
+the summary a chat carries is as long as one of the model's answers, and the answer is the
+only room that lets it grow — or, for a chat that has already filled, a new chat.
+
+Those numbers are for the state a chat reaches once it has compacted a few times. The
+first compaction of a fresh chat has no last keep and no last summary in front of its cut,
+so the head it is handed is the whole of the trigger less one keep — bigger than any pair
+of numbers could allow, on any window this model's answer fits. That first compaction, and
+the one right after a summary was bounded in words, are what the ask for a short summary is
+written for; the pair of numbers is written for the state that runs for hours afterwards.
+
 After a compaction fails twice in a row the chat says so in one line and
 switches auto-compaction off for itself, rather than paying for an attempt that
 cannot work at every turn for hours. The line names the three numbers; turn the

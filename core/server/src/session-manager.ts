@@ -129,6 +129,7 @@ import {
 import {
   COMPACT_SHORT_SUMMARY,
   CONTEXT_AT_WALL_PERCENT,
+  nothingLeftToCompact,
   planForModel,
   planRoom,
   roomShapeFor,
@@ -1110,11 +1111,13 @@ class SessionManager extends EventEmitter {
    * write, then the room it is given to write it in. See `compaction-ladder.ts` for the
    * measurement this works from, and for the arithmetic behind the numbers it writes.
    *
-   * It ends in one of three places: the chat compacted, the room arrived and the chat
-   * compacted with it, or there was nothing to give and the chat is left to its own count —
-   * the next failure of the same shape stops the attempts, as it always did. What it never
-   * does is decide the chat's compaction switch: that is the person's, and the count of the
-   * chat's own failures is untouched by these attempts.
+   * It ends in one of four places: the chat compacted, the room arrived and the chat
+   * compacted with it, the room arrived and this chat has nothing to take out of it —
+   * said as that, rather than as an attempt that failed, because it is a different thing
+   * pi is reporting (fact 4) — or there was nothing to give and the chat is left to its
+   * own count, where the next failure of the same shape stops the attempts as it always
+   * did. What it never does is decide the chat's compaction switch: that is the person's,
+   * and the count of the chat's own failures is untouched by these attempts.
    */
   private async giveCompactionRoom(sessionId: string): Promise<void> {
     if (this.compactionLadder.has(sessionId)) return;
@@ -1137,13 +1140,18 @@ class SessionManager extends EventEmitter {
       // suppression a compaction caught mid-turn asks for.
       markCompactionResume(sessionId);
     }
-    const worked = async (instructions?: string) => {
+    // Three answers, not two: pi's compaction can also say there is nothing to take
+    // out (`Nothing to compact (session too small)`), which is the room written where
+    // no cut can be reached — see fact 4 of `compaction-ladder.ts`. It is not a summary
+    // too long for one answer, and a chat that cannot be cut is not a chat whose summary
+    // was too long, so it is not called a failure here.
+    const worked = async (instructions?: string): Promise<"compacted" | "nothing" | "failed"> => {
       try {
         await this.compact(sessionId, instructions);
-        return true;
-      } catch {
+        return "compacted";
+      } catch (error) {
         // The reason is pi's own sentence, which the chat hears from its compaction_end.
-        return false;
+        return nothingLeftToCompact(error instanceof Error ? `${error.message} ${error.stack ?? ""}` : error) ? "nothing" : "failed";
       }
     };
     try {
@@ -1164,7 +1172,7 @@ class SessionManager extends EventEmitter {
       if (thinking && thinking !== "off") await client?.setThinkingLevel?.("off").catch(() => {});
       const short = await worked(COMPACT_SHORT_SUMMARY);
       if (thinking && thinking !== "off") await client?.setThinkingLevel?.(thinking).catch(() => {});
-      if (short) {
+      if (short === "compacted") {
         this.compactionFailures.delete(sessionId);
         this.record(sessionId, "portal_notice", { text: "That worked: the chat is compacted, and its compaction is left to run as it was." });
         return;
@@ -1198,12 +1206,20 @@ class SessionManager extends EventEmitter {
       const answered = clearCompactionStops(modelKey ? { modelKey } : {});
       void this.resumeStoppedCompaction(answered, modelKey);
       this.record(sessionId, "portal_notice", {
-        text: `Giving ${modelKey || "this chat's model"} the compaction its own size asks for: keep-recent ${tokensOf(room.keepRecentTokens)}, keep-free ${tokensOf(room.reserveTokens)} — it compacts above ${tokensOf(plan.triggersAtTokens)} (${plan.triggersAtPercent}% of its ${tokensOf(window)} window), writes ${tokensOf(plan.headTokens)} of conversation into one summary, and a summary that works leaves it at ${tokensOf(plan.landsAtTokens)}.${answered.length ? ` That is the room ${answered.length === 1 ? `chat ${answered[0]}` : `${answered.length} chats`} the portal stopped earlier was waiting for.` : ""} Trying it again.`,
+        text: `Giving ${modelKey || "this chat's model"} the compaction its own size asks for: keep-recent ${tokensOf(room.keepRecentTokens)}, keep-free ${tokensOf(room.reserveTokens)} — it compacts above ${tokensOf(plan.triggersAtTokens)} (${plan.triggersAtPercent}% of its ${tokensOf(window)} window), a chat that gets there has added ${tokensOf(plan.progressTokens)} of conversation since its last compaction, beside the ${tokensOf(plan.carriedSummaryTokens)} of summary that compaction left and the ${tokensOf(room.keepRecentTokens)} it keeps word for word, so the head written into one summary is ${tokensOf(plan.headTokens)}, and a summary that works leaves the chat at ${tokensOf(plan.landsAtTokens)} — which it then works ${tokensOf(plan.progressTokens)} of conversation before the next one is asked for.${answered.length ? ` That is the room ${answered.length === 1 ? `chat ${answered[0]}` : `${answered.length} chats`} the portal stopped earlier was waiting for.` : ""} Trying it again.`,
         warning: true,
       });
-      if (await worked()) {
+      const again = await worked();
+      if (again === "compacted") {
         this.compactionFailures.delete(sessionId);
         this.record(sessionId, "portal_notice", { text: "That worked: the chat is compacted, and its compaction is left to run as it was." });
+        return;
+      }
+      if (again === "nothing") {
+        this.record(sessionId, "portal_notice", {
+          text: `Pi has nothing to take out of this chat: what it has added since its last compaction is less than the ${tokensOf(room.keepRecentTokens)} these numbers keep, so no cut is reachable here, and the same call asked again says so again. Nothing about a summary went wrong, and this chat's own count is untouched. The room is written under ${modelKey || "this chat's model"}'s name and takes effect at the next compaction a chat on it reaches — that is what the other chats on it get. What answers this one is a new chat, or Max output tokens on its row in Settings → Providers: the summary a chat carries into the next one is as long as one of the model's answers, and the answer is the only room that lets it grow.`,
+          warning: true,
+        });
         return;
       }
       this.record(sessionId, "portal_notice", {
@@ -1438,7 +1454,7 @@ class SessionManager extends EventEmitter {
    *
    * `roomShapeFor` says what a pair does, `roomFaultFor` says whether that is broken;
    * this is the third half — the sentence, with the numbers it names written as
-   * thousands and the model named, and what to do about it. The five shapes each say
+   * thousands and the model named, and what to do about it. The seven shapes each say
    * what the chat ends up doing, which is the question a person asks when nothing was
    * ever taken out: a configuration that does not work is not an error, pi does its
    * job as told, and the only thing that can be noticed is what it leaves behind.
@@ -1461,9 +1477,10 @@ class SessionManager extends EventEmitter {
       "keeps-free-the-whole-window": `it keeps ${tokensOf(shape.reserveTokens)} free at the top of a ${tokensOf(shape.contextWindow)}-token window: a chat fills its context before pi asks for a compaction, which is where it stops with nothing compacted`,
       "keeps-past-its-point": `it keeps ${tokensOf(shape.keepRecentTokens)} word for word of a ${tokensOf(shape.contextWindow)}-token window and asks for a compaction only above ${tokensOf(shape.triggersAtTokens)}: pi never reaches the point it would summarise from, so nothing is ever compacted`,
       "compacts-at-the-wall": `it asks for a compaction only above ${tokensOf(shape.triggersAtTokens)} (${shape.triggersAtPercent}% of a ${tokensOf(shape.contextWindow)}-token window): a chat is at the wall of its context before that point, which is where it stops instead of being compacted`,
-      "head-too-small": `it leaves only ${tokensOf(shape.headTokens)} tokens of conversation to write about, and the document written about that is about as long: a compaction takes nothing out of the chat`,
+      "head-too-small": `it leaves only ${tokensOf(shape.headTokens)} tokens of conversation to write about, and the document written about that is ${tokensOf(shape.summaryWantedTokens)}, longer than the head: a compaction takes nothing out of the chat`,
+      "walks-to-the-cap": `it leaves a compaction that works, and a chat that gets there is left at ${tokensOf(shape.landsAtTokens)} — its keep with the ${tokensOf(shape.carriedSummaryTokens)} of summary it now carries beside it — and the next compaction is asked for before the chat has written that again: a summary at ${tokensOf(shape.maxTokens)} is one answer's whole length, so the next one has nothing to add and stops in the middle`,
+      "nothing-left-to-cut": `it keeps ${tokensOf(shape.keepRecentTokens)} word for word, and that keep is counted twice against ${tokensOf(shape.triggersAtTokens)} where it compacts — the last compaction's kept stretch, and this one's — with the summary that compaction left beside them, so what a chat could add since its last compaction is never enough for a cut to exist and nothing is ever compacted`,
       "summary-wont-fit": `it leaves a head of ${tokensOf(shape.headTokens)} of conversation to write into one summary while this model's answer is ${tokensOf(shape.maxTokens)} tokens, and a head that big has been seen written up at ${tokensOf(shape.summaryWantedTokens)}: the summary does not fit one answer, so compaction stops in the middle and the chat keeps its whole context`,
-      "walks-to-the-cap": `a compaction that finishes leaves the chat at ${tokensOf(shape.landsAtTokens)} of its ${tokensOf(shape.contextWindow)} tokens and asks for the next one after ${tokensOf(shape.progressTokens)} of work: each summary is merged into the next, and it walks to the cap there`,
     })[fault];
     // A plan of this module's is offered only when it works: for a model whose answer is
     // too small for any summary of a head that fits its window, the honest line is that

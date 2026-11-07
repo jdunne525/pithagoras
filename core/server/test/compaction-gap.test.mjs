@@ -749,7 +749,7 @@ const writeRows = (wideWindow) =>
       {
         providers: {
           testwide: { models: [{ id: "wide-1", contextWindow: wideWindow }] },
-          testmid: { models: [{ id: "mid-1", contextWindow: 32768, maxTokens: 8192 }] },
+          testmid: { models: [{ id: "mid-1", contextWindow: 65536, maxTokens: 16384 }] },
           testtiny: { models: [{ id: "tiny-1", contextWindow: 8192 }] },
         },
       },
@@ -816,20 +816,97 @@ test("the shapes of a compaction that cannot work are read off the numbers, and 
   const wide = { contextWindow: 131_072, maxTokens: 16_384 };
   const read = (keep, free) => roomFaultFor(roomShapeFor(wide, { keepRecentTokens: keep, reserveTokens: free }));
   // The pair the chats on this machine ran on, and the same pair typed the other way
-  // round: both hand the summariser a head no single answer of this model writes up.
+  // round: one hands the summariser a head no single answer of this model writes up,
+  // and the other leaves a compaction that works and a chat whose next summary has
+  // nothing beside it to grow into.
   assert.equal(read(20_000, 30_000), "summary-wont-fit", "the pair pi leaves a 131,072-token model on");
-  assert.equal(read(30_000, 20_000), "summary-wont-fit", "the same shape, with the two numbers typed the other way round");
+  assert.equal(read(30_000, 20_000), "walks-to-the-cap", "the same shape, with the two numbers typed the other way round: a cut exists, and the chain of summaries reaches one answer's whole length");
   assert.equal(read(1_000, 131_072), "keeps-free-the-whole-window", "it keeps free as much of the window as the window has: pi is asked only past the end of it");
   assert.equal(read(130_100, 1_000), "keeps-past-its-point", "it keeps more word for word than it compacts above, so there is nothing to summarise");
-  assert.equal(read(129_500, 1_000), "head-too-small", "the head it leaves is smaller than the document written about it");
-  assert.equal(read(110_000, 20_000), "walks-to-the-cap", "a compaction that finishes leaves the chat where the next one is asked for");
-  assert.equal(read(58_072, 33_000), null, "the numbers this portal writes for a model this big are not read as broken");
-  for (const size of [{ contextWindow: 200_000, maxTokens: 16_384 }, { contextWindow: 32_768, maxTokens: 8_192 }]) {
+  assert.equal(read(42_000, 33_000), "head-too-small", "it leaves a head smaller than the document written about it, which takes nothing out of the chat");
+  assert.equal(read(44_000, 33_000), "nothing-left-to-cut", "its keep twice, and the document beside it, reach past the point it compacts above: there is no cut, and never will be");
+  assert.equal(read(110_000, 20_000), "nothing-left-to-cut", "it keeps, and carries back over the keep, more than it compacts above: there is no cut for pi to make");
+  assert.equal(read(129_500, 1_000), "nothing-left-to-cut", "and a keep at the top of the window is the same shape read the other way: the cut is out of reach, not below the document");
+  assert.equal(read(58_072, 33_000), "nothing-left-to-cut", "the pair this portal wrote for a model this big before, read on its own shape: its keep twice and the summary beside it come past the 98,072 it compacted above, which is what left a chat that had just compacted answering `Nothing to compact`");
+  for (const size of [{ contextWindow: 200_000, maxTokens: 16_384 }, { contextWindow: 65_536, maxTokens: 16_384 }]) {
     const plan = planForModel(size);
     assert.ok(plan, "a model this module can size has a plan");
     assert.equal(roomFaultFor(roomShapeFor(size, planRoom(plan))), null, "and its plan is never read as one of the shapes that cannot work");
   }
   assert.equal(planForModel({ contextWindow: 8_192, maxTokens: 4_096 }), null, "a model with no room that fits has no plan at all, and nothing is claimed about it");
+  assert.equal(planForModel({ contextWindow: 32_768, maxTokens: 8_192 }), null, "a window that cannot hold the document this model writes, and room for the next one beside it, has no plan either");
+});
+
+// pi's cut point never walks back past the newest compaction record, and that record
+// carries its summary and the stretch of conversation it kept into the context the next
+// one is handed (fact 4 of `compaction-ladder.ts`). A pair read the way pi reads it has
+// five numbers that add up, and the plan writes them so the head it names is the head
+// the summariser is given: the last keep, this keep, the summary beside them, and the
+// head. The pair this portal wrote for these chats before — 58,072 of a 131,072 window
+// — added up past the point it compacted at, which is what left a chat that had just
+// compacted with `Nothing to compact` and a window to fill to the top.
+test("the plan a model gets leaves its head reachable with the last keep and its own summary beside it", async () => {
+  for (const size of [
+    { contextWindow: 131_072, maxTokens: 16_384 },
+    { contextWindow: 200_000, maxTokens: 16_384 },
+    { contextWindow: 65_536, maxTokens: 16_384 },
+  ]) {
+    const plan = planForModel(size);
+    assert.ok(plan, "a model this module can size has a plan");
+    assert.equal(plan.carriedSummaryTokens, plan.summaryTokens, "the summary a chat carries is the document these same numbers write, which is what a chain of them reaches");
+    assert.equal(
+      plan.triggersAtTokens,
+      plan.keepRecentTokens * 2 + plan.carriedSummaryTokens + plan.headTokens,
+      "the point it compacts above is the last keep, this keep, that summary, and the head beside them",
+    );
+    assert.equal(plan.landsAtTokens, plan.keepRecentTokens + plan.summaryTokens, "and a compaction that works leaves exactly its keep and that document");
+    assert.equal(plan.progressTokens, plan.headTokens + plan.keepRecentTokens, "which is why the chat works its head and its keep again before the next one is asked for");
+    assert.equal(roomFaultFor(roomShapeFor(size, planRoom(plan))), null, "and its plan is never read as one of the shapes that cannot work");
+  }
+  const wide = { contextWindow: 131_072, maxTokens: 16_384 };
+  const plan = planForModel(wide);
+  assert.ok(
+    plan.keepRecentTokens < 58_072 && plan.landsAtTokens < 74_456,
+    "the keep this model gets now is below the pair it was left on before, and a chat that compacts lands further below the top of its window",
+  );
+});
+
+// The other no-result answer pi gives, and the one only a pair of numbers asks for:
+// the chat has added less than its keep since the compaction before this one. Nothing
+// about a summary went wrong, the chat's own count of failures is nobody's to advance,
+// and its switch is nobody's to turn off; what the ladder has to offer is where the
+// room lives and what starts the chat over.
+test("a compaction with no cut to make is said as what pi found, not as an attempt that failed", async () => {
+  try {
+    setSingleActiveSession(false);
+    const a = chat();
+    knownSizes.set(a, { contextWindow: 131_072, maxTokens: 16_384 });
+    await sessions.prompt(a, "work on A");
+    await flush();
+    const pi = pis.get(a);
+
+    // The chat's own attempt, with the summary stopped in the middle of its answer:
+    // the shape the ladder is asked for.
+    pi.emit("event", { type: "compaction_start", reason: "threshold" });
+    pi.emit("event", { type: "compaction_end", ...COMPACT_FAILED });
+    // pi doing the portal's compact, on a chat that has only just been compacted: the
+    // conversation since that compaction is less than any keep worth writing, so the
+    // call has nothing to cut and says so.
+    pi.compact = async () => {
+      throw new Error("Nothing to compact (session too small)");
+    };
+    await flush();
+    const said = noticesOf(a);
+    assert.equal(said.length, 4, "the failure, the one try, the room, and what pi found on the try that followed");
+    assert.match(said[1], /Trying it once more with the summary asked for short/, "the try the ladder makes first");
+    assert.match(said[2], /Giving p\/m the compaction its own size asks for: keep-recent 30,460/, "the room this model's size asks for now, which keeps far less than the 58,072 the chats on this machine were left on");
+    assert.match(said[2], /beside the 12,384 of summary that compaction left and the 30,460 it keeps word for word/, "named with the summary a chat carries into the next compaction, and the keep before it, which is why it keeps less");
+    assert.match(said[3], /Pi has nothing to take out of this chat/, "and what pi found, in the words for what it means");
+    assert.equal(said.filter((t) => t.includes("That did not work either")).length, 0, "no cut to make is not an attempt that failed");
+    assert.equal(pi.autoCompaction, true, "and the chat's switch is left to the person: a chat cannot be cut is not its count of failures");
+  } finally {
+    await reset();
+  }
 });
 
 /** The rows of a model whose numbers cannot work, and of one that is left to the portal. */
