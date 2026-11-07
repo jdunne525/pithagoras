@@ -423,10 +423,19 @@ test("compactions that keep failing are said, and stop being attempted", async (
     // moment after the failure it explains.
     await flush();
     const after = notices(a);
-    assert.equal(after.length, 3, "the failure, and the switch off, each said");
+    // What is said here, in order: each of the two failures, the one try the portal
+    // makes when the same summary fails twice (asked for short, so the room is the
+    // model's answer, not the summary), what it found when that try did not work
+    // either — the model has no numbers that would make a compaction worth — and the
+    // switch off, which is what the chat is left on.
+    assert.equal(after.length, 5, "the failures, the one try and what it found, and the switch off, each said");
+    assert.equal(after[0].payload.text, after[1].payload.text, "the same failure is said each time it happens");
     assert.equal(pi.autoCompaction, false, "the chat stops paying minutes for attempts that cannot work");
     assert.equal(after[1].payload.text, "Auto-compaction failed: the summary did not fit in what the model can write in one answer, so nothing was compacted.");
-    assert.match(after[2].payload.text, /Auto-compaction is off for this chat after failing twice in a row/);
+    assert.match(after[2].payload.text, /Trying it once more with the summary asked for short/, "and the try the portal makes before it gives up, naming what it asks for");
+    assert.match(after[3].payload.text, /p\/m has no compaction numbers that would/, "and, when that fails too, the model named as having no numbers that would work");
+    assert.match(after[3].payload.text, /takes no tokens out/, "said as the fact: an attempt here costs a model call and removes nothing");
+    assert.match(after[4].payload.text, /Auto-compaction is off for this chat after failing twice in a row/);
 
     // A chat whose compactions work again is a chat left to itself.
     pi.emit("event", { type: "compaction_end", reason: "threshold", willRetry: false, result: { summary: "s" } });
