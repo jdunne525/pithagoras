@@ -9,6 +9,11 @@
  * against what it saw last: only transitions that happen while it is watching
  * are news. That is what lets a restart stay quiet about chats already running
  * and questions already waiting when it comes up.
+ *
+ * What reaches the phone is always words: an alert carries the text of the
+ * notification and nothing else, never a file. ntfy decides on its own to treat
+ * a body that is too long, or not plain ASCII, as a file instead of as text, so
+ * the text is kept short and plain before it is posted — see `messageBody`.
  */
 import http from "node:http";
 import https from "node:https";
@@ -76,8 +81,44 @@ function asciiOnly(text: string): string {
 }
 
 /**
- * Fire one notification. Returns whether the request went out with a 2xx.
- * Silent — never throws — because a failed alert should not disturb a chat.
+ * How a notification is shaped so it stays a message of words.
+ *
+ * ntfy keeps a posted body as text only while it is short and plain. At 4,096
+ * bytes or more — and for any body that is not plain ASCII — the server decides
+ * on its own that the body is a file, and the phone then shows "You received a
+ * file: attachment.js" with the words gone: that is what a long answer (a game's
+ * source, a diff, a report) looked like. A notification must never arrive that
+ * way, so the body is cleaned to plain ASCII and kept a clear margin under that
+ * edge before it is posted, with "..." marking where a long message was trimmed.
+ *
+ * Nothing else may ask for a file either, and none of these is ever sent: a
+ * filename header (`X-Filename`, `Filename`, `File`, `f`), an attachment URL
+ * (`X-Attach`, `Attach`, `a`), or `Actions: attach-file`. The Content-Type
+ * stays `text/plain`, since `text/markdown` would make ntfy read the body as
+ * formatted text with its own attachments.
+ */
+const MESSAGE_LIMIT = 4096; // ntfy's max-message-length, in bytes: a body this long is a file
+const BODY_BYTES = MESSAGE_LIMIT - 100; // words stay clear of the edge, with room to spare
+const CUT = "..."; // marks where a long message was trimmed
+
+/**
+ * The exact text to post: plain ASCII — one byte per character, so counting
+ * characters counts bytes — trimmed to BODY_BYTES with the cut marked.
+ * A message that needed trimming is a long answer, and the part the person can
+ * read is the start of it; the rest of it was in the chat, which they can open.
+ */
+function messageBody(message: string): string {
+  const text = asciiOnly(message);
+  if (text.length <= BODY_BYTES) return text;
+  return text.slice(0, BODY_BYTES - CUT.length).trimEnd() + CUT;
+}
+
+/**
+ * Fire one notification, as text only. Returns whether the request went out with
+ * a 2xx; a response that still carries an attachment is named in the log, since
+ * that would mean the guarantee above stopped holding — with a lowered limit on a
+ * self-hosted ntfy, which is the only way left. Silent otherwise, never throws:
+ * a failed alert must not disturb a chat.
  */
 export async function sendNtfy(title: string, message: string, priority: "default" | "high" | "max" = "high"): Promise<boolean> {
   const config = readNtfyConfig();
@@ -85,7 +126,7 @@ export async function sendNtfy(title: string, message: string, priority: "defaul
 
   const url = new URL(`https://ntfy.sh/${encodeURIComponent(config.topic.trim())}`);
   const lib = url.protocol === "https:" ? https : http;
-  const body = asciiOnly(message).slice(0, 4096);
+  const body = messageBody(message);
 
   return await new Promise<boolean>((resolve) => {
     const req = lib.request(
@@ -94,6 +135,7 @@ export async function sendNtfy(title: string, message: string, priority: "defaul
         method: "POST",
         headers: {
           "Content-Type": "text/plain; charset=utf-8",
+          "Content-Length": String(Buffer.byteLength(body, "utf8")),
           "User-Agent": "pithagoras/1.0",
           Title: asciiOnly(title) || title,
           Tags: "bell,message",
@@ -101,10 +143,17 @@ export async function sendNtfy(title: string, message: string, priority: "defaul
         },
       },
       (res) => {
-        res.resume(); // drain; the response carries nothing we need
-        const status = res.statusCode!;
-        if (status < 200 || status >= 300) console.warn(`[portal] ntfy notification failed: HTTP ${status}`);
-        resolve(status >= 200 && status < 300);
+        // The reply is the message as ntfy stored it, read only to notice an
+        // "attachment" in it: a body we kept short and plain can still be read
+        // as a file by a server whose own limit is lower than ntfy's default.
+        let stored = "";
+        res.on("data", (chunk) => (stored += chunk));
+        res.on("end", () => {
+          if (/"attachment"\s*:/.test(stored)) console.warn(`[portal] ntfy sent a file, not the text: ${res.statusCode}`);
+          const status = res.statusCode!;
+          if (status < 200 || status >= 300) console.warn(`[portal] ntfy notification failed: HTTP ${status}`);
+          resolve(status >= 200 && status < 300);
+        });
       },
     );
     req.on("error", (e) => {

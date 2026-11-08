@@ -8,6 +8,12 @@
 // machine west of Greenwich even in the future, giving a negative age that would
 // suppress every alert. These pin that a finished chat is announced regardless
 // of the machine's timezone, and that the fast-reply gate still works.
+//
+// An alert must also carry words, never a file: ntfy reads a body of 4,096 bytes
+// or more — or one holding a character outside plain ASCII — as an attachment, so
+// the whole source a chat wrote used to arrive as "You received a file:
+// attachment.js" with the message gone. The test that posts a game's source pins
+// the body stays plain text, trimmed and under that edge.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
@@ -26,7 +32,15 @@ const sink = http.createServer((req, res) => {
   let body = "";
   req.on("data", (d) => (body += d));
   req.on("end", () => {
-    received.push({ topic: req.url, title: req.headers.title, priority: req.headers.priority, body });
+    // The whole header set is kept as well: an alert must never ask ntfy for a
+    // file, and the headers that would do that are visible here.
+    received.push({
+      topic: req.url,
+      headers: req.headers,
+      title: req.headers.title,
+      priority: req.headers.priority,
+      body,
+    });
     res.writeHead(200);
     res.end();
   });
@@ -102,6 +116,41 @@ test("the agent's final answer replaces finished, with how long it took", async 
   assert.match(hit.body, /Took .*min/i);
   assert.match(hit.body, /the report is saved/);
   assert.doesNotMatch(hit.body, /private reasoning/, "thinking must be left out of the alert");
+});
+
+test("a long answer is sent as words, trimmed, never as a file", async () => {
+  received.length = 0;
+  saveNtfyConfig({ enabled: true, topic: "longanswer", minResponseSeconds: 0 });
+  ntfy.startNtfyNotifications(150);
+
+  // The whole file the chat wrote: well past ntfy's 4,096-byte message limit,
+  // which is where the phone used to answer "You received a file: attachment.js"
+  // with no message at all. The start of it is worth reading; the rest is in the
+  // chat, so the alert keeps the start and says where it was cut.
+  const source = "// game.js\n" + "const sprite = load('cat.png'); // drawn each frame\n".repeat(200);
+  db.prepare(
+    "INSERT INTO sessions (id, title, status, workspace, created_at) VALUES ('long-me','The Long Answer Chat','running','/tmp', datetime('now','-5 minutes')) ON CONFLICT(id) DO UPDATE SET status=excluded.status",
+  ).run();
+  db.prepare(
+    "INSERT INTO events (session_id, type, payload, created_at) VALUES ('long-me','message_end', ?, datetime('now'))",
+  ).run(JSON.stringify({ message: { role: "assistant", stopReason: "done", content: [{ type: "text", text: source }] } }));
+
+  await sleep(400);
+  db.prepare("UPDATE sessions SET status='idle', updated_at=datetime('now') WHERE id='long-me'").run();
+  await sleep(800);
+  ntfy.stopNtfyNotifications();
+
+  const hit = received.find((r) => /longanswer/.test(r.topic));
+  assert.ok(hit, "a finished chat should trigger a push notification");
+  const bytes = Buffer.byteLength(hit.body, "utf8");
+  assert.ok(bytes < 4096, "a body of 4,096 bytes or more arrives as a file, not as the message");
+  assert.ok(hit.body.startsWith("**The Long Answer Chat**"), "the header still leads the alert");
+  assert.match(hit.body, /game\.js/, "the start of the answer is the part that arrives");
+  assert.match(hit.body, /\.\.\.$/, "the trimmed text says where it was cut");
+  for (const name of ["x-filename", "filename", "file", "f", "x-attach", "attach", "a", "actions"]) {
+    assert.equal(hit.headers[name], undefined, `no header may ask ntfy for a file: ${name}`);
+  }
+  assert.match(String(hit.headers["content-type"]), /^text\/plain/, "the body is posted as plain text");
 });
 
 test("a reply faster than the threshold is not announced", async () => {
