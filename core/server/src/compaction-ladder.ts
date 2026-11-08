@@ -82,8 +82,9 @@
  * What the plan cannot do is stop a chain of summaries growing (fact 2): on this
  * model's window a nine-section document and its next version do not both fit one
  * answer at any head this model writes about, so a chat that walks there is worked by
- * the ladder below — one compact with the summary asked for in words, then the
- * numbers — rather than by a pair of numbers that would fit.
+ * the ladder below — the summary asked for in words first, at the compaction that left
+ * the document past the plan's own ceiling, then the numbers — rather than by a pair of
+ * numbers that would fit.
  *
  * It is sized for the state the chain settles in, not for the first compaction of a
  * fresh chat: a chat that has never compacted has no last keep and no last document in
@@ -115,6 +116,10 @@ const HEAD_MAX_SHARE = 0.5;
 const SUMMARY_FLOOR = 12_000;
 /** Measured on the large heads: 59,598 → 3,912, 46,984 → 14,474, 38,002 → 10,371. */
 const SUMMARY_OF_HEAD = 0.5;
+/** Characters to a token, for the one measurement that has no count: the text of a summary
+ * a pi reported no usage for. Read as a factor, and the check it is worth is a plan's own
+ * ceiling, which was measured rather than counted — see `carriedSummaryOf`. */
+const SUMMARY_CHARS_OF_TOKEN = 4;
 /** The room one answer must keep for the next document's additions: the chain of summaries grows, and a document at the answer's length has nothing to grow into (fact 2). */
 const SUMMARY_ROOM_TO_GROW = 4_000;
 
@@ -318,6 +323,22 @@ export function summaryRanOutOfRoom(errorMessage: unknown): boolean {
  */
 export function nothingLeftToCompact(errorMessage: unknown): boolean {
   return /nothing to compact/i.test(String(errorMessage ?? ""));
+}
+
+/**
+ * What a compaction left the chat carrying, in tokens.
+ *
+ * pi's `compaction_end` carries the summary it wrote and the usage of the call that wrote
+ * it, and that document is what the next compaction reads beside the chat's last keep —
+ * fact 4, at one chat rather than at a model. A report with a usage answers the question
+ * with a count; one without it is answered by the text's own length over four to a token,
+ * which is the same question asked the wrong way round and is only ever read as a factor.
+ */
+export function carriedSummaryOf(compactionEnd: any): number {
+  const output = Number(compactionEnd?.result?.usage?.output);
+  if (Number.isFinite(output) && output > 0) return output;
+  const summary = compactionEnd?.result?.summary;
+  return typeof summary === "string" ? Math.ceil(summary.length / SUMMARY_CHARS_OF_TOKEN) : 0;
 }
 
 /**

@@ -17,7 +17,7 @@ mkdirSync(path.join(home, "work"), { recursive: true });
 
 const { createSession, COMPACT_STOP_NOTICE, COMPACT_STOP_NO_MODEL, appendEvent, chatsWithCompactionOffByChoice, chatModel, clearCompactionStops, compactionStopWasAnswered, compactionStops, eventsSince, getSession, getDb, noteCompactionChoice, setSingleActiveSession, noteCompactionPlan, compactionPlanFor, portalCompactionPlans } = await import("../dist/db.js");
 const { readCompactionSettings, writeCompactionSettings, writeCompactionModelRoom } = await import("../dist/pi-settings.js");
-const { planForModel, planRoom, roomShapeFor, roomFaultFor } = await import("../dist/compaction-ladder.js");
+const { carriedSummaryOf, COMPACT_SHORT_SUMMARY, planForModel, planRoom, roomShapeFor, roomFaultFor } = await import("../dist/compaction-ladder.js");
 const { SdkPiClient } = await import("../dist/pi/sdk-client.js");
 const { sessions, PromptQueuedForSingleActive } = await import("../dist/session-manager.js");
 test.after(() => getDb().close());
@@ -50,6 +50,13 @@ class FakePi extends EventEmitter {
     };
   }
   async abort() {}
+  /** A pi asked to compact by name. The tests that read the portal's own attempts opt a
+   * chat in; the rest answer as this pi has always answered — there is no compact on it. */
+  compacts = [];
+  async compact(instructions) {
+    this.compacts.push(instructions ?? "");
+    if (!canCompact.has(this.sessionId)) throw new Error("this pi cannot compact on request");
+  }
   /**
    * The chat's own auto-compaction switch, which pi has too — and pi has exactly one of
    * it for every chat: `compaction.enabled` in its settings file, which is what every
@@ -111,6 +118,8 @@ const noModel = new Set();
 const knownSizes = new Map();
 /** How full each chat's context is, for the tests that read where a run ended. */
 const wallAt = new Map();
+/** Chats whose pi answers a compaction asked of it, for the tests that read the portal's attempts. */
+const canCompact = new Set();
 SdkPiClient.create = async (opts) => {
   started.push(opts.sessionId);
   const pi = new FakePi(opts);
@@ -144,6 +153,7 @@ async function reset() {
   noModel.clear();
   knownSizes.clear();
   wallAt.clear();
+  canCompact.clear();
   sessions.contextWallSaid.clear();
   // One test's stopped chats are not the next one's record.
   clearCompactionStops({});
@@ -457,6 +467,63 @@ test("compactions that keep failing are said, and stop being attempted", async (
     pi.emit("event", { type: "compaction_end", reason: "threshold", willRetry: false, result: { summary: "s" } });
     assert.equal(sessions.compactionFailures.has(a), false, "the count starts afresh");
     assert.equal(pi.autoCompaction, false, "the chat's own switch is the person's to turn back");
+  } finally {
+    await reset();
+  }
+});
+
+// A compaction that worked, and left the chat carrying a document longer than the plan
+// for its model's size leaves room for. The numbers say where a chat is compacted, never
+// what length it is compacted to (fact 2: pi's update prompt merges the previous summary
+// into the next one, so the document climbs), and a document past the plan's ceiling has
+// climbed into the room the plan drew for the climb — the next merge of that chat's is the
+// one that asks for more than one answer, and the chat hears the pair of notices about a
+// summary that did not fit. So the ladder's bounded ask is worked at the compaction that
+// left the document long, and the chain starts again short. It is said nothing: an act on
+// a compaction that works is silent, and what earns a line is a failure or room that
+// changed what the chat does.
+test("a compaction that left the chat carrying too long a summary is bounded there", async () => {
+  try {
+    setSingleActiveSession(false);
+    const a = chat();
+    // The model this module has a plan for, at the size these chats run on.
+    knownSizes.set(a, { contextWindow: 131_072, maxTokens: 16_384 });
+    canCompact.add(a);
+    await sessions.prompt(a, "work on A");
+    await flush();
+    const pi = pis.get(a);
+    const said = noticesOf(a);
+
+    // What the plan leaves a chat to carry: its answer, less the room the next version
+    // of the document needs beside it.
+    const plan = planForModel({ contextWindow: 131_072, maxTokens: 16_384 });
+    assert.ok(plan, "a model this module has numbers for");
+
+    // A compaction that worked, and wrote a document past that ceiling — the shape the
+    // chain reaches half an hour into a long chat, one round before the failure.
+    pi.emit("event", { type: "compaction_start", reason: "threshold" });
+    pi.emit("event", {
+      type: "compaction_end",
+      reason: "threshold",
+      willRetry: false,
+      result: { summary: "x".repeat(60_000), usage: { input: 100_000, output: 15_000 } },
+    });
+    await flush();
+    assert.ok(carriedSummaryOf({ result: { usage: { output: 15_000 } } }) > plan.summaryTokens, "the chat is left carrying more than the plan lets it");
+    assert.deepEqual(pi.compacts, [COMPACT_SHORT_SUMMARY], "the same call, asked for a summary in short words");
+    assert.equal(noticesOf(a).length, said.length, "and nothing said about it");
+
+    // A compaction that left a document inside the ceiling is nobody's to bound: the
+    // room beside the document is still the next version's, and the chat is left alone.
+    pi.emit("event", { type: "compaction_start", reason: "threshold" });
+    pi.emit("event", {
+      type: "compaction_end",
+      reason: "threshold",
+      willRetry: false,
+      result: { summary: "x".repeat(60_000), usage: { input: 100_000, output: 8_000 } },
+    });
+    await flush();
+    assert.deepEqual(pi.compacts, [COMPACT_SHORT_SUMMARY], "nothing asked of a document the plan has room for");
   } finally {
     await reset();
   }

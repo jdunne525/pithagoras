@@ -127,6 +127,7 @@ import {
   modelRoomMayBeSized,
 } from "./pi-settings.js";
 import {
+  carriedSummaryOf,
   COMPACT_SHORT_SUMMARY,
   CONTEXT_AT_WALL_PERCENT,
   nothingLeftToCompact,
@@ -1086,6 +1087,11 @@ class SessionManager extends EventEmitter {
     // pi carries the summary in result when the compaction worked.
     if (msg.result) {
       this.compactionFailures.delete(sessionId);
+      // A compaction that worked, and left the chat carrying a document longer than this
+      // model's own numbers leave room for: the chain of summaries has climbed into the
+      // room the plan drew for it, and the next merge is the one that stops in the middle
+      // of an answer. Bounded here, where the document is written — see keepSummaryInRoom.
+      void this.keepSummaryInRoom(sessionId, msg);
       return;
     }
     // One of the portal's own attempts, which pi reports as a manual compaction: the ladder
@@ -1241,6 +1247,75 @@ class SessionManager extends EventEmitter {
       // compaction's end sends, and its own guards say whether anything is still
       // in hand. Unsaid, the chat sits idle with its turn in nobody's hands and
       // the Task it was working is settled as failed beside work that was not lost.
+      if (this.compactionResumePending.has(sessionId)) this.scheduleResumeAfterCompaction(sessionId);
+    }
+  }
+
+  /**
+   * Bound the document a chat carries, at the moment its compaction left it longer than
+   * this model's own numbers leave room for.
+   *
+   * A pair of numbers bounds where a chat is compacted; nothing about a pair bounds the
+   * document a compaction writes. pi's update prompt hands the previous summary back to
+   * the model and asks that everything in it be kept (`compaction-ladder.ts`, fact 2), so
+   * a long chat's document climbs from one compaction to the next — `bWDX-fMbF8eo` (8
+   * November) went 3,639 → 9,017 → 16,140 → 24,586 → 34,591 → 49,580 → 55,387 characters
+   * of summary over seven rounds half an hour apart, on the numbers this module writes for
+   * this model's window, and its last round wrote 16,367 tokens: a whole answer, so the
+   * round after it stopped in the middle and the chat heard the pair of notices.
+   *
+   * The plan leaves room for that climb: the document it is built around is the model's
+   * answer less what the next version needs beside it (`SUMMARY_ROOM_TO_GROW`), so a
+   * compaction that left a document past `plan.summaryTokens` has climbed into the room
+   * the plan drew for it, and the merge after it is the one that asks for more than one
+   * answer — pi's `generation hit the token cap`. The same bounded ask the ladder works
+   * with (see `giveCompactionRoom`) is tried here, at the moment the document is left too
+   * long rather than after the failure: the rewrite starts the chain again from something
+   * short, and the notices are not reached.
+   *
+   * Said nothing. A compaction that works is silent wherever compaction is involved — what
+   * a configuration does is read off the numbers in pi's file (see `applyCompactionPlan`),
+   * and a line is worth its cost only when it changes what the chat does: a failure the
+   * chat hears from, or room that arrived. Where this attempt does not work the document
+   * is still past the ceiling, the next merge fails, and the ladder says what it tried and
+   * what it found — which is what answered this shape before this method existed.
+   */
+  private async keepSummaryInRoom(sessionId: string, msg: any): Promise<void> {
+    // One act at a time on a chat, and not beside the ladder: these are the same call on
+    // the same document, and the ladder's answer about it is the fuller one.
+    if (this.compactionLadder.has(sessionId)) return;
+    const client = this.live.get(sessionId)?.client;
+    if (!client) return;
+    const state = await client?.getState?.().catch?.(() => undefined);
+    const window = Number(state?.model?.contextWindow);
+    const answer = Number(state?.model?.maxTokens);
+    const plan =
+      Number.isFinite(window) && Number.isFinite(answer) ? planForModel({ contextWindow: window, maxTokens: answer }) : null;
+    // A model this module has no plan for has no ceiling to be kept under: its answer is
+    // the ladder's, and the ladder is said where the chat fails on it.
+    if (!plan) return;
+    if (carriedSummaryOf(msg) <= plan.summaryTokens) return;
+    // The compact below is pi's own, and pi stops a run before it summarises — the turn
+    // that was going comes back to nobody. That is what `compactionInterruptedRun` exists
+    // for, and it is marked here rather than at the compaction's own start, for the reason
+    // giveCompactionRoom names: pi's settled line for the run it aborted arrives first.
+    if (this.inRun.has(sessionId)) {
+      this.compactionInterruptedRun.add(sessionId);
+      markCompactionResume(sessionId);
+    }
+    // The portal's own attempt, so its events are none of the chat's count — see the
+    // guard noteCompactionFailure keeps for exactly this.
+    this.compactionLadder.add(sessionId);
+    try {
+      await this.compact(sessionId, COMPACT_SHORT_SUMMARY);
+    } catch {
+      // It did not work. Nothing is said here: the next merge that fails is the chat's,
+      // and the ladder answers it with what it tried and what it found.
+    } finally {
+      this.compactionLadder.delete(sessionId);
+      this.compactionInterruptedRun.delete(sessionId);
+      // A compaction that took the turn and handed it on, with no run coming of its own
+      // after it — the same ending giveCompactionRoom's attempts end at.
       if (this.compactionResumePending.has(sessionId)) this.scheduleResumeAfterCompaction(sessionId);
     }
   }
