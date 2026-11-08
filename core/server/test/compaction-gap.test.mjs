@@ -74,6 +74,18 @@ class FakePi extends EventEmitter {
     this.autoCompaction = readCompactionSettings().enabled;
     this.reloads = (this.reloads ?? 0) + 1;
   }
+  /**
+   * How full a chat's context is, for the tests that read where a run ended.
+   *
+   * Only the chats a test has given a height are measured; the rest answer what pi
+   * answers when it has not measured a context — nothing — and the line about a run
+   * that ended at the wall of one stays silent for them, as it did before.
+   */
+  async getStats() {
+    const at = wallAt.get(this.sessionId);
+    if (at === undefined) return undefined;
+    return { contextUsage: { percent: at, contextWindow: (knownSizes.get(this.sessionId) ?? {}).contextWindow } };
+  }
   async shutdown() {}
   dispose() {}
   /** Accepting a message starts a run of its own, as pi's does. */
@@ -97,6 +109,8 @@ const pis = new Map();
 const noModel = new Set();
 /** What each chat's pi reports its model's window and answer to be, for the tests that read a model's size. */
 const knownSizes = new Map();
+/** How full each chat's context is, for the tests that read where a run ended. */
+const wallAt = new Map();
 SdkPiClient.create = async (opts) => {
   started.push(opts.sessionId);
   const pi = new FakePi(opts);
@@ -129,6 +143,8 @@ async function reset() {
   sessions.singleActiveQueue = [];
   noModel.clear();
   knownSizes.clear();
+  wallAt.clear();
+  sessions.contextWallSaid.clear();
   // One test's stopped chats are not the next one's record.
   clearCompactionStops({});
   // Nor is one test's own switch on compaction the next one's.
@@ -980,4 +996,66 @@ test("a chat whose compaction works says nothing about it at its start", async (
     0,
     "a compaction that works is not commented on, and the sizing that fixed one says nothing either",
   );
+});
+
+// The one place the room is read out rather than only written: a chat has spent a
+// run at the top of its window, the model answered with a token of thinking, and the
+// pair it was compacting on is one the portal wrote and no longer works. This is the
+// shape a chat of the week before reached at 96% of a 131,072-token window: the keep
+// that pair leaves is counted twice against the point it compacts above, so no cut is
+// reachable and the chat walked to the wall with nothing ever taken out. The room is
+// the portal's, so it is written there, and said there — a transcript that only shows
+// a chat stopping leaves the person no way to tell a room that arrived from a chat
+// that gave up. The chat is one whose pi named no model's size when it opened, which
+// is why it was not sized at its start.
+test("a chat that ends a run at the wall of its context is given its model's room there, and says what arrived", async () => {
+  try {
+    setSingleActiveSession(false);
+    mkdirSync(piDir(), { recursive: true });
+    // The pair an earlier build of the portal wrote for this model, with its record:
+    // the numbers are the portal's, so they may be brought up to date.
+    writeFileSync(
+      path.join(piDir(), "settings.json"),
+      JSON.stringify({ compaction: { enabled: true, modelOverrides: { "p/m": { keepRecentTokens: 58_072, reserveTokens: 33_000 } } } }, null),
+    );
+    noteCompactionPlan("p/m", { keepRecentTokens: 58_072, reserveTokens: 33_000 });
+
+    const a = chat();
+    // Its pi says which model it runs, but names no size: nothing is written at the
+    // chat's start, and the chat opens on the pair above.
+    await sessions.prompt(a, "work on A");
+    await flush();
+    // Now its pi can name the window and the answer it is working in, and how full
+    // the chat's context got while the run went: the wall of one.
+    knownSizes.set(a, { contextWindow: 131_072, maxTokens: 16_384 });
+    wallAt.set(a, 91);
+    pis.get(a).settle();
+    await flush();
+
+    const wall = noticesOf(a).filter((t) => t.includes("ends its run at"));
+    assert.equal(wall.length, 1, "the wall the run ended at is named in the chat once");
+    assert.match(wall[0], /ends its run at 91% of p\/m's 131,072-token window/);
+    assert.match(wall[0], /Its compaction cannot work as configured: it keeps 58,072 word for word, and that keep is counted twice against 98,072/, "the trouble the chat's own numbers cause, in the words for the shape they make");
+    assert.match(wall[0], /The portal has written this model's own numbers/, "the room that arrived, and who wrote it");
+    assert.match(wall[0], /keep-recent 30,460, keep-free 33,000/, "the pair this model's size asks for, which keeps less than the pair it was left on");
+    assert.match(wall[0], /ask the question again, or start a new chat/, "and what the person does with the turn that stopped at the wall");
+
+    // The numbers in pi's file are the new pair, under the model's name, and the
+    // portal's record of what it wrote follows the write: this chat's pi has read
+    // them, and its next turn has a cut to take.
+    const sized = readCompactionSettings().modelOverrides["p/m"];
+    const plan = planForModel({ contextWindow: 131_072, maxTokens: 16_384 });
+    assert.equal(sized.keepRecentTokens, plan.keepRecentTokens, "the chat's model is now compacted with this model's keep");
+    assert.equal(sized.reserveTokens, plan.reserveTokens, "and its keep-free");
+    assert.deepEqual(compactionPlanFor("p/m"), planRoom(plan), "and the record says these numbers are the portal's again");
+
+    // A second run ending at the same height says nothing: the numbers are already
+    // this model's, so there is no new room, and a chat that settles at 91% every
+    // run for a day is one line, not forty.
+    pis.get(a).settle();
+    await flush();
+    assert.equal(noticesOf(a).filter((t) => t.includes("ends its run at")).length, 1, "the same wall says nothing twice");
+  } finally {
+    await reset();
+  }
 });

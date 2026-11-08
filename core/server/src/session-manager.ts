@@ -138,6 +138,8 @@ import {
   PI_MODEL_ANSWER_DEFAULT,
   PI_MODEL_WINDOW_DEFAULT,
   type CompactionPlan,
+  type RoomShape,
+  type RoomFault,
 } from "./compaction-ladder.js";
 import { newChildChat, newPackageChat, type ChatAnswer, type ChildRun } from "./child-chats.js";
 
@@ -1473,7 +1475,24 @@ class SessionManager extends EventEmitter {
     const shape = roomShapeFor(size, room);
     const fault = roomFaultFor(shape);
     if (!shape || !fault) return null;
-    const why = ({
+    const why = this.roomFaultWords(shape, fault);
+    const parts = this.describeRoomParts(size, modelKey);
+    return `${subject} cannot work as configured: ${why}. ${parts.fit} ${parts.where}`;
+  }
+
+  /**
+   * What one pair of compaction numbers does to a model's window, in the middle of a
+   * sentence: the shape's own words, with its numbers named.
+   *
+   * `describeRoomFault` is this clause plus the numbers that would work and where they
+   * are changed; a chat whose run ended at the wall of its context wants the clause
+   * alone, because it is not offering a plan for the person to type — it is writing one
+   * now. So the three parts are kept apart here rather than guessed at by the caller:
+   * `roomFaultFor` chose the shape, these are the words for it, and the caller says
+   * which of them it has.
+   */
+  private roomFaultWords(shape: RoomShape, fault: RoomFault): string {
+    return ({
       "keeps-free-the-whole-window": `it keeps ${tokensOf(shape.reserveTokens)} free at the top of a ${tokensOf(shape.contextWindow)}-token window: a chat fills its context before pi asks for a compaction, which is where it stops with nothing compacted`,
       "keeps-past-its-point": `it keeps ${tokensOf(shape.keepRecentTokens)} word for word of a ${tokensOf(shape.contextWindow)}-token window and asks for a compaction only above ${tokensOf(shape.triggersAtTokens)}: pi never reaches the point it would summarise from, so nothing is ever compacted`,
       "compacts-at-the-wall": `it asks for a compaction only above ${tokensOf(shape.triggersAtTokens)} (${shape.triggersAtPercent}% of a ${tokensOf(shape.contextWindow)}-token window): a chat is at the wall of its context before that point, which is where it stops instead of being compacted`,
@@ -1482,10 +1501,21 @@ class SessionManager extends EventEmitter {
       "nothing-left-to-cut": `it keeps ${tokensOf(shape.keepRecentTokens)} word for word, and that keep is counted twice against ${tokensOf(shape.triggersAtTokens)} where it compacts — the last compaction's kept stretch, and this one's — with the summary that compaction left beside them, so what a chat could add since its last compaction is never enough for a cut to exist and nothing is ever compacted`,
       "summary-wont-fit": `it leaves a head of ${tokensOf(shape.headTokens)} of conversation to write into one summary while this model's answer is ${tokensOf(shape.maxTokens)} tokens, and a head that big has been seen written up at ${tokensOf(shape.summaryWantedTokens)}: the summary does not fit one answer, so compaction stops in the middle and the chat keeps its whole context`,
     })[fault];
-    // A plan of this module's is offered only when it works: for a model whose answer is
-    // too small for any summary of a head that fits its window, the honest line is that
-    // no pair works, not a pair that is named as working and reported as broken below
-    // its own sentence.
+  }
+
+  /**
+   * The other two parts of that sentence: the numbers that would work for a model's size,
+   * offered only when a pair of them works, and where such a pair is changed.
+   *
+   * Kept apart from the words for a shape, and returned in two pieces, so a caller may
+   * use either half alone: a chat whose run ended at the wall of its context names the
+   * trouble its own numbers cause and then writes the pair it is allowed to write, so
+   * the sentence about where a person would type them is not that chat's answer.
+   */
+  private describeRoomParts(
+    size: { contextWindow: number; maxTokens: number },
+    modelKey: string,
+  ): { fit: string; where: string } {
     const plan = planForModel(size);
     const planWorks = plan && !roomFaultFor(roomShapeFor(size, planRoom(plan)));
     const fit = planWorks
@@ -1498,7 +1528,7 @@ class SessionManager extends EventEmitter {
         : owner === "person-plain"
           ? `They are the plain numbers every chat inherits; a model's own numbers — this chat's Context card, or the model's row under Settings → Providers — are what a window this big needs.`
           : `The portal owns these numbers, so a pair that cannot work here means the model's row under Settings → Providers says a window or an answer that does not add up.`;
-    return `${subject} cannot work as configured: ${why}. ${fit} ${where}`;
+    return { fit, where };
   }
 
   /**
@@ -1552,7 +1582,10 @@ class SessionManager extends EventEmitter {
    * is slow, answers in a token of thinking, and stops. So the line names the share, the
    * numbers the chat is compacting on, and whose they are; where the portal owns the
    * numbers it does not stop at saying, it sizes the model (see `applyCompactionPlan`),
-   * and the line is the sizing's own.
+   * and the line names the trouble the pair it was on caused, the numbers that took
+   * their place, and what to do with the turn that stopped there. Where the numbers
+   * were already this model's nothing is written, and the line above about the run
+   * that stopped is the whole answer.
    */
   private async handleContextAtWall(sessionId: string, client: PiClient): Promise<void> {
     const stats = await client.getStats?.().catch?.(() => undefined);
@@ -1576,9 +1609,32 @@ class SessionManager extends EventEmitter {
       : "";
 
     // The numbers are nobody's, and the chat is at the wall on them: that is the state
-    // the sizing exists for, and the sizing says its own line in this chat.
+    // the sizing exists for. It is worked here, and said — the chat has just spent a run
+    // at the top of its window, and a person reading its transcript wants to know that
+    // the room arrived and what the new pair does, not that a line was skipped. Where
+    // the numbers were already this model's, nothing was written and there is nothing
+    // new to say: the line above, about the run that stopped, is the whole answer.
     if (plan && modelKey && roomOwnership(readCompactionSettings(), modelKey, compactionPlanFor(modelKey)) === "plan") {
+      const before = effectiveCompactionTokens(readCompactionSettings(), modelKey);
       const sized = await this.applyCompactionPlan(sessionId, client).catch(() => null);
+      const after = effectiveCompactionTokens(readCompactionSettings(), modelKey);
+      if (after.keepRecentTokens !== before.keepRecentTokens || after.reserveTokens !== before.reserveTokens) {
+        // What the numbers the chat was on do to this window, in the words for the shape
+        // they make — the reason a run was spent at the top of a window at all. A pair
+        // that makes no shape is a pair that works: the chat filled its window between
+        // compactions, and only the fact that it is at the wall is worth naming there.
+        const shape = roomShapeFor({ contextWindow: window, maxTokens: answer }, before);
+        const fault = shape ? roomFaultFor(shape) : null;
+        const because = shape && fault ? ` Its compaction cannot work as configured: ${this.roomFaultWords(shape, fault)}.` : "";
+        this.record(sessionId, "portal_notice", {
+          text: `This chat ends its run at ${Math.round(percent)}% of ${modelKey}'s ${tokensOf(window)}-token window.${because} The portal has written this model's own numbers where they are its to write — keep-recent ${tokensOf(after.keepRecentTokens)}, keep-free ${tokensOf(after.reserveTokens)}, under ${modelKey}'s name in pi's settings file, which this chat has just read. That pair asks for a compaction above ${tokensOf(plan.triggersAtTokens)} (${plan.triggersAtPercent}% of the window) and leaves a chat that gets there at ${tokensOf(plan.landsAtTokens)}, so it works ${tokensOf(plan.progressTokens)} of conversation between one compaction and the next. The turn that stopped at the wall is not coming back on its own: ask the question again, or start a new chat.`,
+          warning: true,
+        });
+        return;
+      }
+      // The numbers are already this model's, and the chat is still at the wall on a
+      // pair that works: its compactions are the ladder's to answer, and its own line
+      // says what happened there. Nothing new about the numbers is worth a line here.
       if (sized) return;
     }
     const where =
@@ -1734,7 +1790,7 @@ class SessionManager extends EventEmitter {
     const room = limit > 0 && answer.output > 0 ? ` It wrote ${tokensOf(answer.output)} ${answer.output === 1 ? "token" : "tokens"}, where one answer gets ${tokensOf(limit)}.` : "";
     const where = answer.wrote ? "in the middle of its answer" : "in the middle of its thinking, without writing an answer";
     this.record(sessionId, "portal_notice", {
-      text: `The model stopped ${where}${room} That is the chat's context being full, not its answer running out: a carry-on is answered the same way, so none was sent. Start a new chat, give this one's window room in the Context card, or compact it while what it has to summarise fits one answer.`,
+      text: `The model stopped ${where}.${room} That is the chat's context being full, not its answer running out: a carry-on is answered the same way, so none was sent. Start a new chat, give this one's window room in the Context card, or compact it while what it has to summarise fits one answer.`,
       warning: true,
     });
   }

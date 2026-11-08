@@ -301,7 +301,7 @@ test("a model with no room left in its context is not carried on, and says why",
     const said = notices(a);
     assert.equal(said.length, 1, "the stop was said once");
     assert.match(said[0], /stopped in the middle of its thinking, without writing an answer/);
-    assert.match(said[0], /wrote 1 token, where one answer gets 16,384/);
+    assert.match(said[0], /without writing an answer\. It wrote 1 token, where one answer gets 16,384/);
     assert.match(said[0], /context being full/);
 
     // The room is free, so the waiting Task starts: the queue is not stalled by
@@ -328,8 +328,7 @@ test("an answer stopped short of its limit is left as an end, with its tokens na
     assert.equal(aPi.carries(), 0, "no carry-on: the answer did not run out of its output");
     const said = notices(a);
     assert.equal(said.length, 1, "said once");
-    assert.match(said[0], /stopped in the middle of its answer/);
-    assert.match(said[0], /wrote 987 tokens/);
+    assert.match(said[0], /stopped in the middle of its answer\. It wrote 987 tokens/);
   } finally {
     reset();
   }
