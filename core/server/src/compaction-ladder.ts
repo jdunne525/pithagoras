@@ -54,6 +54,22 @@
  *    the head it leaves is reachable *with the last keep and the last document beside
  *    it*, not only under the point it compacts above.
  *
+ * 5. **A merge keeps the document it was given, and adds to it.** pi's update prompt
+ *    opens with `Update the existing structured summary with new information` and asks
+ *    that every section of the previous document be kept, so the document of the next
+ *    compaction is the document of this one plus what the model writes about the new
+ *    head. Measured on the numbers this module writes for this machine's model
+ *    (`jUpqIIxeWIWe`, 8 November): a first compaction wrote 4,497 tokens about a head
+ *    of 19,000; the merge after it kept that document and wrote the new head beside
+ *    it, coming out at 11,993 of the model's 16,384-token answer; the third merge
+ *    asked for more than one answer and stopped in the middle, and the chat heard the
+ *    pair of notices. The plan did its job throughout — the chat compacted at 98,072
+ *    and landed at 36,017 then 41,681 — and the failure came at its third compaction,
+ *    on a chat that had just started. So a chain is one merge's additions away from
+ *    the answer's length after any two compactions, and the room the answer needs
+ *    beside a document is what the model writes about the head this model's numbers
+ *    leave (fact 1's ratio), which is more than any plan keeps beside its own.
+ *
  * ## The plan the numbers come from
  *
  * Two numbers, in the model's own `compaction.modelOverrides`, chosen so all four
@@ -79,19 +95,35 @@
  * the 98,072 it compacts above, so the chat has to add a third of its window before a
  * cut exists, and it meets the top of its window before it adds them.
  *
- * What the plan cannot do is stop a chain of summaries growing (fact 2): on this
- * model's window a nine-section document and its next version do not both fit one
- * answer at any head this model writes about, so a chat that walks there is worked by
- * the ladder below — the summary asked for in words first, at the compaction that left
- * the document past the plan's own ceiling, then the numbers — rather than by a pair of
- * numbers that would fit.
+ * What the plan cannot do is stop a chain of summaries growing (facts 2 and 5): a
+ * merge keeps the document it was given, so the document is what only ever grows,
+ * and its room is the model's answer. On this machine's model the answer (16,384)
+ * and the document's own length (12,000) leave a head of 8,768 beside one merge's
+ * additions — under the document's own length, which is no cut at all (fact 1) — so
+ * the pair that cuts well and the chain that fits one answer are not the same pair
+ * on this model. What bounds the chain is the bounded ask worked at the document
+ * (`session-manager.ts`, `keepSummaryInRoom`), asked wherever the document and what
+ * the next merge would write about this model's head do not both fit one answer —
+ * `mergeAdditionsFor` below, not a length the plan names — and only there: a
+ * document inside that room is left as it is, and a head small enough to make the
+ * chain fit is a head no compaction would take anything out of.
+ *
+ * On this machine's model that room is 4,000 tokens of its answer, so the ask is
+ * worked at most of these chats' compactions and pays a second summarization each
+ * time. That is the honest reading of these measurements, not a cost to hide: the
+ * alternative is the pair of notices at every third compaction, which is what the
+ * person reported, and a chat whose document is kept short lands further from its
+ * wall than one whose document is left to climb to the answer.
  *
  * It is sized for the state the chain settles in, not for the first compaction of a
  * fresh chat: a chat that has never compacted has no last keep and no last document in
  * front of the cut, so its first head is the whole of the trigger less one keep, which is
  * bigger than these numbers name. That first compaction, and the one that follows a
  * summary the ladder bounded in words, are the states the ladder's ask is written for —
- * what the pair is written for is the state that runs for hours afterwards.
+ * what the pair is written for is the point a chat is compacted above and where it lands,
+ * which is what runs for hours afterwards; the document beside its keep is the bound's,
+ * not the pair's, and is what keeps that state inside one answer instead of three merges
+ * from its cap.
  */
 
 /** pi's own keep-free, and the floor for the portal's: a chat must compact before the answer is squeezed. */
@@ -120,7 +152,7 @@ const SUMMARY_OF_HEAD = 0.5;
  * a pi reported no usage for. Read as a factor, and the check it is worth is a plan's own
  * ceiling, which was measured rather than counted — see `carriedSummaryOf`. */
 const SUMMARY_CHARS_OF_TOKEN = 4;
-/** The room one answer must keep for the next document's additions: the chain of summaries grows, and a document at the answer's length has nothing to grow into (fact 2). */
+/** The room a plan keeps beside the document it draws: a document at the answer's own length has nothing left to write into (fact 2). The room a *chain* needs beside a document is what one merge writes about the head the pair leaves — `mergeAdditionsFor` below, at fact 5 — and where the two disagree the chain is bounded at the larger room, not the pair shrunk: a head under the document's own length is no cut at all (fact 1). */
 const SUMMARY_ROOM_TO_GROW = 4_000;
 
 /** Below this, a compaction buys minutes and nothing else. */
@@ -190,6 +222,36 @@ function summaryRoomFor(headTokens: number, maxTokens: number): number {
 }
 
 /**
+ * What one merge adds to the document it was given, in tokens: the additions about a
+ * head, at the model's own writing length (fact 1's ratio).
+ *
+ * A merge is not a rewrite (fact 5): it keeps everything in the document it was
+ * handed and writes the new head beside it, so the document the next compaction
+ * carries is `the document this one left + this`. It is worth its own function
+ * because it is the question the chat's document asks — whether the next merge
+ * finishes inside one answer — and the answer needs the head this chat's numbers
+ * leave beside it, which is not a length any plan names.
+ */
+export function mergeAdditionsFor(headTokens: number): number {
+  return Math.floor(Math.max(0, headTokens) * SUMMARY_OF_HEAD);
+}
+
+/**
+ * Whether the next merge of a document that long, with a head this long beside it,
+ * fits one of the model's answers.
+ *
+ * False says the document is one merge from the cap: the merge writes more than one
+ * answer, pi calls it `generation hit the token cap`, nothing is compacted and the
+ * chat hears the pair of notices. That is the moment to bound the document, and the
+ * room is this model's answer less what its own writing adds — `jUpqIIxeWIWe` (8
+ * November) reached it at the third compaction of a chat that had just started, on
+ * the numbers this module writes for this model's window.
+ */
+export function nextDocumentFitsFor(carriedSummaryTokens: number, headTokens: number, maxTokens: number): boolean {
+  return Math.floor(carriedSummaryTokens) + mergeAdditionsFor(headTokens) <= Math.floor(maxTokens);
+}
+
+/**
  * What a pair of numbers leaves reachable at the point a chat is asked to compact.
  *
  * This is fact 4 read as an equation: at the threshold a chat's context is its last
@@ -241,7 +303,11 @@ export function planForModel(size: ModelSize): CompactionPlan | null {
   if (triggersAt <= 0) return null;
 
   // A head, and the document written about it, have to share one of the model's answers
-  // with room left for the chain's next additions (fact 2): the model writes the
+  // with room left for the chain's next additions (fact 2, at the plan's own room — a
+  // chain that needs more than this is bounded at its document, see `session-manager`
+  // 's `keepSummaryInRoom`, and shrinking this head further is shrinking a head that
+  // the document written about it is bigger than, which is no cut at all: fact 1).
+  // The model writes the
   // document it is asked for at up to half the head, so the head that leaves room is
   // twice what is left of the answer's length. Below its floor a model writes at the
   // floor whatever it reads, so a model whose answer cannot hold a document at the

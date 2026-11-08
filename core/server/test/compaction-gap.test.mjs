@@ -17,7 +17,7 @@ mkdirSync(path.join(home, "work"), { recursive: true });
 
 const { createSession, COMPACT_STOP_NOTICE, COMPACT_STOP_NO_MODEL, appendEvent, chatsWithCompactionOffByChoice, chatModel, clearCompactionStops, compactionStopWasAnswered, compactionStops, eventsSince, getSession, getDb, noteCompactionChoice, setSingleActiveSession, noteCompactionPlan, compactionPlanFor, portalCompactionPlans } = await import("../dist/db.js");
 const { readCompactionSettings, writeCompactionSettings, writeCompactionModelRoom } = await import("../dist/pi-settings.js");
-const { carriedSummaryOf, COMPACT_SHORT_SUMMARY, planForModel, planRoom, roomShapeFor, roomFaultFor } = await import("../dist/compaction-ladder.js");
+const { carriedSummaryOf, COMPACT_SHORT_SUMMARY, planForModel, planRoom, roomShapeFor, roomFaultFor, nextDocumentFitsFor } = await import("../dist/compaction-ladder.js");
 const { SdkPiClient } = await import("../dist/pi/sdk-client.js");
 const { sessions, PromptQueuedForSingleActive } = await import("../dist/session-manager.js");
 test.after(() => getDb().close());
@@ -472,17 +472,19 @@ test("compactions that keep failing are said, and stop being attempted", async (
   }
 });
 
-// A compaction that worked, and left the chat carrying a document longer than the plan
-// for its model's size leaves room for. The numbers say where a chat is compacted, never
-// what length it is compacted to (fact 2: pi's update prompt merges the previous summary
-// into the next one, so the document climbs), and a document past the plan's ceiling has
-// climbed into the room the plan drew for the climb — the next merge of that chat's is the
-// one that asks for more than one answer, and the chat hears the pair of notices about a
-// summary that did not fit. So the ladder's bounded ask is worked at the compaction that
-// left the document long, and the chain starts again short. It is said nothing: an act on
-// a compaction that works is silent, and what earns a line is a failure or room that
-// changed what the chat does.
-test("a compaction that left the chat carrying too long a summary is bounded there", async () => {
+// A compaction that worked, and left the chat carrying a document one merge away from
+// the model's answer. The numbers say where a chat is compacted, never what length it
+// is compacted to (fact 5: pi's update prompt hands the previous document back and asks
+// that everything in it be kept, so the next document is that document plus what the
+// model writes about the new head) — and on this machine's model, at the plan's own
+// numbers, that is the third compaction of a chat that had just started: `jUpqIIxeWIWe`
+// (8 November) carried 11,993 tokens of a 16,384-token answer after two merges, and the
+// third stopped in the middle, which is the pair of notices the person read. So the
+// bounded ask is worked at the compaction that left the document one merge from the cap,
+// where the next merge would not fit one answer beside this chat's head. It is said
+// nothing: an act on a compaction that works is silent, and what earns a line is a
+// failure or room that changed what the chat does.
+test("a compaction that left the chat carrying a document one merge from the cap is bounded there", async () => {
   try {
     setSingleActiveSession(false);
     const a = chat();
@@ -494,36 +496,36 @@ test("a compaction that left the chat carrying too long a summary is bounded the
     const pi = pis.get(a);
     const said = noticesOf(a);
 
-    // What the plan leaves a chat to carry: its answer, less the room the next version
-    // of the document needs beside it.
+    // What the chat is left carrying, and whether the merge after it fits one answer
+    // beside the head its own numbers leave: the room is what the model writes about
+    // that head, and the plan's own document is not what asks the question.
     const plan = planForModel({ contextWindow: 131_072, maxTokens: 16_384 });
     assert.ok(plan, "a model this module has numbers for");
 
-    // A compaction that worked, and wrote a document past that ceiling — the shape the
-    // chain reaches half an hour into a long chat, one round before the failure.
+    // A compaction that worked, and wrote the document the chain was measured at: what
+    // that compaction left the chat carrying, and whether the merge after it fits one
+    // answer beside the head this model's numbers leave.
+    const measured = { summary: "x".repeat(20_948), usage: { input: 22_396, output: 11_993 } };
     pi.emit("event", { type: "compaction_start", reason: "threshold" });
-    pi.emit("event", {
-      type: "compaction_end",
-      reason: "threshold",
-      willRetry: false,
-      result: { summary: "x".repeat(60_000), usage: { input: 100_000, output: 15_000 } },
-    });
+    pi.emit("event", { type: "compaction_end", reason: "threshold", willRetry: false, result: measured });
     await flush();
-    assert.ok(carriedSummaryOf({ result: { usage: { output: 15_000 } } }) > plan.summaryTokens, "the chat is left carrying more than the plan lets it");
+    assert.equal(
+      nextDocumentFitsFor(carriedSummaryOf({ result: measured }), plan.headTokens, 16_384),
+      false,
+      "the document this model was measured at, with what it writes about the head this model's numbers leave beside it, is more than one of its answers: the next merge is the failure",
+    );
     assert.deepEqual(pi.compacts, [COMPACT_SHORT_SUMMARY], "the same call, asked for a summary in short words");
     assert.equal(noticesOf(a).length, said.length, "and nothing said about it");
 
-    // A compaction that left a document inside the ceiling is nobody's to bound: the
-    // room beside the document is still the next version's, and the chat is left alone.
+    // A compaction that left a document an answer still holds room beside — a bounded
+    // ask's own result, at the length the ask was measured to leave — is nobody's to
+    // bound again: the next merge fits, and the chat is left on its plan's landing.
+    const bounded = { summary: "x".repeat(12_628), usage: { input: 10_503, output: 3_000 } };
     pi.emit("event", { type: "compaction_start", reason: "threshold" });
-    pi.emit("event", {
-      type: "compaction_end",
-      reason: "threshold",
-      willRetry: false,
-      result: { summary: "x".repeat(60_000), usage: { input: 100_000, output: 8_000 } },
-    });
+    pi.emit("event", { type: "compaction_end", reason: "threshold", willRetry: false, result: bounded });
     await flush();
-    assert.deepEqual(pi.compacts, [COMPACT_SHORT_SUMMARY], "nothing asked of a document the plan has room for");
+    assert.ok(nextDocumentFitsFor(carriedSummaryOf({ result: bounded }), plan.headTokens, 16_384), "one more merge still fits inside one answer beside this chat's head");
+    assert.deepEqual(pi.compacts, [COMPACT_SHORT_SUMMARY], "nothing asked of a document the room is still beside");
   } finally {
     await reset();
   }

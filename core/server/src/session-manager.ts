@@ -136,6 +136,7 @@ import {
   roomShapeFor,
   roomFaultFor,
   summaryRanOutOfRoom,
+  nextDocumentFitsFor,
   PI_MODEL_ANSWER_DEFAULT,
   PI_MODEL_WINDOW_DEFAULT,
   type CompactionPlan,
@@ -1264,20 +1265,30 @@ class SessionManager extends EventEmitter {
    * this model's window, and its last round wrote 16,367 tokens: a whole answer, so the
    * round after it stopped in the middle and the chat heard the pair of notices.
    *
-   * The plan leaves room for that climb: the document it is built around is the model's
-   * answer less what the next version needs beside it (`SUMMARY_ROOM_TO_GROW`), so a
-   * compaction that left a document past `plan.summaryTokens` has climbed into the room
-   * the plan drew for it, and the merge after it is the one that asks for more than one
-   * answer — pi's `generation hit the token cap`. The same bounded ask the ladder works
-   * with (see `giveCompactionRoom`) is tried here, at the moment the document is left too
-   * long rather than after the failure: the rewrite starts the chain again from something
-   * short, and the notices are not reached.
+   * The plan leaves room for that climb, and its room is the wrong question for the
+   * chat: the number it is built around (`SUMMARY_ROOM_TO_GROW`) is what the plan keeps
+   * beside the document it draws so that document is not at the answer's own length,
+   * and a chain of these reaches the cap whatever that room is — `jUpqIIxeWIWe` (8
+   * November), on the numbers this module writes for this model's window, was at 36,017
+   * and 41,681 of its 131,072 after two compactions, carrying a document of 11,993 of
+   * the model's 16,384-token answer, and its third merge asked for that document plus
+   * what the model writes about the head beside it and stopped in the middle. What
+   * bounds the chain is the merge itself: `nextDocumentFitsFor` answers whether the
+   * document the chat is carrying, with what this model writes about the head its own
+   * numbers leave beside it (fact 5), still fits one answer. Where it does not, the
+   * next merge is the failure, and the bounded ask is worked here rather than after it;
+   * where it does, the document is left as it is and the chat keeps its plan's landing.
+   * On this machine's model that room is 4,000 tokens of its answer, so the ask is worked
+   * at most of a long chat's compactions and pays a second summarization for each — the
+   * measurements say the model writes at more than that whatever it is asked (fact 1), so
+   * the ask is what keeps the document there; the alternative is the pair of notices at
+   * every third compaction, which is what the person reported.
    *
-   * Said nothing. A compaction that works is silent wherever compaction is involved — what
-   * a configuration does is read off the numbers in pi's file (see `applyCompactionPlan`),
+   * Said nothing. A compaction that works is silent wherever compaction is involved —
+   * what a configuration does is read off the numbers in pi's file (see `applyCompactionPlan`),
    * and a line is worth its cost only when it changes what the chat does: a failure the
    * chat hears from, or room that arrived. Where this attempt does not work the document
-   * is still past the ceiling, the next merge fails, and the ladder says what it tried and
+   * is still past the room, the next merge fails, and the ladder says what it tried and
    * what it found — which is what answered this shape before this method existed.
    */
   private async keepSummaryInRoom(sessionId: string, msg: any): Promise<void> {
@@ -1291,10 +1302,13 @@ class SessionManager extends EventEmitter {
     const answer = Number(state?.model?.maxTokens);
     const plan =
       Number.isFinite(window) && Number.isFinite(answer) ? planForModel({ contextWindow: window, maxTokens: answer }) : null;
-    // A model this module has no plan for has no ceiling to be kept under: its answer is
-    // the ladder's, and the ladder is said where the chat fails on it.
+    // A model this module has no plan for has no head to be measured beside its document:
+    // its answer is the ladder's, and the ladder is said where the chat fails on it.
     if (!plan) return;
-    if (carriedSummaryOf(msg) <= plan.summaryTokens) return;
+    // The document and what one more merge would write about the head this chat's numbers
+    // leave beside it still share one of this model's answers: the next merge finishes,
+    // the room the numbers were drawn for is still there, and the chat is left alone.
+    if (nextDocumentFitsFor(carriedSummaryOf(msg), plan.headTokens, answer)) return;
     // The compact below is pi's own, and pi stops a run before it summarises — the turn
     // that was going comes back to nobody. That is what `compactionInterruptedRun` exists
     // for, and it is marked here rather than at the compaction's own start, for the reason
