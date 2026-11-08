@@ -110,6 +110,10 @@ import {
   compactionStops,
   compactionStopModel,
   noteCompactionStop,
+  noteCompactionStopShape,
+  compactionStopShape,
+  COMPACT_STOP_SUMMARY_ROOM,
+  COMPACT_STOP_NO_ROOM,
   chatsWithCompactionOffByChoice,
   COMPACT_STOP_NOTICE,
   clearCompactionStops,
@@ -129,6 +133,7 @@ import {
 import {
   carriedSummaryOf,
   COMPACT_SHORT_SUMMARY,
+  COMPACT_NO_ROOM_NOTICE,
   CONTEXT_AT_WALL_PERCENT,
   nothingLeftToCompact,
   planForModel,
@@ -137,6 +142,8 @@ import {
   roomFaultFor,
   summaryRanOutOfRoom,
   nextDocumentFitsFor,
+  landedRoomOf,
+  compactionRoomWonFor,
   PI_MODEL_ANSWER_DEFAULT,
   PI_MODEL_WINDOW_DEFAULT,
   type CompactionPlan,
@@ -421,6 +428,17 @@ interface LiveSession {
   client: PiClient;
   executor: Executor;
 }
+
+/**
+ * This chat's model as pi keys its compaction numbers: "provider/model", the same key
+ * its `compaction.modelOverrides` are written under. Empty when a pi cannot say what it
+ * is running (a container's, an older one), which is a chat only the plain numbers
+ * answer. One expression for the key, since a wrong one reads a room for another model.
+ */
+const modelKeyOfState = (state: unknown): string => {
+  const model = (state as any)?.model;
+  return model?.provider && model.id ? `${model.provider}/${model.id}` : "";
+};
 
 /**
  * Owns every running pi process.
@@ -1088,11 +1106,11 @@ class SessionManager extends EventEmitter {
     // pi carries the summary in result when the compaction worked.
     if (msg.result) {
       this.compactionFailures.delete(sessionId);
-      // A compaction that worked, and left the chat carrying a document longer than this
-      // model's own numbers leave room for: the chain of summaries has climbed into the
-      // room the plan drew for it, and the next merge is the one that stops in the middle
-      // of an answer. Bounded here, where the document is written — see keepSummaryInRoom.
-      void this.keepSummaryInRoom(sessionId, msg);
+      // A compaction that worked still has a room to be read at it: where it left the
+      // chat, against where it was asked above, and what length the chat is left carrying.
+      // Both are asked here, where the document is written and the room is known — see
+      // keepCompactionRoom.
+      void this.keepCompactionRoom(sessionId, msg);
       return;
     }
     // One of the portal's own attempts, which pi reports as a manual compaction: the ladder
@@ -1253,11 +1271,33 @@ class SessionManager extends EventEmitter {
   }
 
   /**
-   * Bound the document a chat carries, at the moment its compaction left it longer than
-   * this model's own numbers leave room for.
+   * Read the room at a compaction that worked: what it took out of the chat, and what
+   * length it left the chat carrying.
    *
-   * A pair of numbers bounds where a chat is compacted; nothing about a pair bounds the
-   * document a compaction writes. pi's update prompt hands the previous summary back to
+   * Two questions are answerable at the one moment a compaction reports, and the second
+   * is asked only where the first says the room was won.
+   *
+   * Whether this compaction won any room at all is pi's own two numbers, and they say a
+   * state no pair of numbers this chat runs on takes out of (`compaction-ladder.ts`,
+   * fact 6): the chat left at the point it is asked above again, so the next turn asks
+   * again and the next compaction has only what the chat just added to take out of. What
+   * sits above the reach of those numbers is the part of the chat's context no compaction
+   * reads — its instructions and the tools it is offered — and a chat whose last keep and
+   * last document are already at its trigger point is not got below it by compacting more.
+   * That is `bWDX-fMbF8eo` (8 November), at the numbers this module writes for this
+   * model's window: seven compactions in half an hour, each taking 6,400-7,000 tokens out
+   * of a context it had only just been asked above and leaving it at 95,665 → 108,816 of
+   * a 131,072-token window against the 98,072 it was asked above at. Its document climbed
+   * to the model's answer there, and the merge after it stopped in the middle — which is
+   * what a chat that has been left that way looks like, and what the pair of notices came
+   * from. Nothing about a summary went wrong, so the chat's own count of failures is not
+   * what stops it: the attempts are stopped at the compaction that won none, and said once
+   * per chat with the two numbers (see `roomNeverWon` and `COMPACT_NO_ROOM_NOTICE`), which
+   * leaves the chat to work in the room it has and to be told where it reaches its wall.
+   *
+   * Where the room was won, the question left is the length of the document. A pair of
+   * numbers bounds where a chat is compacted; nothing about a pair bounds the document
+   * a compaction writes. pi's update prompt hands the previous summary back to
    * the model and asks that everything in it be kept (`compaction-ladder.ts`, fact 2), so
    * a long chat's document climbs from one compaction to the next — `bWDX-fMbF8eo` (8
    * November) went 3,639 → 9,017 → 16,140 → 24,586 → 34,591 → 49,580 → 55,387 characters
@@ -1284,14 +1324,11 @@ class SessionManager extends EventEmitter {
    * the ask is what keeps the document there; the alternative is the pair of notices at
    * every third compaction, which is what the person reported.
    *
-   * Said nothing. A compaction that works is silent wherever compaction is involved —
-   * what a configuration does is read off the numbers in pi's file (see `applyCompactionPlan`),
-   * and a line is worth its cost only when it changes what the chat does: a failure the
-   * chat hears from, or room that arrived. Where this attempt does not work the document
-   * is still past the room, the next merge fails, and the ladder says what it tried and
-   * what it found — which is what answered this shape before this method existed.
+   * Said nothing where the room was won and the document is inside the merge's room. A
+   * compaction that works is silent about it; what earns a line is the state where no
+   * further compaction changes what the chat does — that one is said, and stopped.
    */
-  private async keepSummaryInRoom(sessionId: string, msg: any): Promise<void> {
+  private async keepCompactionRoom(sessionId: string, msg: any): Promise<void> {
     // One act at a time on a chat, and not beside the ladder: these are the same call on
     // the same document, and the ladder's answer about it is the fuller one.
     if (this.compactionLadder.has(sessionId)) return;
@@ -1305,8 +1342,36 @@ class SessionManager extends EventEmitter {
     // A model this module has no plan for has no head to be measured beside its document:
     // its answer is the ladder's, and the ladder is said where the chat fails on it.
     if (!plan) return;
-    // The document and what one more merge would write about the head this chat's numbers
-    // leave beside it still share one of this model's answers: the next merge finishes,
+    // Where this chat is asked above again, on the numbers it actually runs on: a chat
+    // that has never been sized is on pi's or a person's pair, and the plan's own point
+    // is not what the next turn is measured against.
+    const modelKey = modelKeyOfState(state);
+    const askedAbove = Math.floor(window) - Number(effectiveCompactionTokens(readCompactionSettings(), modelKey).reserveTokens);
+    // The room this compaction won. Not asked of a compaction the portal itself started
+    // (that is a manual one, and this chat is in the ladder's hands over its document),
+    // and not asked of a pi that does not report where it left the chat.
+    if (msg.reason !== "manual") {
+      const landed = landedRoomOf(msg);
+      if (landed && !compactionRoomWonFor(landed, askedAbove)) {
+        // No room was won, and no further compaction changes that. Said once per chat,
+        // with the chat's own two numbers, and its auto-compaction is left off: the shape
+        // that asks for it is a chat that has been compacting for half an hour and is
+        // where it was asked to be, and what it earns from here is its room, and the wall
+        // it reaches in it (see `handleContextAtWall`).
+        if (!this.roomNeverWon.has(sessionId)) {
+          this.roomNeverWon.add(sessionId);
+          const kept = Number(effectiveCompactionTokens(readCompactionSettings(), modelKey).keepRecentTokens);
+          const carried = carriedSummaryOf(msg);
+          const fixedPart = landed.estimatedTokensAfter - kept - carried;
+          const why =
+            `its compaction took ${tokensOf(landed.takenTokens)} of the chat's ${tokensOf(landed.tokensBefore)} tokens and left it at ${tokensOf(landed.estimatedTokensAfter)} — at or above the ${tokensOf(askedAbove)} these numbers ask above again, so its next turn asks again. Of what it is left with, ${tokensOf(kept)} is what these numbers keep word for word and ${tokensOf(carried)} is the summary its last compaction wrote beside them${fixedPart > 0 ? `, which leaves at least ${tokensOf(fixedPart)} — ${Math.round((fixedPart / window) * 100)}% of this model's ${tokensOf(window)}-token window — of the chat's own instructions and the tools it is offered, above the reach of any keep-recent or keep-free pair it runs on` : ""}: a chat whose last keep and last document are at the point it is asked above cannot be got below it by compacting more, and every turn pays for a merge of a document that only ever grows`;
+          await this.stopAutoCompaction(sessionId, why, COMPACT_STOP_NO_ROOM);
+        }
+        return;
+      }
+    }
+    // The document, and what one more merge would write about the head this chat's numbers
+    // leave beside it, still share one of this model's answers: the next merge finishes,
     // the room the numbers were drawn for is still there, and the chat is left alone.
     if (nextDocumentFitsFor(carriedSummaryOf(msg), plan.headTokens, answer)) return;
     // The compact below is pi's own, and pi stops a run before it summarises — the turn
@@ -1349,10 +1414,22 @@ class SessionManager extends EventEmitter {
    * pi's file, and the room that answers it (this model's keep-recent, its
    * keep-free, its Max output tokens) switches the attempts back on for exactly
    * these chats.
+   *
+   * `shape` names which kind of stop asked for it — `COMPACT_STOP_SUMMARY_ROOM`, a
+   * summary the model could not write in one answer, twice in a row (what every chat was
+   * stopped for before this method knew the other kind, and so what a chat with no record
+   * of its own is read as), or `COMPACT_STOP_NO_ROOM`, a compaction that left the chat at
+   * the point it is asked above again — because the two are said differently in the chat
+   * and explained differently after a restart, and only the one is about a summary that
+   * went wrong. What they have in common is the act, and it is this one. The kind is kept
+   * with the stop (`noteCompactionStopShape`) so the two never disagree.
    */
-  private async stopAutoCompaction(sessionId: string, why: string): Promise<void> {
+  private async stopAutoCompaction(sessionId: string, why: string, shape = COMPACT_STOP_SUMMARY_ROOM): Promise<void> {
     const client = this.live.get(sessionId)?.client;
     if (!client) return;
+    // Which sentence this chat's stop is told with, and the kind it is recorded as: one
+    // pair of words for one kind.
+    const notice = shape === COMPACT_STOP_NO_ROOM ? COMPACT_NO_ROOM_NOTICE : COMPACT_STOP_NOTICE;
     // What pi's file says about the switch before this chat's off is written into it:
     // pi has one switch for every chat, and this chat's off is its own pi's to keep —
     // see honorCompactionOffs, which gives the file its switch back the moment the
@@ -1370,6 +1447,7 @@ class SessionManager extends EventEmitter {
     // its model leaves an empty key, which only the plain numbers answer.
     const modelKey = await this.modelKeyOfClient(client).catch(() => "");
     noteCompactionStop(sessionId, modelKey);
+    noteCompactionStopShape(sessionId, shape);
     // The chat is off, its own pi only; the file is what every other chat reads.
     // One chat's off in the shared file is repaired when the chat's pi is saved, at
     // the portal's own start, and by the timer that tends the file — not here, and
@@ -1378,7 +1456,7 @@ class SessionManager extends EventEmitter {
     // for it (a chat opened while its run is in flight waits on it).
     await this.honorCompactionOffs({ ids: [sessionId], clients: new Map([[sessionId, client]]), fileSwitch: fileSaid });
     this.record(sessionId, "portal_notice", {
-      text: `${COMPACT_STOP_NOTICE} (${why}) The conversation stays over the compaction threshold, and every turn pays for an attempt that cannot work. pi has one auto-compaction switch for every chat, so this chat's off is kept on this chat's pi alone and the switch is left to every chat the portal did not stop. Compact by hand, make the chat smaller, or start a new one. The summary is written by the chat's model in one answer: give ${modelKey || "this chat's model"} room — a smaller keep-recent leaves the model less to write, a bigger keep-free compacts it sooner, and Max output tokens on its row in Settings → Providers is the room the answer has — and the chats this stopped get their compaction back. Turn the switch back on in this chat's Context card for this chat alone.`,
+      text: `${notice} (${why}) The conversation stays over the compaction threshold, and every turn pays for an attempt that cannot work. pi has one auto-compaction switch for every chat, so this chat's off is kept on this chat's pi alone and the switch is left to every chat the portal did not stop. Compact by hand, make the chat smaller, or start a new one. The summary is written by the chat's model in one answer: give ${modelKey || "this chat's model"} room — a smaller keep-recent leaves the model less to write, a bigger keep-free compacts it sooner, and Max output tokens on its row in Settings → Providers is the room the answer has — and the chats this stopped get their compaction back. Turn the switch back on in this chat's Context card for this chat alone.`,
       warning: true,
     });
   }
@@ -1389,9 +1467,7 @@ class SessionManager extends EventEmitter {
    */
   private async modelKeyOfClient(client?: PiClient): Promise<string> {
     const state = await client?.getState?.();
-    const provider = state?.model?.provider;
-    const id = state?.model?.id;
-    return provider && id ? `${provider}/${id}` : "";
+    return modelKeyOfState(state);
   }
 
   /**
@@ -1766,11 +1842,18 @@ class SessionManager extends EventEmitter {
       // A chat that has been deleted has no transcript to explain itself in,
       // and its record goes with it.
       if (!getSession(stop.sessionId)) continue;
-      // A chat whose pi could not name its model is recorded with a marker: the
+      // The model a chat whose pi cannot name it is recorded with a marker: the
       // line says "this chat's model", and only the plain numbers answer it.
       const model = compactionStopModel(stop.modelKey);
+      // Which stop this chat's off is: a summary the model could not write in one
+      // answer, or a compaction that left the chat where it was asked again (a chat
+      // with no kind of its own is the one every portal stopped chats on before).
+      const noRoom = compactionStopShape(stop.sessionId) === COMPACT_STOP_NO_ROOM;
+      const cause = noRoom
+        ? "a compaction there left the chat at the point its own numbers ask above again"
+        : "its compaction failed twice in a row";
       this.record(stop.sessionId, "portal_notice", {
-        text: `Auto-compaction is off for this chat: the portal stopped it here, after its compaction failed twice in a row${model ? ` (${model})` : ""}. pi's switch is one switch for every chat, so your chat's stop left every chat without compaction; the portal has given the switch back, and this chat keeps its off. Give${model ? ` ${model}` : " this chat's model"} room in this chat's Context card, or Max output tokens on its model's row in Settings → Providers, and the chats this stopped get their compaction back.`,
+        text: `Auto-compaction is off for this chat: the portal stopped it here, after ${cause}${model ? ` (${model})` : ""}. pi's switch is one switch for every chat, so your chat's stop left every chat without compaction; the portal has given the switch back, and this chat keeps its off. Give${model ? ` ${model}` : " this chat's model"} room in this chat's Context card, or Max output tokens on its model's row in Settings → Providers, and the chats this stopped get their compaction back.`,
         warning: true,
       });
       said++;
@@ -1799,6 +1882,10 @@ class SessionManager extends EventEmitter {
         continue;
       }
       on++;
+      // The room that answers a stop is the remedy its notice offered, and the chat may be
+      // stopped again on different numbers: its next no-room state earns its own line, so
+      // the one per chat is one per stop the portal has not answered (see `roomNeverWon`).
+      this.roomNeverWon.delete(sessionId);
       this.record(sessionId, "portal_notice", {
         text: `Auto-compaction is back on for this chat: ${modelKey || "its model"} was given room, and this is one of the chats the portal stopped. If the summary still cannot be written in one answer it will say so again, and stop trying: the room that answers it is this model's keep-recent (less to write), its keep-free (compacted sooner) and its Max output tokens (the room one answer has).`,
         warning: false,
@@ -2178,6 +2265,16 @@ class SessionManager extends EventEmitter {
    * See noteCompactionFailure.
    */
   private compactionFailures = new Map<string, number>();
+  /**
+   * The chats already stopped for a compaction that left them where they were asked
+   * again (see `keepCompactionRoom`). A stop is one act per chat: it takes the chat's
+   * own switch, so there is no second automatic compaction of that chat to be read at
+   * again — what can come is one the person started by hand, and its room is theirs, not
+   * this chat's to take a second notice for. A stop that was answered by room is not in
+   * this set any more: the numbers it stood on are gone, and a chat stopped again on new
+   * ones says so again (see `resumeStoppedCompaction`).
+   */
+  private roomNeverWon = new Set<string>();
 
   /**
    * The chat a compaction ladder of the portal's is working through, see `giveCompactionRoom`.

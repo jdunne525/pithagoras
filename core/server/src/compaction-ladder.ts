@@ -70,6 +70,27 @@
  *    beside a document is what the model writes about the head this model's numbers
  *    leave (fact 1's ratio), which is more than any plan keeps beside its own.
  *
+ * 6. **A compaction says where it left the chat, and some chats are left where they
+ *    were asked.** pi's `compaction_end` carries `tokensBefore`, and an `estimatedTokensAfter`
+ *    read from its own estimate of the context the chat now has. Measured on
+ *    `bWDX-fMbF8eo` (8 November), on the numbers this module writes for this model's
+ *    window: seven compactions in 30 minutes, at 102,226 → 95,665, 103,113 → 96,138,
+ *    104,005 → 97,574, 105,630 → 100,343, 111,043 → 104,165, 118,088 → 107,268, 119,171
+ *    → 108,816 of a 131,072-token window — every one of them asked above at 98,072. Each
+ *    took 6,400-7,000 tokens out of a context it had only just been asked above, and the
+ *    document it wrote grew 1,741 → 3,177 → 6,852 → 8,173 → 10,472 → 16,045 → 16,367, the
+ *    last of them 17 tokens short of the model's 16,384-token answer; the merge after that
+ *    is what stopped in the middle, and is the pair of notices that chat's person read.
+ *    A chat whose last keep and last document are already at the point it is asked above
+ *    (fact 4 read at one chat rather than at a model) cannot be got below it by compacting
+ *    again whatever its numbers are: what sits above the reach of those numbers is the chat's
+ *    fixed part — the instructions it is given and the tools it is offered — and that part
+ *    was nearly half of this window. The chain of documents growing to the answer is a symptom
+ *    of that state, not the thing to fix; the state is named, and the attempts at it are
+ *    stopped, at the compaction that left the chat where it was asked (see
+ *    `landedRoomOf` and `compactionRoomWonFor` below, and `session-manager.ts`'s
+ *    `keepCompactionRoom`).
+ *
  * ## The plan the numbers come from
  *
  * Two numbers, in the model's own `compaction.modelOverrides`, chosen so all four
@@ -102,11 +123,14 @@
  * additions — under the document's own length, which is no cut at all (fact 1) — so
  * the pair that cuts well and the chain that fits one answer are not the same pair
  * on this model. What bounds the chain is the bounded ask worked at the document
- * (`session-manager.ts`, `keepSummaryInRoom`), asked wherever the document and what
+ * (`session-manager.ts`, `keepCompactionRoom`), asked wherever the document and what
  * the next merge would write about this model's head do not both fit one answer —
  * `mergeAdditionsFor` below, not a length the plan names — and only there: a
  * document inside that room is left as it is, and a head small enough to make the
- * chain fit is a head no compaction would take anything out of.
+ * chain fit is a head no compaction would take anything out of. Before that question is
+ * asked at all, the room of this compaction is read (fact 6): where it left the chat,
+ * against where it was asked above. A chat left at that point wins no room, and the ask
+ * is not what answers it — its attempts are.
  *
  * On this machine's model that room is 4,000 tokens of its answer, so the ask is
  * worked at most of these chats' compactions and pays a second summarization each
@@ -305,7 +329,7 @@ export function planForModel(size: ModelSize): CompactionPlan | null {
   // A head, and the document written about it, have to share one of the model's answers
   // with room left for the chain's next additions (fact 2, at the plan's own room — a
   // chain that needs more than this is bounded at its document, see `session-manager`
-  // 's `keepSummaryInRoom`, and shrinking this head further is shrinking a head that
+  // 's `keepCompactionRoom`, and shrinking this head further is shrinking a head that
   // the document written about it is bigger than, which is no cut at all: fact 1).
   // The model writes the
   // document it is asked for at up to half the head, so the head that leaves room is
@@ -406,6 +430,61 @@ export function carriedSummaryOf(compactionEnd: any): number {
   const summary = compactionEnd?.result?.summary;
   return typeof summary === "string" ? Math.ceil(summary.length / SUMMARY_CHARS_OF_TOKEN) : 0;
 }
+
+/**
+ * What a compaction that worked took out of the chat, and where it left it: pi's own
+ * two numbers, read off one report (`compaction_end` carries `tokensBefore`, and an
+ * `estimatedTokensAfter` read from its own estimate of the context the chat now has).
+ *
+ * This is the one question a compaction answers about itself, and the plan never could:
+ * the plan says where a chat is *asked*, and these say where it is *left*. Null when a
+ * report has neither, which is a pi that predates the field — and an unknown landing is
+ * nobody's to call unwon, so the caller that gets null keeps its other answer.
+ */
+export function landedRoomOf(compactionEnd: any): LandedRoom | null {
+  const before = Number(compactionEnd?.result?.tokensBefore);
+  const after = Number(compactionEnd?.result?.estimatedTokensAfter);
+  if (!Number.isFinite(before) || !Number.isFinite(after)) return null;
+  return { tokensBefore: Math.floor(before), estimatedTokensAfter: Math.floor(after), takenTokens: Math.floor(before) - Math.floor(after) };
+}
+
+/** What a compaction left the chat at, and what it took out of it, in one report. */
+export interface LandedRoom {
+  /** The context the chat had when it was asked: pi's `tokensBefore`. */
+  tokensBefore: number;
+  /** The context it was left with: pi's `estimatedTokensAfter`. */
+  estimatedTokensAfter: number;
+  /** The difference — what this compaction took out of the chat. */
+  takenTokens: number;
+}
+
+/**
+ * Whether a compaction won the room it was asked for: it left the chat below the point
+ * it is asked above again.
+ *
+ * False is the state fact 6 measured seven times in one chat: the chat's last keep, the
+ * document beside it and the part of its context no compaction reads — its instructions
+ * and its tools — come to more than the point it is asked above, so a turn takes it over
+ * again, and the next compaction has only what it just added to take out of. Nothing about
+ * a summary went wrong there, and no pair of keep-recent and keep-free numbers the chat
+ * runs takes that fixed part out of the way; the next turn asks again whatever this one
+ * did. That is the moment to stop the attempts and say it with the two numbers, rather
+ * than to bound the document and pay a second summarization for each — which is what the
+ * chat that was left at the point it was asked above would have done, thirty minutes of
+ * it and seven compactions, until the merge stopped in the middle of an answer.
+ */
+export function compactionRoomWonFor(landed: LandedRoom | null, triggersAtTokens: number): boolean {
+  if (!landed || !Number.isFinite(triggersAtTokens)) return true;
+  return landed.estimatedTokensAfter < Math.floor(triggersAtTokens);
+}
+
+/**
+ * The stop said where a compaction left the chat at the point it is asked above again —
+ * fact 6 read at one chat, and the shape `COMPACT_STOP_NOTICE` is not: nothing went
+ * wrong with a summary there, and the same call asked again leaves the chat where it was
+ * asked again, so it is not the chat's count of failures that stops it.
+ */
+export const COMPACT_NO_ROOM_NOTICE = "Auto-compaction is off for this chat because a compaction left it where it was asked again";
 
 /**
  * The summary asked for short, for pi's `compact(customInstructions)` — which it appends

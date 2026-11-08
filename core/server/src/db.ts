@@ -2664,6 +2664,33 @@ export function noteCompactionStop(sessionId: string, modelKey: string): void {
   putSetting(compactionStopKey(sessionId), modelKey.trim() || COMPACT_STOP_NO_MODEL);
 }
 
+/**
+ * Which stop took this chat's switch: the summary that stopped in the middle of an
+ * answer, twice in a row (`COMPACT_STOP_SUMMARY_ROOM`) — the shape every portal before
+ * this one stopped its chats on, and so the shape a chat with no row of its own is read
+ * as — or a compaction that left the chat at the point it is asked above again
+ * (`COMPACT_STOP_NO_ROOM`, see `compaction-ladder.ts`'s fact 6). Kept apart from the
+ * stop's model, which answers both the same way, because the two are read differently in
+ * the chat: one is about a summary the model could not write in one answer, and its room
+ * is the answer's length; the other is about the part of the chat no compaction reads,
+ * and its room is where a compaction is asked for.
+ */
+export const COMPACT_STOP_SUMMARY_ROOM = "summary-room";
+export const COMPACT_STOP_NO_ROOM = "no-room";
+const compactionStopShapeKey = (sessionId: string) => `compaction_stop_shape:${sessionId}`;
+
+/** Which stop took this chat's switch. Written with the stop itself, so the two never disagree. */
+export function noteCompactionStopShape(sessionId: string, shape: string): void {
+  putSetting(compactionStopShapeKey(sessionId), shape);
+}
+
+/** Which stop this chat's off is explained as: what the record says, and the older shape when it says nothing. */
+export function compactionStopShape(sessionId: string): string {
+  return getSetting(compactionStopShapeKey(sessionId)) === COMPACT_STOP_NO_ROOM
+    ? COMPACT_STOP_NO_ROOM
+    : COMPACT_STOP_SUMMARY_ROOM;
+}
+
 /** Every chat left with auto-compaction off by the portal, with its model. */
 export function compactionStops(): { sessionId: string; modelKey: string }[] {
   const prefix = compactionStopKey("");
