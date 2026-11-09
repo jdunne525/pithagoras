@@ -289,8 +289,16 @@ function trackEnd(run: TaskRun): void {
       endedByCompaction = false;
       void sessions.prompt(run.sessionId, COMPACT_PICK_UP, { resume: "compaction" }).catch((e: unknown) => {
         // Held behind another room-holder under the single-active setting: the
-        // queue starts it once the room frees, so this is not a failure.
-        if (e instanceof PromptQueuedForSingleActive) return;
+        // queue starts it once the room frees, so this is not a failure. The
+        // reason is put back, though, because the turn is still in hand: an
+        // attempt settled beside a carry that has not gone would let the queue
+        // start the Task again in a fresh session while the old one still has
+        // a line waiting for the room (`hasLiveTaskRun` reads this run, and
+        // keeps every loop waiting, for exactly as long as it stays open).
+        if (e instanceof PromptQueuedForSingleActive) {
+          endedByCompaction = true;
+          return;
+        }
         console.error(`[portal] task ${run.taskId} could not be carried on after a compaction:`, e);
         // The carry will not come: the turn is over as far as this handler knows,
         // and the attempt settles like any ended run.

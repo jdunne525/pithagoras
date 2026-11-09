@@ -28,6 +28,10 @@ import { inProcessHome } from "./server-harness.mjs";
 // A run that ends on its own terms still settles as it always did, and a Task
 // whose chat cannot be cut after the carries it was given settles like any ended
 // run: the attempt is never left hanging, and never read as one that worked.
+//
+// A carry the room will not take (the single-active setting) is a third thing:
+// the line waits in the queue, and the attempt and the queue's own gate wait
+// with it — see the last test.
 
 const home = inProcessHome("pithagoras-task-compaction-carry-");
 mkdirSync(path.join(home, "work"), { recursive: true });
@@ -36,7 +40,7 @@ const db = await import("../dist/db.js");
 const tasks = await import("../dist/tasks.js");
 const execution = await import("../dist/task-execution.js");
 const { SdkPiClient } = await import("../dist/pi/sdk-client.js");
-const { sessions } = await import("../dist/session-manager.js");
+const { sessions, PromptQueuedForSingleActive } = await import("../dist/session-manager.js");
 test.after(() => db.getDb().close());
 
 /** Stands in for pi: an event bus the test drives, and a record of what it was asked. */
@@ -119,16 +123,6 @@ class FakePi extends EventEmitter {
     this.emit("event", { type: "turn_start" });
     await this.end("error", ABORTED);
   }
-  /** A compaction aside, with the work going on past it. */
-  async compactAside() {
-    this.emit("event", { type: "compaction_start", reason: "threshold" });
-    this.emit("event", { type: "compaction_end", reason: "threshold", willRetry: false, result: { summary: "the chat's summary" } });
-  }
-  /** A compaction aside, with the work going on past it. */
-  async compactAside() {
-    this.emit("event", { type: "compaction_start", reason: "threshold" });
-    this.emit("event", { type: "compaction_end", reason: "threshold", willRetry: false, result: { summary: "the chat's summary" } });
-  }
   /** The same run ending beside a compaction that found no cut to make. */
   async noCut() {
     this.emit("event", { type: "compaction_start", reason: "manual" });
@@ -139,11 +133,32 @@ class FakePi extends EventEmitter {
     this.emit("event", { type: "turn_start" });
     await this.end("error", ABORTED);
   }
+  /** A compaction aside, with the work going on past it. */
+  async compactAside() {
+    this.emit("event", { type: "compaction_start", reason: "threshold" });
+    this.emit("event", { type: "compaction_end", reason: "threshold", willRetry: false, result: { summary: "the chat's summary" } });
+  }
+  /**
+   * A compaction that caught the turn and left it unfinished: pi stopped the run
+   * for it, so the SessionManager holds the gap until its own resume lands.
+   * `why` is pi's own sentence for the attempt, which the chat hears as its.
+   */
+  async compactFailed(why) {
+    this.emit("event", { type: "compaction_start", reason: "threshold" });
+    this.emit("event", { type: "compaction_end", reason: "threshold", willRetry: false, errorMessage: why });
+    await this.end("error", ABORTED);
+  }
+  /** A run of its own that is left going: the room stays held. */
+  async start(message) {
+    await this.prompt(message);
+  }
 }
 
 /** The words pi writes for a request it stopped mid-run, and for no cut to make. */
 const ABORTED = "This operation was aborted";
 const NO_CUT = "Compaction failed: Nothing to compact (session too small)";
+/** A summary longer than one of the model's answers: pi's own first sentence. */
+const OUT_OF_ROOM = "Auto-compaction failed: Summarization failed: generation hit the token cap.";
 /** The line the portal sends for a compaction's turn — SessionManager's own words. */
 const PICK_UP = "Compaction detected, resume where you left off if needed.";
 /** Carries the handler is allowed before the attempt is concluded as an end. */
@@ -160,9 +175,7 @@ SdkPiClient.create = async (opts) => {
 };
 
 /** Lets the fire-and-forget run path reach pi and the watcher see what came. */
-const flush = (ms = 50) => {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-};
+const flush = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * Waits for an attempt to be written as settled. The completion check reads the
@@ -186,9 +199,22 @@ const carries = (id) =>
     .map((r) => JSON.parse(r.payload))
     .filter((p) => p.resume);
 
+/** What the chat was told, in order: the compaction's failures are said there. */
+const notices = (id) =>
+  db.eventsSince(id, 0)
+    .filter((r) => r.type === "portal_notice")
+    .map((r) => String(JSON.parse(r.payload).text ?? ""));
+
 /** A Task in a folder of its own: what the queue runs, and the watcher watches. */
 let count = 0;
 const task = () => tasks.createTask({ title: `tc${++count}`, workspace: path.join(home, "work") });
+
+/** A session of its own, for the room to be held beside a Task's run. */
+function chat() {
+  const id = `tchat${++count}`;
+  db.createSession({ id, title: id, workspace: path.join(home, "work"), executor: "host", kind: "task" });
+  return id;
+}
 
 function reset() {
   started.length = 0;
@@ -215,7 +241,6 @@ test("a run a compaction cut short is carried on in its own session, not settled
     // fresh each time rather than held on to.
     const at = () => pis.get(sessionId);
     assert.deepEqual([...started], [sessionId], "the Task reached the engine once");
-    assert.equal(db.getAttempt(attempt.id).status, "running", "the attempt is working");
 
     // The work happens, and the chat's own compaction catches the turn.
     await at().turn();
@@ -225,7 +250,7 @@ test("a run a compaction cut short is carried on in its own session, not settled
     assert.equal(db.getAttempt(attempt.id).status, "running", "a compaction's cut is not the Task's end");
     assert.deepEqual(carries(sessionId).map((p) => p.resume), ["compaction"], "the turn was handed back to the same session, and said as the portal carrying it on");
     assert.equal(db.getSession(sessionId).status, "running", "the same session is working again: no brand-new one started the Task from nothing");
-    assert.deepEqual([...new Set(started)], [sessionId], "every engine visit was this same session: no brand-new one started the Task from nothing");
+    assert.deepEqual([...new Set(started)], [sessionId], "every engine visit was this same session");
 
     // The carried-on turn reaches its own end: only that settles the attempt.
     await at().end("stop");
@@ -274,11 +299,71 @@ test("a chat that cannot be cut is carried a bounded number of times, then settl
       await flush(400);
     }
 
-    assert.equal(carries(sessionId).map((p) => p.resume).length, COMPACT_CARRY_BUDGET, "the carries are bounded");
+    assert.deepEqual(carries(sessionId).map((p) => p.resume).length, COMPACT_CARRY_BUDGET, "the carries are bounded");
     await settled(attempt.id);
     assert.equal(db.getAttempt(attempt.id).status, "failed", "a chat that cannot be cut after its carries is an ended run, and never left hanging");
     assert.equal(db.getTask(t.id).status, "pending", "and the Task is left for the queue to answer, not stuck working");
   } finally {
+    await reset();
+  }
+});
+
+test("a compaction that failed is still tried again, and the run keeps its attempt", async () => {
+  try {
+    const t = task();
+    const { sessionId, attempt } = execution.startTask(t.id);
+    await flush();
+    const at = () => pis.get(sessionId);
+
+    // A compaction of the turn that failed for want of room in the summary. The
+    // chat's own attempts continue after one failure — pi asks again at the next
+    // turn boundary — and it is only the second failure in a row that stops them.
+    await at().turn();
+    await at().compactFailed(OUT_OF_ROOM);
+    await flush(400);
+
+    assert.ok(
+      notices(sessionId).some((n) => n.startsWith("Auto-compaction failed:")),
+      "the failed compaction is said in the chat",
+    );
+    assert.equal(db.getAttempt(attempt.id).status, "running", "and the attempt is not settled beside it");
+    assert.deepEqual(carries(sessionId).map((p) => p.resume), ["compaction"], "the turn is carried on in the same session");
+    assert.deepEqual([...new Set(started)], [sessionId], "the work keeps its session");
+  } finally {
+    await reset();
+  }
+});
+
+test("a carry the room will not take leaves the attempt, and the queue's gate, waiting", async () => {
+  try {
+    // The Task's run is going, and a chat started beside it while the setting
+    // was off — both hold their rooms. The setting is switched on, which is what
+    // makes the next request wait its turn.
+    const t = task();
+    const { sessionId, attempt } = execution.startTask(t.id);
+    await flush();
+    const at = () => pis.get(sessionId);
+    const b = chat();
+    await sessions.prompt(b, "work beside the Task");
+    await flush();
+    assert.equal(sessions.isActive(b), true, "the chat holds a room of its own");
+    db.setSingleActiveSession(true);
+
+    // The Task's run reaches its end beside a compaction that found no cut to
+    // make, and the room is taken: the carry cannot go now.
+    await at().noCut();
+    await flush(400);
+
+    assert.deepEqual(
+      [...sessions.singleActiveQueue].filter((w) => w.sessionId === sessionId).map((w) => w.message),
+      [PICK_UP],
+      "the carry waits its turn in the queue: nothing was lost",
+    );
+    assert.equal(db.getAttempt(attempt.id).status, "running", "the attempt is not settled while its carry has not gone");
+    assert.equal(execution.hasLiveTaskRun(), true, "the gate every queue loop reads says work is in hand: no next Task is started");
+    assert.deepEqual([...new Set(started)], [sessionId, b], "no brand-new session started the Task again from nothing");
+  } finally {
+    db.setSingleActiveSession(false);
     await reset();
   }
 });
