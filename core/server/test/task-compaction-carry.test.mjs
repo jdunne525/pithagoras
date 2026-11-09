@@ -1,0 +1,284 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import { mkdirSync } from "node:fs";
+import path from "node:path";
+import { inProcessHome } from "./server-harness.mjs";
+
+// What a Task does when a compaction, and not the work, ends its run.
+//
+// Two shapes of that end were read on a machine over a night of Tasks. The one
+// seen most (`xvi8qfPulGYB`, 8 November, at 21:21): the chat's own auto-compaction
+// caught the run mid-turn and cut the turn short, pi started its next turn, and
+// that turn was refused before it wrote anything — its answer came back as an
+// errored message, "This operation was aborted". Nine different Tasks lost an
+// attempt this way, over their own attempt numbers 1 to 6: the session read idle,
+// the watcher settled the attempt as failed seconds after such a compaction, and
+// the queue launched a brand-new session that started the Task again from nothing
+// while its work was still in hand. The other shape is a run ending beside a
+// compaction that answered it had nothing at all to take out of the chat —
+// `Nothing to compact (session too small)` — which the ladder now reports honestly
+// at no cost to the chat's switch, and which says nothing about the Task either.
+//
+// Neither end is the Task's. A compaction says the chat cannot be cut further, not
+// that the work finished, so the handler hands the run back to the same session —
+// where its context, and with it the part of the Task already done, still lives —
+// with the same line the SessionManager uses for a compaction's turn, a bounded
+// number of times, counted the way the model's own cut-off carries are counted.
+// A run that ends on its own terms still settles as it always did, and a Task
+// whose chat cannot be cut after the carries it was given settles like any ended
+// run: the attempt is never left hanging, and never read as one that worked.
+
+const home = inProcessHome("pithagoras-task-compaction-carry-");
+mkdirSync(path.join(home, "work"), { recursive: true });
+
+const db = await import("../dist/db.js");
+const tasks = await import("../dist/tasks.js");
+const execution = await import("../dist/task-execution.js");
+const { SdkPiClient } = await import("../dist/pi/sdk-client.js");
+const { sessions } = await import("../dist/session-manager.js");
+test.after(() => db.getDb().close());
+
+/** Stands in for pi: an event bus the test drives, and a record of what it was asked. */
+class FakePi extends EventEmitter {
+  constructor(opts) {
+    super();
+    this.sessionId = opts.sessionId;
+    this.sessionFile = path.join(opts.sessionDir ?? ".", "conversation.jsonl");
+  }
+  /** Whether a run is going; the manager asks before settling a prompt. */
+  idle = true;
+  prompts = [];
+  isIdle() {
+    return this.idle;
+  }
+  dialogsOpen() {
+    return 0;
+  }
+  async getTools() {
+    return [];
+  }
+  async getCommands() {
+    return [];
+  }
+  async getState() {
+    return {
+      model: { id: "m", name: "M", provider: "p", contextWindow: 131_072, maxTokens: 16_384, input: ["text"] },
+      thinkingLevel: "off",
+    };
+  }
+  async abort() {}
+  async shutdown() {}
+  dispose() {}
+  /** Accepting a message starts a run of its own, as a real pi's does. */
+  async prompt(message) {
+    this.prompts.push(message);
+    this.idle = false;
+    this.emit("event", { type: "agent_start" });
+    return { outcome: "started" };
+  }
+  /** One turn of work: an answer that went on asking for tools. */
+  async turn() {
+    this.emit("event", { type: "turn_start" });
+    this.emit(
+      "event",
+      { type: "message_end", message: { role: "assistant", stopReason: "toolUse", content: [{ type: "text", text: "working" }] } },
+    );
+    this.emit("event", { type: "tool_execution_start", toolCallId: "call_1", toolName: "bash", args: {} });
+    this.emit("event", { type: "tool_execution_end", toolCallId: "call_1", toolName: "bash", result: { content: [] } });
+    this.emit("event", { type: "message_end", message: { role: "toolResult", content: [] } });
+    this.emit("event", { type: "turn_end" });
+  }
+  /**
+   * Where the run ends: the last answer, and how the model stopped. `error` with
+   * the words pi writes for a request it stopped mid-run is a compaction's cut;
+   * anything else is the run reaching its own end.
+   */
+  async end(stopReason = "stop", errorMessage) {
+    this.emit(
+      "event",
+      {
+        type: "message_end",
+        message: {
+          role: "assistant",
+          stopReason,
+          ...(errorMessage ? { errorMessage } : {}),
+          content: [{ type: "text", text: stopReason === "error" ? "" : "all of it" }],
+        },
+      },
+    );
+    this.emit("event", { type: "turn_end" });
+    this.emit("event", { type: "agent_end", willRetry: false });
+    this.idle = true;
+    this.emit("event", { type: "agent_settled" });
+  }
+  /** pi's own auto-compaction, and the next turn it started that was refused. */
+  async cutShort() {
+    this.emit("event", { type: "compaction_start", reason: "threshold" });
+    this.emit("event", { type: "compaction_end", reason: "threshold", willRetry: false, result: { summary: "the chat's summary" } });
+    this.emit("event", { type: "turn_start" });
+    await this.end("error", ABORTED);
+  }
+  /** A compaction aside, with the work going on past it. */
+  async compactAside() {
+    this.emit("event", { type: "compaction_start", reason: "threshold" });
+    this.emit("event", { type: "compaction_end", reason: "threshold", willRetry: false, result: { summary: "the chat's summary" } });
+  }
+  /** A compaction aside, with the work going on past it. */
+  async compactAside() {
+    this.emit("event", { type: "compaction_start", reason: "threshold" });
+    this.emit("event", { type: "compaction_end", reason: "threshold", willRetry: false, result: { summary: "the chat's summary" } });
+  }
+  /** The same run ending beside a compaction that found no cut to make. */
+  async noCut() {
+    this.emit("event", { type: "compaction_start", reason: "manual" });
+    this.emit("event", { type: "compaction_end", reason: "manual", willRetry: false, errorMessage: NO_CUT });
+    // pi started its own next turn, which is what lets the SessionManager's
+    // marker of the turn go: the run then reaches its end with nothing holding
+    // it, which is the state the watcher was reading this as a failure in.
+    this.emit("event", { type: "turn_start" });
+    await this.end("error", ABORTED);
+  }
+}
+
+/** The words pi writes for a request it stopped mid-run, and for no cut to make. */
+const ABORTED = "This operation was aborted";
+const NO_CUT = "Compaction failed: Nothing to compact (session too small)";
+/** The line the portal sends for a compaction's turn — SessionManager's own words. */
+const PICK_UP = "Compaction detected, resume where you left off if needed.";
+/** Carries the handler is allowed before the attempt is concluded as an end. */
+const COMPACT_CARRY_BUDGET = 3;
+
+/** Every pi started, in order, and the fake behind each session. */
+const started = [];
+const pis = new Map();
+SdkPiClient.create = async (opts) => {
+  started.push(opts.sessionId);
+  const pi = new FakePi(opts);
+  pis.set(opts.sessionId, pi);
+  return pi;
+};
+
+/** Lets the fire-and-forget run path reach pi and the watcher see what came. */
+const flush = (ms = 50) => {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+};
+
+/**
+ * Waits for an attempt to be written as settled. The completion check reads the
+ * transcript with its own bounded waits before it decides, so a settled attempt
+ * comes some time after the end that decided it; the limit is past that.
+ */
+async function settled(attemptId, limitMs = 12_000) {
+  const deadline = Date.now() + limitMs;
+  for (;;) {
+    const row = db.getAttempt(attemptId);
+    if (row && row.status !== "running") return row;
+    if (Date.now() >= deadline) return row;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+}
+
+/** The portal's own lines that carry an unfinished turn on, in order. */
+const carries = (id) =>
+  db.eventsSince(id, 0)
+    .filter((r) => r.type === "portal_prompt")
+    .map((r) => JSON.parse(r.payload))
+    .filter((p) => p.resume);
+
+/** A Task in a folder of its own: what the queue runs, and the watcher watches. */
+let count = 0;
+const task = () => tasks.createTask({ title: `tc${++count}`, workspace: path.join(home, "work") });
+
+function reset() {
+  started.length = 0;
+  pis.clear();
+  sessions.inRun.clear();
+  sessions.compactionInterruptedRun.clear();
+  sessions.compactionResumePending.clear();
+  sessions.cutOffResumePending.clear();
+  sessions.cutOffCarries.clear();
+  sessions.cutOffAnswer.clear();
+  sessions.lastStopReason.clear();
+  sessions.modelOutputLimit.clear();
+  sessions.singleActiveClaiming.clear();
+  sessions.singleActiveQueue = [];
+}
+
+test("a run a compaction cut short is carried on in its own session, not settled", async () => {
+  try {
+    const t = task();
+    const { sessionId, attempt } = execution.startTask(t.id);
+    await flush();
+    // The session's engine as it stands now: a carried-on turn is handed to the
+    // same session again, which is what keeps its work, so the bus is taken
+    // fresh each time rather than held on to.
+    const at = () => pis.get(sessionId);
+    assert.deepEqual([...started], [sessionId], "the Task reached the engine once");
+    assert.equal(db.getAttempt(attempt.id).status, "running", "the attempt is working");
+
+    // The work happens, and the chat's own compaction catches the turn.
+    await at().turn();
+    await at().cutShort();
+    await flush(400);
+
+    assert.equal(db.getAttempt(attempt.id).status, "running", "a compaction's cut is not the Task's end");
+    assert.deepEqual(carries(sessionId).map((p) => p.resume), ["compaction"], "the turn was handed back to the same session, and said as the portal carrying it on");
+    assert.equal(db.getSession(sessionId).status, "running", "the same session is working again: no brand-new one started the Task from nothing");
+    assert.deepEqual([...new Set(started)], [sessionId], "every engine visit was this same session: no brand-new one started the Task from nothing");
+
+    // The carried-on turn reaches its own end: only that settles the attempt.
+    await at().end("stop");
+    await settled(attempt.id);
+    assert.equal(db.getAttempt(attempt.id).status, "failed", "the attempt settles at the carried-on run's own end, without the completion promise");
+    assert.equal(db.getTask(t.id).status, "pending", "the Task goes back for its next attempt, not left working");
+  } finally {
+    await reset();
+  }
+});
+
+test("a run that ends on its own terms still settles, after a compaction aside it", async () => {
+  try {
+    const t = task();
+    const { sessionId, attempt } = execution.startTask(t.id);
+    await flush();
+    const at = () => pis.get(sessionId);
+
+    // The chat is compacted aside, and the run goes on and reaches its own end.
+    await at().turn();
+    await at().compactAside();
+    await at().turn();
+    await at().end("stop");
+    await settled(attempt.id);
+
+    assert.equal(db.getAttempt(attempt.id).status, "failed", "an end on its own terms settles, and without the completion promise it is not read as done");
+    assert.equal(db.getTask(t.id).status, "pending", "the Task goes back for its next attempt, not left working");
+    assert.deepEqual(carries(sessionId), [], "nothing was carried on beside an end that was the run's own");
+  } finally {
+    await reset();
+  }
+});
+
+test("a chat that cannot be cut is carried a bounded number of times, then settled", async () => {
+  try {
+    const t = task();
+    const { sessionId, attempt } = execution.startTask(t.id);
+    await flush();
+    const at = () => pis.get(sessionId);
+
+    // The shape that kept recurring: the run ends beside a compaction that found
+    // no cut to make, again and again, because the part of the chat no
+    // compaction reads is what is left over the point it asks at.
+    for (let n = 0; n <= COMPACT_CARRY_BUDGET; n++) {
+      await at().noCut();
+      await flush(400);
+    }
+
+    assert.equal(carries(sessionId).map((p) => p.resume).length, COMPACT_CARRY_BUDGET, "the carries are bounded");
+    await settled(attempt.id);
+    assert.equal(db.getAttempt(attempt.id).status, "failed", "a chat that cannot be cut after its carries is an ended run, and never left hanging");
+    assert.equal(db.getTask(t.id).status, "pending", "and the Task is left for the queue to answer, not stuck working");
+  } finally {
+    await reset();
+  }
+});

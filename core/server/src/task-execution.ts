@@ -5,6 +5,7 @@ import * as db from "./db.js";
 import * as tasks from "./tasks.js";
 import { buildTaskPrompt, DEFAULT_MAX_ATTEMPTS } from "./task-prompt.js";
 import { readTaskInstructions } from "./projects.js";
+import { nothingLeftToCompact } from "./compaction-ladder.js";
 import { waitForCompletionPromise } from "./task-completion.js";
 
 /**
@@ -177,6 +178,17 @@ export const abortLiveRun = (taskId: string): void => {
  *  far from frequent enough to matter for the normal, event-driven path. */
 const STOP_DETECTION_GAP_MS = 2000;
 
+/** Carries of ours a run is given when a compaction, rather than the work, ended
+ *  it. Counted like the model's own cut-off carries: each one is the same work in
+ *  the same session, and a Task whose chat cannot be cut further gets a few turns
+ *  to continue before its attempt is concluded as an end. */
+const COMPACT_CARRY_BUDGET = 3;
+
+/** The line that carries a compaction's turn back on. The SessionManager's own
+ *  words for the same act: the run continues because of a compaction either way,
+ *  and a chat reads one kind of resumption, not a third sentence of its own. */
+const COMPACT_PICK_UP = "Compaction detected, resume where you left off if needed.";
+
 /**
  * Detect the moment a run reaches its own end and settle it, so completion
  * detection can judge the outcome (complete-or-failed) exactly once. A failed
@@ -187,8 +199,9 @@ const STOP_DETECTION_GAP_MS = 2000;
  * Detection rides on two independent signals so that missing either one cannot
  * strand the run forever (leaving the Task stuck showing working over a status
  * nothing observed). The fast path is the live `portal_status` transition:
- * once the run has been confirmed working, any later non-running status settles
- * it at once. The fallback reads the session's persisted status instead — the
+ * once the run has been confirmed working, any later non-running status reaches
+ * the run's end at once — which `endOrCarry` below decides between an end to
+ * settle and a compaction's cut-short to carry on. The fallback reads the session's persisted status instead — the
  * very thing the view renders as working — so a dropped or missed transition
  * still settles the run and lets the queue move on. Confirming the run has
  * started also rides on persistence as well as the live event, and a fresh
@@ -240,10 +253,90 @@ function trackEnd(run: TaskRun): void {
     finishSettled(run);
   };
 
+  // A compaction, and not the work, can end a run: pi stops the run for a compact
+  // of a conversation that is mid-turn, the turn it starts back afterwards can be
+  // refused before it writes (the answer comes back errored — "This operation was
+  // aborted"), and the compact the portal runs for the chat can answer that it has
+  // nothing at all to take out of it ("Nothing to compact (session too small)").
+  // None of those says the Task finished; they say the chat cannot be cut further,
+  // and the work is still in hand. Read on the whole machine this is not rare: on
+  // the Tasks page nine different Tasks lost an attempt this way over their own
+  // attempt numbers 1 to 6, every attempt written as failed seconds after such a
+  // compaction, and the queue then launched a brand-new session that started the
+  // Task again from nothing. So the reason a run ended on is kept here beside a
+  // bounded count of the carries of ours this handler asks for, in the same shape
+  // the cut-off answer's carries are counted, and an end that came from a
+  // compaction hands the work back to the same session — where its context, and
+  // with it the part of the Task already done, still lives — instead of settling
+  // the attempt. An end on its own terms, or one after the carries run out, settles
+  // exactly as it always did.
+  let compactionSeen = false;
+  let endedByCompaction = false;
+  let carries = 0;
+
+  const endOrCarry = (): void => {
+    // The SessionManager still holds the turn (a compaction mid-run, or a cut-off
+    // answer waiting for its carry-on): neither the settle nor a carry of ours
+    // belongs here, and that mechanism sends its own line.
+    if (possiblyCompacting()) return;
+    if (endedByCompaction && carries < COMPACT_CARRY_BUDGET) {
+      // Never into a run that is going: pi queues the line into that run, where
+      // the model reads it as an order to start working again — which is how a
+      // chat comes to answer the same sentence every turn and never finish. The
+      // marker stays set, so the run's own end decides again.
+      if (db.getSession(run.sessionId)?.status === "running") return;
+      carries += 1;
+      endedByCompaction = false;
+      void sessions.prompt(run.sessionId, COMPACT_PICK_UP, { resume: "compaction" }).catch((e: unknown) => {
+        // Held behind another room-holder under the single-active setting: the
+        // queue starts it once the room frees, so this is not a failure.
+        if (e instanceof PromptQueuedForSingleActive) return;
+        console.error(`[portal] task ${run.taskId} could not be carried on after a compaction:`, e);
+        // The carry will not come: the turn is over as far as this handler knows,
+        // and the attempt settles like any ended run.
+        settle();
+      });
+      return;
+    }
+    settle();
+  };
+
   // Fast path: the live portal_status transition. A transition away from
-  // running, once the run is confirmed working, is the run ending on its own.
+  // running, once the run is confirmed working, is the run reaching its end —
+  // which endOrCarry decides between an end and a compaction's cut-short.
   const handler = (row: { type: string; payload: string }): void => {
     if (run.ended) return;
+    // What a compaction did in this run, and what the last answer stopped on,
+    // are read here: they are the difference between a Task that ended and one a
+    // compaction cut short.
+    if (row.type === "compaction_start" || row.type === "compaction_end") {
+      compactionSeen = true;
+      try {
+        const landed = JSON.parse(row.payload);
+        if (landed.type === "compaction_end" && nothingLeftToCompact(landed.errorMessage)) {
+          // Pi found nothing to take out: the chat's count of failures and its
+          // switch are nobody's to move, and the run's end is not the Task's.
+          endedByCompaction = true;
+        }
+      } catch {
+        // A row that cannot be read says nothing about where the run ends.
+      }
+      return;
+    }
+    if (row.type === "message_end") {
+      try {
+        const answer = JSON.parse(row.payload)?.message;
+        if (answer?.role === "assistant") {
+          endedByCompaction = compactionSeen && answer.stopReason === "error";
+          // An answer that stopped on anything else went through: the work
+          // carried on past the compaction, so the next one is the next chance.
+          if (!endedByCompaction) compactionSeen = false;
+        }
+      } catch {
+        // A message that cannot be read says nothing about where the run ends.
+      }
+      return;
+    }
     let status: string | undefined;
     try {
       status = JSON.parse(row.payload)?.status;
@@ -255,7 +348,7 @@ function trackEnd(run: TaskRun): void {
       confirmedRunning = true;
       return;
     }
-    if (confirmedRunning && !possiblyCompacting()) settle();
+    if (confirmedRunning) endOrCarry();
   };
   sessions.on(`session:${run.sessionId}`, handler);
 
@@ -273,8 +366,8 @@ function trackEnd(run: TaskRun): void {
     const status = db.getSession(run.sessionId)?.status;
     if (status === "running") {
       confirmedRunning = true;
-    } else if (confirmedRunning && !possiblyCompacting()) {
-      settle();
+    } else if (confirmedRunning) {
+      endOrCarry();
     }
   }, STOP_DETECTION_GAP_MS).unref();
 }
