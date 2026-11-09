@@ -91,6 +91,35 @@
  *    `landedRoomOf` and `compactionRoomWonFor` below, and `session-manager.ts`'s
  *    `keepCompactionRoom`).
  *
+ * 7. **A chat's instructions, and the tools it is offered, sit above every compaction.**
+ *    pi's `tokensBefore` and its `estimatedTokensAfter` are both read from its estimate
+ *    of the whole context: `estimateProjectedContextTokens` counts the projected system
+ *    message and the tool schemas beside the messages, and `estimateTokens` adds the
+ *    `toolsAdded` schemas at four characters to a token. A cut is a place in the
+ *    conversation added since the last compaction, so none of that part is ever taken
+ *    out of a chat. Measured on `pzAd05Zlf3Z9` (8 November) — the chat whose notice is
+ *    the subject of this fix — the system message its every compaction carries is 255,371
+ *    characters in its sections, 249,607 of them the project's own instructions (another
+ *    project's whole `AGENTS.md`, read again in full at every turn) beside 5,078 of ten
+ *    tool schemas: 65,113 tokens by pi's own count, 50% of the 131,072-token window. So
+ *    fact 4's sum gains a term, and it is a term no pair of numbers takes out of it:
+ *
+ *    `window − keep-free = fixed part + last summary + 2 × keep-recent + head`
+ *
+ *    A keep chosen without that term is a keep past the point a cut can reach whatever
+ *    the chat adds: with 65,113 out of reach, the keep this module names for a 131,072
+ *    window, 30,460, counted twice — the last compaction's and this one's — and the
+ *    fixed part come past the 98,072 they are asked above on their own, before a document
+ *    is put beside them. That is fact 6's state, and it is read of the pair before a chat
+ *    gets to it rather than after seven compactions of it. The part is not a model's — it
+ *    is a chat's project and a chat's tools — so it is on no row to be read from. It is
+ *    known exactly at the compaction that says where it left the chat: that landing, less
+ *    what these numbers keep word for word and the document they left beside them, is the
+ *    part (`fixedPartOf` below). The plan is asked with it from there (see `planForModel`
+ *    's `fixedTokens` and `session-manager.ts`'s `keepCompactionRoom`), and the pair it
+ *    writes with the part in the sum is a pair that has a cut to take, which is what makes
+ *    the state the person saw stop being what these chats do.
+ *
  * ## The plan the numbers come from
  *
  * Two numbers, in the model's own `compaction.modelOverrides`, chosen so all four
@@ -216,7 +245,7 @@ export interface CompactionPlan {
   headTokens: number;
   /** The document written about it, at the longest seen on this machine. */
   summaryTokens: number;
-  /** Where a compaction that works leaves the chat: its keep, and the document beside it. */
+  /** Where a compaction that works leaves the chat: its keep, the document beside it — and, where this plan was asked with a chat's fixed part, that part beside them (facts 4 and 7). */
   landsAtTokens: number;
   /** Tokens of conversation a chat adds between two compactions. */
   progressTokens: number;
@@ -282,14 +311,20 @@ export function nextDocumentFitsFor(carriedSummaryTokens: number, headTokens: nu
  * summary, then its last keep, then the conversation it added since, and the cut keeps
  * the newest keep-recent of that last part. So a head and the document written about
  * it — which the next compaction carries beside it — share what is left of the point
- * they compact above once two keeps are taken out, and the state a chain of these
- * numbers gets to is the largest head that fits under that with its own document
- * beside it. The document takes one of three forms (its floor, half the head, one
- * answer), and the equation for each is closed by a candidate head; the largest
- * candidate that fits is the state.
+ * they compact above once two keeps, and the part of the chat no compaction reads,
+ * are taken out, and the state a chain of these numbers gets to is the largest head
+ * that fits under that with its own document beside it. The document takes one of
+ * three forms (its floor, half the head, one answer), and the equation for each is
+ * closed by a candidate head; the largest candidate that fits is the state.
+ *
+ * `fixedTokens` is fact 7 — that part of a chat, where it is known. Where it is not it
+ * is 0, which is the optimistic reading: a head reached with no fixed part beside it is
+ * a head these chats never get, and the pair built from it is a pair that wins no room
+ * (see `compactionRoomWonFor`, and `fixedPartOf`, which is where the part stops being
+ * unknown).
  */
-function reachableAt(keepRecentTokens: number, triggersAtTokens: number, maxTokens: number): { headTokens: number; carriedSummaryTokens: number } {
-  const above = Math.floor(triggersAtTokens) - 2 * Math.floor(keepRecentTokens);
+function reachableAt(keepRecentTokens: number, triggersAtTokens: number, maxTokens: number, fixedTokens = 0): { headTokens: number; carriedSummaryTokens: number } {
+  const above = Math.floor(triggersAtTokens) - Math.max(0, Math.floor(fixedTokens)) - 2 * Math.floor(keepRecentTokens);
   const answer = Math.floor(maxTokens);
   let headTokens = 0;
   let carriedSummaryTokens = 0;
@@ -316,8 +351,18 @@ function reachableAt(keepRecentTokens: number, triggersAtTokens: number, maxToke
  * cap. Both are the honest answer that the size has no pair, and neither is a thing
  * the portal can fix with numbers — the ladder's ask for a summary in words is, and
  * is tried before this answer is given.
+ *
+ * `fixedTokens` is a chat's fact 7 — the part of the chat in hand that no compaction
+ * reads, where one is known. Every head and every keep here shares the room that part
+ * leaves, so the pair is the pair for a chat of that fixed part, and a chat's landing
+ * is below the point it is asked above by this construction. Asked without it, as it
+ * is at a model's row where no chat has been read yet, it is 0: the pair for a model
+ * that has nothing above its conversation. The part is a chat's, not a model's, so it
+ * is measured at one chat (`fixedPartOf`) and asked of this from there — the moment a
+ * chat's own first landing says the pair written for its model is the wrong pair for it,
+ * and the moment this is asked again with what that landing says.
  */
-export function planForModel(size: ModelSize): CompactionPlan | null {
+export function planForModel(size: ModelSize, fixedTokens = 0): CompactionPlan | null {
   const window = Math.floor(size.contextWindow);
   const answer = Math.floor(size.maxTokens);
   if (!Number.isFinite(window) || !Number.isFinite(answer) || window <= 0 || answer <= 0) return null;
@@ -325,6 +370,14 @@ export function planForModel(size: ModelSize): CompactionPlan | null {
   const reserve = round1000(clamp(window / RESERVE_OF_WINDOW, RESERVE_MIN, window * RESERVE_MAX_SHARE));
   const triggersAt = window - reserve;
   if (triggersAt <= 0) return null;
+  // Fact 7: a chat's instructions and the tools it is offered sit between its start and
+  // every point below the window, and no cut is in any of them. What the conversation,
+  // the two keeps and the document share is what is left of the point it is asked above
+  // once that part is taken out — and a chat whose part is at that point has no room,
+  // and no pair of numbers has a head to ask it for.
+  const fixed = Math.max(0, Math.floor(fixedTokens));
+  const conversationRoom = triggersAt - fixed;
+  if (conversationRoom <= 0) return null;
 
   // A head, and the document written about it, have to share one of the model's answers
   // with room left for the chain's next additions (fact 2, at the plan's own room — a
@@ -340,25 +393,32 @@ export function planForModel(size: ModelSize): CompactionPlan | null {
 
   const wanted = Math.floor(
     clamp(
-      Math.min(Math.max(triggersAt / HEAD_OF_TRIGGER, MIN_HEAD), Math.max(MIN_HEAD, answer * HEAD_OF_ANSWER)),
+      Math.min(Math.max(conversationRoom / HEAD_OF_TRIGGER, MIN_HEAD), Math.max(MIN_HEAD, answer * HEAD_OF_ANSWER)),
       Math.max(MIN_HEAD, 1),
-      Math.max(MIN_HEAD, Math.min(MAX_HEAD, triggersAt * HEAD_MAX_SHARE)),
+      Math.max(MIN_HEAD, Math.min(MAX_HEAD, conversationRoom * HEAD_MAX_SHARE)),
     ),
   );
   const head = Math.floor(Math.min(wanted, headWritable));
 
-  // The keep is the other half of fact 4: the point it compacts above, less this head,
-  // less the document the model writes about it, less that document again, which the
-  // next compaction carries beside the keep. Halved because the keep is counted twice
-  // there — the last compaction's, and this one's.
-  const keepRecent = Math.floor((triggersAt - head - summaryRoomFor(head, answer)) / 2);
+  // The keep is the other half of fact 4, with fact 7's term taken out first: the room
+  // the conversation gets above the point it is asked, less this head, less the document
+  // the model writes about it, less that document again, which the next compaction
+  // carries beside the keep. Halved because the keep is counted twice there — the last
+  // compaction's, and this one's. A fixed part this big leaves the room a keep of MIN_KEEP
+  // in it, which is where the plan stops being worth shrinking further: below this the
+  // whole of pi's job is a cut of one message (see `MIN_KEEP`), and the head it still
+  // leaves is the answer's own, not a share of the window's.
+  const keepRecent = Math.floor((conversationRoom - head - summaryRoomFor(head, answer)) / 2);
   const keep = Math.max(MIN_KEEP, keepRecent);
 
-  const reach = reachableAt(keep, triggersAt, answer);
+  const reach = reachableAt(keep, triggersAt, answer, fixed);
   const headTokens = reach.headTokens;
   const carriedSummaryTokens = reach.carriedSummaryTokens;
   const summary = summaryRoomFor(headTokens, answer);
-  const landsAt = keep + summary;
+  // Where a compaction that works leaves this chat: the part no compaction reads, its
+  // keep, and the document beside them (facts 4 and 7 read at one chat). This is the
+  // number a pair is judged by — `compactionRoomWonFor` reads a landing against it.
+  const landsAt = fixed + keep + summary;
   const progress = triggersAt - landsAt;
 
   // A pair this module cannot put a cut in, or cannot keep out of the answer: with its
@@ -459,6 +519,27 @@ export interface LandedRoom {
 }
 
 /**
+ * The part of a chat's context no compaction reads — its instructions and the tools it
+ * is offered — read from what one compaction reported.
+ *
+ * A compaction's landing is this chat's fixed part, the keep its numbers keep word for
+ * word, and the document that compaction left beside them (facts 4 and 7 read at one
+ * chat), so the landing less the keep and the document is the part. It is the only way
+ * the question is answered at all, and the only way it is answered honestly: the part is
+ * a chat's own — its project's instructions, the tools that chat is offered — and it is
+ * on no model's row to be read from. Zero for a report that names no landing, and zero
+ * is the plan read without a fixed part: nothing is claimed about a chat nobody has
+ * compacted, and a chat whose landing is inside what its numbers and their document
+ * account for gets no claim either.
+ */
+export function fixedPartOf(landed: LandedRoom | null, keepRecentTokens: number, carriedSummaryTokens: number): number {
+  if (!landed) return 0;
+  const kept = Number.isFinite(keepRecentTokens) ? Math.floor(keepRecentTokens) : 0;
+  const carried = Number.isFinite(carriedSummaryTokens) ? Math.floor(carriedSummaryTokens) : 0;
+  return Math.max(0, landed.estimatedTokensAfter - kept - carried);
+}
+
+/**
  * Whether a compaction won the room it was asked for: it left the chat below the point
  * it is asked above again.
  *
@@ -468,10 +549,15 @@ export interface LandedRoom {
  * again, and the next compaction has only what it just added to take out of. Nothing about
  * a summary went wrong there, and no pair of keep-recent and keep-free numbers the chat
  * runs takes that fixed part out of the way; the next turn asks again whatever this one
- * did. That is the moment to stop the attempts and say it with the two numbers, rather
- * than to bound the document and pay a second summarization for each — which is what the
- * chat that was left at the point it was asked above would have done, thirty minutes of
- * it and seven compactions, until the merge stopped in the middle of an answer.
+ * did. Where the pair was chosen without it, the pair chosen with it is asked for here
+ * and written, and the attempts are left running — that is what makes this state stop
+ * being what these chats do. The attempts are stopped only where that reading leaves no
+ * pair, or leaves the pair the chat is already on, which is the state its own numbers
+ * cannot answer: said once, with the two numbers, and with the part that sits above
+ * them named, rather than bounding the document and paying a second summarization for
+ * each, which is what the chat that was left at the point it was asked above would have
+ * done, thirty minutes of it and seven compactions, until the merge stopped in the middle
+ * of an answer (see `session-manager.ts`'s `keepCompactionRoom`, and `fixedPartOf`).
  */
 export function compactionRoomWonFor(landed: LandedRoom | null, triggersAtTokens: number): boolean {
   if (!landed || !Number.isFinite(triggersAtTokens)) return true;
@@ -549,35 +635,42 @@ export interface RoomShape {
   headTokens: number;
   /** What that head would be written up at, at the longest seen on this machine, uncapped by the answer. */
   summaryWantedTokens: number;
+  /** The part of this chat's context no compaction reads — its instructions and the tools it is offered — where one was known (fact 7). 0 is the pair read without one. */
+  fixedPartTokens: number;
+  /** What is left of the point it is asked above once that part is taken out: the room its conversation, its two keeps and its document share. */
+  conversationRoomTokens: number;
   /** A head bigger than this many answers is written up at more than one of them holds: `HEAD_OF_ANSWER`, the largest head whose document has been seen to fit. */
   headFitsAnswerTokens: number;
   /** The longest document that finishes inside one answer. */
   summaryTokens: number;
-  /** Where a compaction that finishes leaves the chat: its keep, and the document beside it. */
+  /** Where a compaction that finishes leaves the chat: its keep, the document beside it, and — where the pair was read with a chat's fixed part — that part beside them (facts 4 and 7). */
   landsAtTokens: number;
   /** Tokens of conversation the chat gets before the next one is asked. */
   progressTokens: number;
 }
 
 /** Null when nothing is known of the model's size — there is nothing to say about the pair then. */
-export function roomShapeFor(size: ModelSize, room: WrittenRoom): RoomShape | null {
+export function roomShapeFor(size: ModelSize, room: WrittenRoom, fixedTokens = 0): RoomShape | null {
   const contextWindow = Math.floor(size.contextWindow);
   const maxTokens = Math.floor(size.maxTokens);
   if (![contextWindow, maxTokens, room.keepRecentTokens, room.reserveTokens].every(Number.isFinite)) return null;
   const keepRecentTokens = Math.floor(room.keepRecentTokens);
   const reserveTokens = Math.floor(room.reserveTokens);
   const triggersAtTokens = contextWindow - reserveTokens;
-  const reach = reachableAt(keepRecentTokens, triggersAtTokens, maxTokens);
+  const fixedPartTokens = Math.max(0, Math.floor(Number.isFinite(fixedTokens) ? fixedTokens : 0));
+  const reach = reachableAt(keepRecentTokens, triggersAtTokens, maxTokens, fixedPartTokens);
   const headTokens = reach.headTokens;
   const carriedSummaryTokens = reach.carriedSummaryTokens;
   const summaryTokens = summaryRoomFor(headTokens, maxTokens);
-  const landsAtTokens = keepRecentTokens + summaryTokens;
+  const landsAtTokens = fixedPartTokens + keepRecentTokens + summaryTokens;
   return {
     contextWindow,
     maxTokens,
     keepRecentTokens,
     reserveTokens,
     triggersAtTokens,
+    fixedPartTokens,
+    conversationRoomTokens: triggersAtTokens - fixedPartTokens,
     triggersAtPercent: Math.round((triggersAtTokens / contextWindow) * 100),
     carriedSummaryTokens,
     headTokens,
@@ -616,13 +709,20 @@ export type RoomFault =
   /** A compaction that finishes leaves the chat at its keep and its own summary beside it, and the next one is asked for before the chat has added its keep. */
   | "walks-to-the-cap"
   /** The span it leaves above its keep is smaller than the document written about it: a compaction changes nothing. */
-  | "head-too-small";
+  | "head-too-small"
+  /** The part of the chat its instructions and tools make, which no compaction reads, is at the point it is asked above: a cut is out of reach whatever the numbers keep, and the chat fills its window from here. */
+  | "fixed-part-at-the-point";
 
 /** Read a shape as a fault. Null for a shape whose compaction works, and for one there is no shape for. */
 export function roomFaultFor(shape: RoomShape | null): RoomFault | null {
   if (!shape) return null;
   if (shape.triggersAtTokens <= 0) return "keeps-free-the-whole-window";
   if (shape.keepRecentTokens >= shape.triggersAtTokens) return "keeps-past-its-point";
+  // Asked before `nothing-left-to-cut`, which is the same shape read of the keeps alone:
+  // where the fixed part is known and the room beside it is under two keeps and a token
+  // of conversation, it is that part, and not the pair, that leaves nothing to take out
+  // — the words say which (fact 7).
+  if (shape.fixedPartTokens > 0 && shape.conversationRoomTokens < 2 * MIN_KEEP + MINIMUM_PROGRESS) return "fixed-part-at-the-point";
   if (shape.headTokens <= 0) return "nothing-left-to-cut";
   if (shape.triggersAtPercent >= CONTEXT_AT_WALL_PERCENT) return "compacts-at-the-wall";
   if (shape.headTokens > shape.maxTokens * HEAD_OF_ANSWER) return "summary-wont-fit";

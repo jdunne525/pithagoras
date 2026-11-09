@@ -2691,6 +2691,61 @@ export function compactionStopShape(sessionId: string): string {
     : COMPACT_STOP_SUMMARY_ROOM;
 }
 
+/**
+ * The part of a chat's context no compaction reads — its instructions and the tools it
+ * is offered — on the books for that chat.
+ *
+ * It is not on any model's row: it is that chat's project instructions and the tools that
+ * chat is offered, and pi counts it in the whole of a chat's context (`compaction-ladder.ts`
+ * 's fact 7 — 65,113 tokens, half a 131,072-token window, in the chat that asked for this
+ * fix). The one place it is known is at a compaction, which reports where it left the chat;
+ * that landing, less what the chat's numbers keep and the document they left beside them,
+ * is this number (`fixedPartOf`). Kept on the books because the question is asked again at
+ * a later compaction of the same chat — of a chat reopened after a restart, or at the wall
+ * a run ended at — and a chat's own compaction is not re-run to answer it. Kept at the
+ * largest reading: the tools a chat is offered and the instructions it is given change
+ * while it works, and the number is a floor on the room every later compaction has.
+ */
+const chatFixedPartKey = (sessionId: string) => `chat_fixed_part:${sessionId}`;
+
+/** This chat's fixed part, as its own compaction reported it. 0 is a chat none has reported, and a plan read without one. */
+export function chatFixedPart(sessionId: string): number {
+  const value = Number(getSetting(chatFixedPartKey(sessionId)));
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
+/** What one compaction's landing says this chat's fixed part is: kept at the largest reading, see above. */
+export function noteChatFixedPart(sessionId: string, tokens: number): void {
+  if (!Number.isFinite(tokens) || tokens <= 0) return;
+  putSetting(chatFixedPartKey(sessionId), String(Math.max(Number(chatFixedPart(sessionId)), Math.floor(tokens))));
+}
+
+/**
+ * The same number, held for a model rather than for a chat, at the largest reading any
+ * of that model's chats reported.
+ *
+ * The part is a chat's — its project's instructions and the tools that chat is offered —
+ * but pi scopes the two compaction numbers to a model, and a pair written under a model's
+ * name is what every chat on it reads. So the pair written there has to leave a cut every
+ * chat on it can reach, and the largest part any of them reported is the one those numbers
+ * are safe against: the room a chat has beside its keeps only ever shrinks with a bigger
+ * part, and a pair built for the largest of them cuts for all of the smaller ones.
+ */
+const modelFixedPartKey = (modelKey: string) => `fixed_part_model:${modelKey}`;
+
+/** The largest fixed part any chat on this model has reported. 0 is a model none of whose chats has. */
+export function modelFixedPart(modelKey: string): number {
+  if (!modelKey) return 0;
+  const value = Number(getSetting(modelFixedPartKey(modelKey)));
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
+/** What one chat's compaction says the fixed part of this model's chats is: kept at the largest reading. */
+export function noteModelFixedPart(modelKey: string, tokens: number): void {
+  if (!modelKey || !Number.isFinite(tokens) || tokens <= 0) return;
+  putSetting(modelFixedPartKey(modelKey), String(Math.max(Number(modelFixedPart(modelKey)), Math.floor(tokens))));
+}
+
 /** Every chat left with auto-compaction off by the portal, with its model. */
 export function compactionStops(): { sessionId: string; modelKey: string }[] {
   const prefix = compactionStopKey("");
