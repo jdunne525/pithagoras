@@ -1221,11 +1221,14 @@ class SessionManager extends EventEmitter {
       // model's own pair is still what every other chat on this model reads, and this chat
       // is told at its own landing or its wall that no pair answers it.
       const modelKey = await this.modelKeyOfClient(client);
-      const part = this.chatRoomPart(sessionId, modelKey);
-      const plan =
-        Number.isFinite(window) && Number.isFinite(answer)
-          ? planForModel({ contextWindow: window, maxTokens: answer }, part) ?? planForModel({ contextWindow: window, maxTokens: answer })
-          : null;
+      // The pair this chat is asked for: the largest reading on the books that leaves one,
+      // this chat's own reading where the model's largest is larger than any pair fits
+      // (fact 8: one chat's instructions being larger than any pair fits says nothing of
+      // the chats that read less), and the model's own pair only where no reading of
+      // either exists. That last case is what a chat whose part is at the point these
+      // numbers ask above is not: it is told at its own landing, and the other chats on
+      // this model still read this pair here.
+      const plan = this.pairAskedForChat(sessionId, modelKey, window, answer);
       if (!plan) {
         this.record(sessionId, "portal_notice", {
           text: `That did not work, and ${modelKey || "this chat's model"} has no compaction numbers that would: a summary of what its window leaves to write about is longer than one of its answers, so a compaction here costs a model call and takes no tokens out. What is left to make is the answer itself, or the window: Max output tokens and the context window on its row in Settings → Providers.`,
@@ -1322,14 +1325,25 @@ class SessionManager extends EventEmitter {
    * (db.ts's `chatFixedPart`, and `modelFixedPart` for the pair pi scopes to a model, which
    * is why the largest reading any of a model's chats reported is what is held there: those
    * numbers are what every chat on it reads) — and the plan is asked again with it
-   * (`planForModel`'s `fixedTokens`). Where that leaves a pair, and it is a pair other than
-   * the one the chat runs on, it is written and the attempts are left running: the next
-   * compaction has a head of real conversation to take out of, and the state that asked for
-   * a notice stops being what these chats do. The switch is taken, and the line said, only
-   * where that reading leaves no pair at all — a chat whose instructions and tools are at
-   * the point it is asked above has no cut in any numbers, and is a chat whose answer is a
-   * new chat — or where the pair the chat runs on is already the pair asked with it, which
-   * is its own numbers answered.
+   * (`planForModel`'s `fixedTokens`). Two readings are asked, and they are two questions:
+   * this chat's own is what this chat is asked with, and the model's largest is what a pair
+   * written under its name has to answer for. Where the largest leaves a pair, it answers
+   * both (fact 7's term: a pair with a cut above the largest part has one above all of
+   * them); where it answers nothing, one chat's instructions being larger than any pair fits,
+   * this chat is asked at its own, and the chat at a part no pair answers is the one stopped
+   * and told, at its own numbers rather than the model's (fact 8, measured on the 9 November
+   * Task runs: fourteen of sixteen chats on one model were called unanswerable, and died at
+   * 97% of their windows, because of the largest of a fifteenth). Asked at either landing,
+   * not only at the one that won none: on this machine's model the reading above reached its
+   * stop at a chat's fourth compaction, and the room the run needed had already been spent
+   * three times over. Where a pair is left that is other than the one the chat runs on, it
+   * is written and the attempts are left running: the next compaction has a head of real
+   * conversation to take out of, and the state that asked for a notice stops being what
+   * these chats do. The switch is taken, and the line said, only where this chat's own
+   * reading leaves no pair at all — a chat whose instructions and tools are at the point it
+   * is asked above has no cut in any numbers, and is a chat whose answer is a new chat — or
+   * where the pair the chat runs on is already the pair asked with it, which is its own
+   * numbers answered.
    *
    * Where the room was won, the question left is the length of the document. A pair of
    * numbers bounds where a chat is compacted; nothing about a pair bounds the document
@@ -1404,28 +1418,73 @@ class SessionManager extends EventEmitter {
         noteChatFixedPart(sessionId, readPart);
         if (modelKey) noteModelFixedPart(modelKey, readPart);
       }
-      const part = Math.max(readPart, chatFixedPart(sessionId), modelFixedPart(modelKey));
-      // The pair this model's size asks for a chat of this part — the same plan, with
-      // fact 7's term in the sum — and no pair at all where that part leaves no room for
-      // one: a chat whose own instructions and tools are at the point these numbers ask
-      // above. The document question below keeps the model's head for that case; the chat
-      // has no head of these numbers to be measured beside its document, and what asks
-      // for a line there is the state below, not a second summarization.
-      const chatPlan = part > 0 ? planForModel(size, part) : modelPlan;
-      plan = chatPlan ?? modelPlan;
+      // This chat's own reading, and the largest reading any of this model's chats
+      // reported, of the part no compaction reads. They are two questions, and fact 8 of
+      // `compaction-ladder.ts` says one number does not answer both: the chat's own is
+      // what this chat is asked with, since a pair drawn for a part this chat does not
+      // read is a pair that wins this chat no room, or takes room out of it slower than it
+      // should; the model's largest is what a pair written under this model's name has to
+      // answer for, since pi reads these numbers later for every chat on it, the ones with
+      // longer instructions included. Where the largest leaves a pair it is the pair for
+      // both — a pair that leaves a cut above the largest part leaves one above all of
+      // them. Where it answers nothing, one chat's instructions being larger than any pair
+      // fits, this chat is asked at its own, and the chat at a part no pair answers is the
+      // one stopped and told below, at its own numbers rather than the model's. Fourteen
+      // chats in a row of 9 November Task runs were called unanswerable, and died at 97%
+      // of their windows, on the largest reading of a fifteenth.
+      const ownPart = Math.max(readPart, chatFixedPart(sessionId));
+      const modelPart = modelFixedPart(modelKey);
+      const chatPlan = planForModel(size, ownPart);
+      const askedPair = planForModel(size, modelPart) ?? chatPlan;
+      // A pair that answers this chat. The model's own pair — asked with no part at all —
+      // is not in that answer: this chat's compaction has just said its part is above its
+      // conversation, and a pair drawn as though nothing were is a pair that wins nothing.
+      plan = askedPair ?? modelPlan;
+      // The pair the portal may write, and whether it is a pair other than the one this
+      // chat runs on. Both branches below ask the same act, and neither is a pair the
+      // portal writes over a person's own numbers.
+      const writable = Boolean(modelKey) && modelRoomMayBeSized(settings, modelKey, compactionPlanFor(modelKey));
+      const pairRoom = askedPair ? planRoom(askedPair) : null;
+      const differs =
+        pairRoom !== null && (own.keepRecentTokens !== pairRoom.keepRecentTokens || own.reserveTokens !== pairRoom.reserveTokens);
+      // Whether the pair this chat runs on leaves this chat a cut at all, with its own
+      // part in the sum: `nothing-left-to-cut` and `fixed-part-at-the-point` are the two
+      // shapes fact 4 and fact 7 say no pair of these numbers reaches, its keep counted
+      // twice and the part above them coming to more than the point they are asked above,
+      // so the next compaction has only what the chat just added to take out of. That is
+      // what the rounds above cost: a chat on such a pair compacted two to four times and
+      // took 4,812-15,116 tokens out each time, and was left at 98,106-100,164 of the
+      // 98,072 it is asked above. A pair that leaves a head is left alone, and its
+      // landing — not the pair — is the question below.
+      const pairNow = roomShapeFor(size, own, ownPart);
+      const pairOut = pairNow ? roomFaultFor(pairNow) : null;
+      const unreachable = pairOut === "nothing-left-to-cut" || pairOut === "fixed-part-at-the-point";
+      // A compaction that won its room, on numbers that leave this chat no cut: the pair
+      // is asked where the state first proves itself, at any landing that says so, rather
+      // than only at one that won none. The reading above reached the stop at a chat's
+      // third or fourth compaction on this model's pair — the fourth was what turned the
+      // attempts off, and the room the run needed had already been spent three times. Said
+      // nothing, for the reason `applyCompactionPlan` gives: a chat whose compaction has a
+      // head to take is a chat working as it should.
+      if (landed && compactionRoomWonFor(landed, askedAbove)) {
+        if (unreachable && writable && differs) {
+          await writeCompactionModelRoom(modelKey, pairRoom!);
+          noteCompactionPlan(modelKey, pairRoom!);
+          await client?.refreshSettings?.().catch(() => {});
+          const cleared = clearCompactionStops({ sessionId });
+          if (cleared.length) void this.resumeStoppedCompaction(cleared, modelKey);
+          return;
+        }
+      }
       if (landed && !compactionRoomWonFor(landed, askedAbove)) {
-        const room = chatPlan ? planRoom(chatPlan) : null;
-        const writable = Boolean(modelKey) && modelRoomMayBeSized(settings, modelKey, compactionPlanFor(modelKey));
-        const differs =
-          room !== null && (own.keepRecentTokens !== room.keepRecentTokens || own.reserveTokens !== room.reserveTokens);
         if (writable && differs) {
           // A pair that leaves a cut, written under the model's name — the same act the
           // chat's Context card and `giveCompactionRoom` do, and silent for the reason
           // `applyCompactionPlan` gives: a chat whose compaction has a head to take is a
           // chat working as it should, and the only thing worth a line is the state where
           // no further compaction changes what the chat does. Said nothing here.
-          await writeCompactionModelRoom(modelKey, room!);
-          noteCompactionPlan(modelKey, room!);
+          await writeCompactionModelRoom(modelKey, pairRoom!);
+          noteCompactionPlan(modelKey, pairRoom!);
           await client?.refreshSettings?.().catch(() => {});
           // Where this chat's switch was already off from an earlier stop of ours, this
           // pair is its answer, and the attempts come back with it — one act's stop does
@@ -1445,7 +1504,7 @@ class SessionManager extends EventEmitter {
           // start read a pair with (`describeRoomFault`), so the three say one thing about
           // one pair. A pair that works here is a pair the chat's document outran: only the
           // two numbers are worth naming, and no shape is claimed for it.
-          const shapeNow = roomShapeFor(size, own, part);
+          const shapeNow = roomShapeFor(size, own, ownPart);
           const faultNow = shapeNow ? roomFaultFor(shapeNow) : null;
           const why =
             (shapeNow && faultNow ? `${this.roomFaultWords(shapeNow, faultNow)}. ` : "") +
@@ -1456,8 +1515,8 @@ class SessionManager extends EventEmitter {
           // The two are not answered the same way, and a line that offers a pair that is
           // not the portal's to write is read as "what the heck is this".
           const aboutNumbers =
-            room !== null && !writable
-              ? `A pair does answer this — keep-recent ${tokensOf(room.keepRecentTokens)}, keep-free ${tokensOf(room.reserveTokens)}, the pair these numbers ask for a chat of this part — and it is yours to type, in this chat's Context card or on the model's row under Settings → Providers: the portal does not write over numbers of your own.`
+            pairRoom !== null && !writable
+              ? `A pair does answer this — keep-recent ${tokensOf(pairRoom.keepRecentTokens)}, keep-free ${tokensOf(pairRoom.reserveTokens)}, the pair these numbers ask for a chat of this part — and it is yours to type, in this chat's Context card or on the model's row under Settings → Providers: the portal does not write over numbers of your own.`
               : `Nothing a pair of keep-recent and keep-free numbers does answers this, and nothing this model's row says does: the part they cannot reach is this chat's own instructions and the tools it is offered, read again at every turn and never taken out of a chat. What makes room is a chat that reads less — a new one, in a project whose instructions are shorter — or a shorter AGENTS.md in the folder this chat works in.`;
           await this.stopAutoCompaction(
             sessionId,
@@ -1627,13 +1686,25 @@ class SessionManager extends EventEmitter {
         // (fact 7): the pair written under this model's name is read later by every chat
         // on it, so it is asked with the largest of them, and a chat opened on this model
         // later is sized below the point its own instructions and tools reach before it is
-        // ever compacted — which is the state that asked for a notice, asked before it.
+        // ever compacted — which is the state that asked for a notice, asked before it. Where
+        // the largest of them answers no pair at all, that largest is not asked of this
+        // model again: the pair already written under its name, asked with one of its
+        // chats' own readings, stays (fact 8), and the model's own pair is what a model
+        // none of whose chats has compacted gets.
         const part = modelFixedPart(modelKey);
-        const plan = planForModel({ contextWindow: window, maxTokens: answer }, part) ?? planForModel({ contextWindow: window, maxTokens: answer });
-        if (!plan) continue;
-        const room = planRoom(plan);
+        // The pair this model's largest reading answers, and where no reading of this
+        // model's chats answers a pair at all the pair the portal last wrote under this
+        // model's name — asked with one of its chats' own readings, and the only pair these
+        // chats have been seen to need (fact 8) — stays in place rather than being replaced
+        // by the model's own pair, which is drawn as though nothing sat above a chat's
+        // conversation and is known not to answer the largest of them. The model's own pair
+        // is what a model none of whose chats has compacted gets, as it was.
+        const plan =
+          planForModel({ contextWindow: window, maxTokens: answer }, part) ??
+          (compactionPlanFor(modelKey) ? null : planForModel({ contextWindow: window, maxTokens: answer }));
         const settings = readCompactionSettings();
-        if (modelRoomMayBeSized(settings, modelKey, compactionPlanFor(modelKey))) {
+        if (plan && modelRoomMayBeSized(settings, modelKey, compactionPlanFor(modelKey))) {
+          const room = planRoom(plan);
           const own = effectiveCompactionTokens(settings, modelKey);
           if (own.keepRecentTokens !== room.keepRecentTokens || own.reserveTokens !== room.reserveTokens) {
             await writeCompactionModelRoom(modelKey, room);
@@ -1698,7 +1769,12 @@ class SessionManager extends EventEmitter {
    * pair is asked with: a pair that leaves a cut for the biggest of them leaves one for
    * all of them, and a chat sized without it is sized past the point a cut can reach —
    * which is the state a chat reached to be read as a notice, and what a chat opened on
-   * a model whose chats read a big system message avoids before its first turn.
+   * a model whose chats read a big system message avoids before its first turn. Largest is
+   * asked only as far as it leaves a pair, though (fact 8): where the largest reading is
+   * bigger than any pair fits, this chat is asked at its own, and a chat with no reading
+   * of its own keeps the pair the portal last wrote under this model's name rather than
+   * being sized back to the model's own pair, which is known not to answer the largest of
+   * them — see `pairAskedForChat` for that answer.
    *
    * A person who gave this model numbers of their own, or who took the portal's off
    * its card, is answered by the portal's plan only as a line saying what the numbers
@@ -1725,13 +1801,20 @@ class SessionManager extends EventEmitter {
     // asked with the largest reading on the books (fact 7). Where that leaves no pair,
     // the model's own pair is still what the other chats on this model get; this chat is
     // stopped and told where its own landing says no pair answers it.
-    const part = this.chatRoomPart(sessionId, modelKey);
-    const plan =
-      Number.isFinite(window) && Number.isFinite(answer)
-        ? planForModel({ contextWindow: window, maxTokens: answer }, part) ?? planForModel({ contextWindow: window, maxTokens: answer })
-        : null;
-    // Nothing known about this model's size, or a model so small that a compaction takes
-    // no tokens out of it: the portal writes no numbers, and says nothing about them.
+    // The pair this chat is asked for — the model's largest reading where it answers, this
+    // chat's own reading where it does not, and the pair already written under this
+    // model's name left in place where neither reading is on the books, which is what
+    // `pairAskedForChat` and fact 8 of `compaction-ladder.ts` answer (`true` says a pair
+    // the portal already wrote from one of these chats' own readings is not to be
+    // replaced). Nothing is written, and nothing is said, where that is the answer.
+    const plan = this.pairAskedForChat(sessionId, modelKey, window, answer, true);
+    // Nothing known about this model's size, a model so small that a compaction takes no
+    // tokens out of it, or a model whose readings answer no pair and whose chats have been
+    // sized below one: in the last of those the pair the portal last wrote — asked with the
+    // own reading of one of these chats, the only pair they have been seen to need (fact 8)
+    // — is left where it is rather than replaced by the model's own pair, drawn as though
+    // nothing sat above a chat's conversation. Either way the portal writes no numbers, and
+    // says nothing about them: the plan it does have is returned for the caller's line.
     if (!plan) return null;
     const room = planRoom(plan);
     const settings = readCompactionSettings();
@@ -1800,10 +1883,40 @@ class SessionManager extends EventEmitter {
    * without the part at all is sized past the point a cut can reach. It is not on a
    * model's row in Settings → Providers, and no compaction setting names it, so it is
    * read out of a compaction's own landing and kept here — see `fixedPartOf` and
-   * `compaction-ladder.ts`'s fact 7.
+   * `compaction-ladder.ts`'s fact 7. It is the largest, and largest is not what every chat
+   * is asked with: where it answers no pair, the plan call sites ask this chat's own
+   * reading after it (`chatFixedPart`), which is fact 8 of that file.
    */
   private chatRoomPart(sessionId: string, modelKey: string): number {
     return Math.max(chatFixedPart(sessionId), modelFixedPart(modelKey));
+  }
+
+  /**
+   * The pair of compaction numbers to write, or to say, for a chat on a model: the pair
+   * asked with the largest reading on the books that leaves one (`chatRoomPart`, fact 7),
+   * this chat's own reading where that largest is larger than any pair fits (fact 8: a
+   * model's largest reading answers nothing of the chats that read less), and the model's
+   * own pair, asked with nothing above a chat's conversation, only where no reading of
+   * either exists — a model none of whose chats has compacted. Where the model's readings
+   * answer nothing, this chat has none of its own on the books, and a pair was already
+   * written under this model's name, nothing is returned where `heldPairMayStay` is set:
+   * that pair was asked with one of these chats, it is the only pair they have been seen
+   * to need, and a chat opened on this model later is not sized back past the point a cut
+   * can reach — the state eleven sessions on this machine's model were measured in, each
+   * of them sized by a reading larger than any pair fits before it had read anything of
+   * its own, and each paying a compaction that took a few thousand out of a context it
+   * had only just been asked above. Null is also what a chat at a part no pair answers
+   * gets: nothing is written for it, and its own landing is the thing worth saying.
+   */
+  private pairAskedForChat(sessionId: string, modelKey: string, window: number, answer: number, heldPairMayStay = false): CompactionPlan | null {
+    if (!Number.isFinite(window) || !Number.isFinite(answer)) return null;
+    const size = { contextWindow: window, maxTokens: answer };
+    const widest = planForModel(size, this.chatRoomPart(sessionId, modelKey));
+    if (widest) return widest;
+    const own = chatFixedPart(sessionId);
+    if (own > 0) return planForModel(size, own);
+    if (heldPairMayStay && compactionPlanFor(modelKey)) return null;
+    return planForModel(size);
   }
 
   /**
@@ -1950,9 +2063,11 @@ class SessionManager extends EventEmitter {
     const answer = Number(state?.model?.maxTokens);
     // What sits above this chat's conversation on this chat's own reading, where a chat
     // reported one: the pair written and the pair named are asked with it, and the shape
-    // read is the shape this chat is in.
-    const part = this.chatRoomPart(sessionId, modelKey);
-    const plan = planForModel({ contextWindow: window, maxTokens: answer }, part);
+    // The pair this chat is asked for, as above. Where no reading of this chat answers a
+    // pair and the model's largest is left holding one asked at a shorter chat, no pair is
+    // named here: the chat is at the wall on its own part, and the line below says that
+    // the room it has is its own.
+    const plan = this.pairAskedForChat(sessionId, modelKey, window, answer, true);
     const planNames = plan
       ? `keep-recent ${tokensOf(plan.keepRecentTokens)}, keep-free ${tokensOf(plan.reserveTokens)}: it compacts above ${tokensOf(plan.triggersAtTokens)} (${plan.triggersAtPercent}% of the window), writes ${tokensOf(plan.headTokens)} into one summary, and lands at ${tokensOf(plan.landsAtTokens)}`
       : "";

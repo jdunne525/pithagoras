@@ -120,6 +120,29 @@
  *    writes with the part in the sum is a pair that has a cut to take, which is what makes
  *    the state the person saw stop being what these chats do.
  *
+ * 8. **A model's largest reading is not every chat's reading, and asking a pair with the
+ *    largest asks nothing of the chats that read less.** Measured on the Task queue of 9
+ *    November, sixteen chats in a row on one model (a 131,072-token window, a 16,384-token
+ *    answer) in one project: fourteen of them were stopped by the reading above, and their
+ *    runs died at 97% of their window. Each compacted two to four times first, taking
+ *    4,812-15,116 tokens out each time, and the last of those left it at 98,106-100,164 of
+ *    the 98,072 it is asked above again — fact 6's state. Their parts, read from their own
+ *    landings as fact 7 says, were 64,502 to 66,348 tokens; one other chat on the same
+ *    model read 72,732, and that is the number the pair has been asked with, which answers
+ *    it with no pair at all. At 72,732 of 131,072 the keep this module stops its pair at
+ *    — 1,000, the floor — leaves a head of 11,340 tokens with a document of 12,000 written
+ *    about it: shorter than the document, which is no cut at all (fact 1), so no keep has
+ *    a head to ask for above that part. Asked with the parts the fourteen actually read,
+ *    the same model is answered: keep-recent 1,000 beside 33,000 kept free, a head of
+ *    17,724 with the 12,000-token document beside it, a chat landing at 79,348 of its
+ *    131,072 and working 18,724 tokens of conversation before the next one is asked — a
+ *    real cut at each of those parts. So one chat's instructions being larger than any
+ *    pair fits made every chat on the model unanswerable, and a pair is asked with the
+ *    largest reading that leaves one, not the largest that exists: where the largest
+ *    answers nothing, a chat at a smaller reading is asked at its own, and the chat at the
+ *    part no pair answers is the one told, at its own numbers (see `session-manager.ts`'s
+ *    `keepCompactionRoom` and `chatRoomPart`, and `planForModel`'s `fixedTokens`).
+ *
  * ## The plan the numbers come from
  *
  * Two numbers, in the model's own `compaction.modelOverrides`, chosen so all four
@@ -360,7 +383,14 @@ function reachableAt(keepRecentTokens: number, triggersAtTokens: number, maxToke
  * that has nothing above its conversation. The part is a chat's, not a model's, so it
  * is measured at one chat (`fixedPartOf`) and asked of this from there — the moment a
  * chat's own first landing says the pair written for its model is the wrong pair for it,
- * and the moment this is asked again with what that landing says.
+ * and the moment this is asked again with what that landing says. Asked with a part larger
+ * than any pair fits, the answer is null, and that null is a chat's — it says this chat's
+ * instructions and tools are at the point these numbers ask above, and nothing else's. The
+ * same model's other chats read less, and are answered at what they read (fact 8: fourteen
+ * of sixteen chats on one model were called unanswerable because one chat read 72,732 of a
+ * 131,072-token window and the pair had been asked with that). So a part is asked of this
+ * largest-first only as far as it leaves a pair, and a model's pair is never called
+ * unanswerable on one chat's reading.
  */
 export function planForModel(size: ModelSize, fixedTokens = 0): CompactionPlan | null {
   const window = Math.floor(size.contextWindow);
