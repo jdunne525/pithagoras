@@ -152,6 +152,14 @@ class FakePi extends EventEmitter {
   async start(message) {
     await this.prompt(message);
   }
+  /** The room the portal asked the chat for, which the chat refused: no cut. */
+  async refusedRoom() {
+    this.emit("event", { type: "compaction_start", reason: "manual" });
+    this.emit(
+      "event",
+      { type: "compaction_end", reason: "manual", willRetry: false, errorMessage: NO_CUT },
+    );
+  }
 }
 
 /** The words pi writes for a request it stopped mid-run, and for no cut to make. */
@@ -362,6 +370,75 @@ test("a carry the room will not take leaves the attempt, and the queue's gate, w
     assert.equal(db.getAttempt(attempt.id).status, "running", "the attempt is not settled while its carry has not gone");
     assert.equal(execution.hasLiveTaskRun(), true, "the gate every queue loop reads says work is in hand: no next Task is started");
     assert.deepEqual([...new Set(started)], [sessionId, b], "no brand-new session started the Task again from nothing");
+  } finally {
+    db.setSingleActiveSession(false);
+    await reset();
+  }
+});
+
+test("a carry the room refused waits with the queue through several looks at the room, and none of those looks is one of the run's carries", async () => {
+  try {
+    const t = task();
+    const { sessionId, attempt } = execution.startTask(t.id);
+    await flush();
+    const at = () => pis.get(sessionId);
+    assert.deepEqual([...started], [sessionId], "the Task reached the engine once");
+
+    // A chat started beside the run while the setting was off, and the setting
+    // switched on: its room is held, so a carry of this run cannot go now.
+    const b = chat();
+    await sessions.prompt(b, "work beside the Task");
+    await flush();
+    db.setSingleActiveSession(true);
+
+    // The shape read on the machine over a night of Tasks (`sQSaW8RT78AD` and
+    // the six chats before it, 10 November): the chat's own compaction at the
+    // turn boundary worked, pi's next turn reached its end on the request being
+    // stopped (`This operation was aborted`), and beside that end the portal
+    // asked the chat for room, which the chat refused (`Nothing to compact
+    // (session too small)`). Nothing about the work said the Task was over.
+    await at().turn();
+    // The chat's auto-compaction at the turn boundary, pi's own next turn, and
+    // that turn ending on the request being stopped — `cutShort` is the shape of
+    // the machine's tail, where the run kept working past the compaction.
+    await at().cutShort();
+    // Beside that end the portal asked the chat for room, which it refused.
+    await at().refusedRoom();
+
+    // Past three of the watcher's looks at the room — its own interval is two
+    // seconds — with the other chat still holding its: each look found the carry
+    // still waiting, and on the machine each one spent one of the carries the
+    // run was given, so the fourth look settled the attempt as failed over work
+    // still in hand, seconds after the compaction. The count belongs to the
+    // carries that reached the chat, not to the looks the room refused.
+    await flush(9000);
+
+    assert.deepEqual(
+      [...sessions.singleActiveQueue]
+        .filter((w) => w.sessionId === sessionId)
+        .map((w) => w.message),
+      [PICK_UP],
+      "one line for this turn waits in the queue: a later look does not stack a second copy of it",
+    );
+    assert.equal(
+      db.getAttempt(attempt.id).status,
+      "running",
+      "a carry the room refused is none of the run's carries: the attempt stays open, and the queue's gate waits with it",
+    );
+    assert.equal(execution.hasLiveTaskRun(), true, "and the queue's gate waits with it");
+
+    // The other chat reaches its own end: the room passes, the waiting line is
+    // released, and the work is carried on where its context still lives.
+    await pis.get(b).end("stop");
+    await flush(600);
+    assert.deepEqual(
+      [...sessions.singleActiveQueue].filter((w) => w.sessionId === sessionId),
+      [],
+      "the line that was waiting went: it is not left in the queue",
+    );
+    assert.deepEqual(carries(sessionId).map((p) => p.resume), ["compaction"], "the turn was handed back to the same session once, not a second time for every look at the room");
+    assert.equal(db.getSession(sessionId).status, "running", "the same session is working again: no brand-new one started the Task from nothing");
+    assert.equal(db.getAttempt(attempt.id).status, "running", "and the attempt is still open");
   } finally {
     db.setSingleActiveSession(false);
     await reset();

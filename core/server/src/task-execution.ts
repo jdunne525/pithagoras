@@ -290,6 +290,9 @@ function trackEnd(run: TaskRun): void {
   let compactionSeen = false;
   let endedByCompaction = false;
   let carries = 0;
+  // A carry of this run the room refused sits in the room's queue until the
+  // holder lets go. One waiting line is enough for this turn; see below.
+  let carryWaiting = false;
 
   const endOrCarry = (): void => {
     // The SessionManager still holds the turn (a compaction mid-run, or a cut-off
@@ -302,25 +305,43 @@ function trackEnd(run: TaskRun): void {
       // chat comes to answer the same sentence every turn and never finish. The
       // marker stays set, so the run's own end decides again.
       if (db.getSession(run.sessionId)?.status === "running") return;
-      carries += 1;
-      endedByCompaction = false;
-      void sessions.prompt(run.sessionId, COMPACT_PICK_UP, { resume: "compaction" }).catch((e: unknown) => {
-        // Held behind another room-holder under the single-active setting: the
-        // queue starts it once the room frees, so this is not a failure. The
-        // reason is put back, though, because the turn is still in hand: an
-        // attempt settled beside a carry that has not gone would let the queue
-        // start the Task again in a fresh session while the old one still has
-        // a line waiting for the room (`hasLiveTaskRun` reads this run, and
-        // keeps every loop waiting, for exactly as long as it stays open).
-        if (e instanceof PromptQueuedForSingleActive) {
-          endedByCompaction = true;
-          return;
-        }
-        console.error(`[portal] task ${run.taskId} could not be carried on after a compaction:`, e);
-        // The carry will not come: the turn is over as far as this handler knows,
-        // and the attempt settles like any ended run.
-        settle();
-      });
+      // A carry the room refused is none of this run's carries: the line waits
+      // in the queue, and the queue starts it when the room frees. Counting the
+      // refusals spent the budget on the room instead of on the chat, and the
+      // fourth look settled the attempt as failed over work still in hand —
+      // which is what every BlastRunHero Task lost over a night, nine Tasks at
+      // their own attempt numbers 1 to 6 (the chats beside `sQSaW8RT78AD`), each
+      // attempt written failed seconds after a compaction and a brand-new
+      // session starting the Task again from nothing. Only a carry that reached
+      // the chat counts, and only one line for this turn waits in the queue:
+      // asking again on every look at the room stacks copies of it, which is
+      // how a chat comes to answer the carry-on sentence every turn.
+      if (carryWaiting) return;
+      // The reason stays set while the line is in flight: a settled attempt
+      // beside a carry that has not gone is the failure the queue loop would
+      // otherwise answer by starting the Task again in a fresh session.
+      void sessions.prompt(run.sessionId, COMPACT_PICK_UP, { resume: "compaction" }).then(
+        () => {
+          // The line reached the chat and started its run there: that is one of
+          // this run's carries, and the turn is no longer waiting for one.
+          carries += 1;
+          endedByCompaction = false;
+          carryWaiting = false;
+        },
+        (e: unknown) => {
+          if (e instanceof PromptQueuedForSingleActive) {
+            // Held behind another room-holder: the queue starts it once the room
+            // frees, so this is not a failure, and it is not a carry either.
+            // The reason stays set, because the turn is still in hand.
+            carryWaiting = true;
+            return;
+          }
+          console.error(`[portal] task ${run.taskId} could not be carried on after a compaction:`, e);
+          // The carry will not come: the turn is over as far as this handler knows,
+          // and the attempt settles like any ended run.
+          settle();
+        },
+      );
       return;
     }
     settle();
@@ -378,6 +399,10 @@ function trackEnd(run: TaskRun): void {
     if (!status) return;
     if (status === "running") {
       confirmedRunning = true;
+      // A run started where a carry of this run was waiting for the room: the
+      // queue passed the line on, so the turn is not waiting any more, and a
+      // later cut short of another compaction may be carried on again.
+      carryWaiting = false;
       return;
     }
     if (confirmedRunning) endOrCarry();
@@ -398,6 +423,11 @@ function trackEnd(run: TaskRun): void {
     const status = db.getSession(run.sessionId)?.status;
     if (status === "running") {
       confirmedRunning = true;
+      // A run started where a carry of this run was waiting for the room: the
+      // queue passed the line on, so the turn is not waiting any more, and a
+      // later cut short of another compaction may be carried on again. Read
+      // from persistence, this says the same as the live transition above.
+      carryWaiting = false;
     } else if (confirmedRunning) {
       endOrCarry();
     }
