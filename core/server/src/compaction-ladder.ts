@@ -506,6 +506,43 @@ export function nothingLeftToCompact(errorMessage: unknown): boolean {
 }
 
 /**
+ * A room the portal asked for that the chat refused. (fact 4, read at the ask)
+ *
+ * Where the chat asked, and pi answers `Nothing to compact (session too small)`
+ * — fact 4's words — the part of the chat a compaction reads has nothing left
+ * to take out of it, so the room the chat was asked for is not there to be had:
+ * that is a refusal of the ask, not a summary too long for one answer and not a
+ * failure of the chat's own compaction. It is said as what it is, and it is none
+ * of the chat's count of its own attempts: the state is one the chat's own pair
+ * answers, and a count of asks the chat refused is what stopped the switch for a
+ * chat that was never failing — a room asked for beside a run, answered with no
+ * cut to make, and a switch turned off for it.
+ */
+export const COMPACT_ROOM_REFUSED =
+  "The room this chat was asked for was refused: the part of it a compaction reads has nothing left to take out of it.";
+
+/**
+ * A run that ended on pi running away with it, and the same end in a message's words. (fact 9, read at the run's end)
+ *
+ * Where the person stopped a run (fact 9), or where pi stopped one of the portal's
+ * asks for room, pi ends the run on `aborted`, and the last message it writes is an
+ * errored one — `This operation was aborted`, the same sentence the pair asked for
+ * comes back with (fact 4). Nothing about the model failed there; the run ends
+ * because the portal's ask is working through the chat. What the model refused
+ * answers with `stopReason: "error"` and its reason in the message, which is a
+ * model's failure — these two are not read the same way, and this sentence names
+ * the request, not anything the model did.
+ */
+export function wasRunAway(stopReason: unknown): boolean {
+  return String(stopReason ?? "").toLowerCase() === "aborted";
+}
+
+export function runAway(errorMessage: unknown): boolean {
+  const text = String(errorMessage ?? "").toLowerCase();
+  return text.includes("this operation was aborted") || text.includes("operation was aborted");
+}
+
+/**
  * What a compaction left the chat carrying, in tokens.
  *
  * pi's `compaction_end` carries the summary it wrote and the usage of the call that wrote

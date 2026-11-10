@@ -5,7 +5,7 @@ import * as db from "./db.js";
 import * as tasks from "./tasks.js";
 import { buildTaskPrompt, DEFAULT_MAX_ATTEMPTS } from "./task-prompt.js";
 import { readTaskInstructions } from "./projects.js";
-import { nothingLeftToCompact } from "./compaction-ladder.js";
+import { nothingLeftToCompact, runAway } from "./compaction-ladder.js";
 import { waitForCompletionPromise } from "./task-completion.js";
 
 /**
@@ -335,7 +335,14 @@ function trackEnd(run: TaskRun): void {
       try {
         const answer = JSON.parse(row.payload)?.message;
         if (answer?.role === "assistant") {
-          endedByCompaction = compactionSeen && answer.stopReason === "error";
+          // An errored answer beside a compaction, and an answer whose reason names
+          // a request that was stopped (the model's words for the same end: pi ends
+          // the run on being run away with a compaction, or with an ask of the
+          // portal's, and writes this sentence) both say the run was cut short,
+          // nothing that the Task reached its end — fact 9 of the ladder, read at
+          // the run's last message rather than at the compaction's own answer.
+          endedByCompaction =
+            (compactionSeen && answer.stopReason === "error") || runAway(answer?.errorMessage);
           // An answer that stopped on anything else went through: the work
           // carried on past the compaction, so the next one is the next chance.
           if (!endedByCompaction) compactionSeen = false;

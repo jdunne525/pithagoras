@@ -13,6 +13,8 @@
  * notice is therefore held until the next run starts or the session settles,
  * by which point both have had their say.
  */
+import { runAway } from "./compaction-ladder.js";
+
 export class ModelErrors {
   /** A failure pi has not recovered from, waiting to be reported. */
   private pending = new Map<string, string>();
@@ -39,6 +41,12 @@ export class ModelErrors {
       case "agent_end": {
         const last = lastAssistant(msg.messages);
         if (last?.stopReason !== "error" || msg.willRetry === true) return undefined;
+        // A request pi stopped is not a model's failure: the model was not asked
+        // again and refused nothing, the run ended because one of the portal's
+        // asks worked through the chat (a compaction, or the person's Stop).
+        // Said as a model's failure, that line reads as the chat's own trouble
+        // beside a compaction it was asked room in.
+        if (runAway(last.errorMessage)) return undefined;
         const why = last.errorMessage || "the model failed to answer.";
         const n = this.retries.get(sessionId) ?? 0;
         this.pending.set(

@@ -140,6 +140,7 @@ import {
   COMPACT_NO_ROOM_NOTICE,
   CONTEXT_AT_WALL_PERCENT,
   nothingLeftToCompact,
+  COMPACT_ROOM_REFUSED,
   planForModel,
   planRoom,
   roomShapeFor,
@@ -1121,6 +1122,19 @@ class SessionManager extends EventEmitter {
     // One of the portal's own attempts, which pi reports as a manual compaction: the ladder
     // watches its own calls, and this is no failure of the chat's.
     if (msg.reason === "manual" && this.compactionLadder.has(sessionId)) return;
+    // A compaction that found no cut to make, however it was asked for: the part of the
+    // chat a compaction reads has nothing left to take out of it, so the room the chat
+    // was asked for is refused (fact 4 — `Nothing to compact (session too small)`). Nothing
+    // about a summary went wrong here, and no further try changes it: the state is one the
+    // chat's own pair answers, not one the portal's attempts answer. Said as what it is,
+    // and counted as none of the chat's — counted among its attempts, a room the chat
+    // refused is what turned the chat's compaction off, over and over, for a chat that
+    // was never failing and never would be.
+    if (nothingLeftToCompact(msg.errorMessage)) {
+      this.compactionFailures.delete(sessionId);
+      this.record(sessionId, "portal_notice", { text: COMPACT_ROOM_REFUSED, warning: true });
+      return;
+    }
     const why = compactionFailureText(msg.errorMessage);
     this.record(sessionId, "portal_notice", { text: `Auto-compaction failed: ${why}`, warning: true });
     const n = (this.compactionFailures.get(sessionId) ?? 0) + 1;
@@ -1177,13 +1191,16 @@ class SessionManager extends EventEmitter {
     // no cut can be reached — see fact 4 of `compaction-ladder.ts`. It is not a summary
     // too long for one answer, and a chat that cannot be cut is not a chat whose summary
     // was too long, so it is not called a failure here.
+    let roomRefused = false;
     const worked = async (instructions?: string): Promise<"compacted" | "nothing" | "failed"> => {
       try {
         await this.compact(sessionId, instructions);
         return "compacted";
       } catch (error) {
         // The reason is pi's own sentence, which the chat hears from its compaction_end.
-        return nothingLeftToCompact(error instanceof Error ? `${error.message} ${error.stack ?? ""}` : error) ? "nothing" : "failed";
+        const refused = nothingLeftToCompact(error instanceof Error ? `${error.message} ${error.stack ?? ""}` : error);
+        if (refused) roomRefused = true;
+        return refused ? "nothing" : "failed";
       }
     };
     try {
@@ -1282,7 +1299,10 @@ class SessionManager extends EventEmitter {
       // compaction's end sends, and its own guards say whether anything is still
       // in hand. Unsaid, the chat sits idle with its turn in nobody's hands and
       // the Task it was working is settled as failed beside work that was not lost.
-      if (this.compactionResumePending.has(sessionId)) this.scheduleResumeAfterCompaction(sessionId);
+      // Not where an ask was refused with no cut to make: that ask changed nothing
+      // about the chat, so a line about picking the turn up beside it is read as an
+      // order to work, which is a chat answering the same sentence every turn.
+      if (!roomRefused && this.compactionResumePending.has(sessionId)) this.scheduleResumeAfterCompaction(sessionId);
     }
   }
 
@@ -1539,20 +1559,28 @@ class SessionManager extends EventEmitter {
       this.compactionInterruptedRun.add(sessionId);
       markCompactionResume(sessionId);
     }
+    // Whether an ask came back with no cut to make: the ask is then refused, and the
+    // chat is left exactly as it was — see the refusal's own note.
+    let roomRefused = false;
     // The portal's own attempt, so its events are none of the chat's count — see the
     // guard noteCompactionFailure keeps for exactly this.
     this.compactionLadder.add(sessionId);
     try {
       await this.compact(sessionId, COMPACT_SHORT_SUMMARY);
-    } catch {
+    } catch (error) {
       // It did not work. Nothing is said here: the next merge that fails is the chat's,
-      // and the ladder answers it with what it tried and what it found.
+      // and the ladder answers it with what it tried and what it found — except a room
+      // the chat refused, which says no merge of the chat's own will change it either.
+      roomRefused = nothingLeftToCompact(error instanceof Error ? `${error.message} ${error.stack ?? ""}` : error);
     } finally {
       this.compactionLadder.delete(sessionId);
       this.compactionInterruptedRun.delete(sessionId);
       // A compaction that took the turn and handed it on, with no run coming of its own
-      // after it — the same ending giveCompactionRoom's attempts end at.
-      if (this.compactionResumePending.has(sessionId)) this.scheduleResumeAfterCompaction(sessionId);
+      // after it — the same ending giveCompactionRoom's attempts end at. Not where the
+      // ask was refused with no cut to make: nothing about the chat changed, so a line
+      // about picking the turn up beside it is read as an order to work, which is a
+      // chat answering the same sentence about resuming every turn, and never finishing.
+      if (!roomRefused && this.compactionResumePending.has(sessionId)) this.scheduleResumeAfterCompaction(sessionId);
     }
   }
 
