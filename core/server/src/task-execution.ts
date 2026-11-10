@@ -48,9 +48,26 @@ export const liveRunOf = (taskId: string): TaskRun | undefined =>
 /** Whether a Task is executing right now. */
 export const isRunning = (taskId: string): boolean => !!liveRunOf(taskId);
 
-/** Any Task attempt running at all, anywhere. The queue loop runs one agent
- *  at a time across every project, so it waits while this is true. */
-export const hasLiveTaskRun = (): boolean => [...runs.values()].some((r) => !r.ended);
+/** A run that reached its end and whose outcome has not been written yet.
+    `finishSettled` takes the run out of the registry the moment it ends, because
+    nothing is going any more, and then reads the transcript to decide
+    complete-or-failed — a bounded read, but a window all the same, and through
+    it the Task and its attempt still read running. The queue's gate counts this
+    state as work in hand, which is what keeps a loop from taking another Task
+    across it: on the machine a Task's fifth attempt had settled its session at
+    13:10:09 and was written settled at 13:10:21, and a loop for another Project
+    started a fresh Task at 13:10:11 inside that window — a next Task begun over
+    a present one that was not done. The Task is put here for the whole of the
+    judgement and taken out the moment its statuses are written. */
+const judging = new Set<string>();
+
+/** Whether a Task is working anywhere at all — going, or being judged at its end
+ *  — which is what the queue loop of every Project reads before it takes a Task:
+ *  one agent at a time, and no next Task begun over a present one that is not
+ *  done. A run that ended but whose outcome has not been written is not work the
+ *  queue may start beside either, so both states answer here. */
+export const hasLiveTaskRun = (): boolean =>
+  judging.size > 0 || [...runs.values()].some((r) => !r.ended);
 
 /** Remove a run from the registry without touching its settled status. */
 const forget = (run: TaskRun): void => {
@@ -388,26 +405,41 @@ function trackEnd(run: TaskRun): void {
 }
 
 /** Judge a run that reached its own end (Phase 4/5): the completion marker
-    decides complete-or-failed, and a failed attempt is retried by the loop up
-    to the server-wide budget before the Task is marked failed. This keeps the
-    Task out of the permanent "running" state and gives the queue a clear next
-    action every time. */
-const finishSettled = (run: TaskRun): Promise<void> => {
-  if (run.ended) return Promise.resolve();
+    decides complete-or-failed, and a failed attempt is retried by the loop with
+    the same Task — never with the one behind it — up to the server-wide budget
+    before the Task is marked failed. This keeps the Task out of the permanent
+    "running" state and gives the queue a clear next action every time. */
+const finishSettled = async (run: TaskRun): Promise<void> => {
+  if (run.ended) return;
   run.ended = true;
   forget(run);
-  return waitForCompletionPromise(run.sessionId, run.startSeq).then((completed) => {
+  // The gate holds across the whole judgement below: the run has gone, but the
+  // Task is not done until its outcome is written, and a loop that polled in
+  // between the two would otherwise move on to the next Task in its Project —
+  // or, being a shared gate, to a Task of another Project's — over work still
+  // in hand. It is released by the `finally`, which runs once the attempt and
+  // the Task have both been written.
+  judging.add(run.taskId);
+  try {
+    const completed = await waitForCompletionPromise(run.sessionId, run.startSeq);
     tasks.finishAttempt(run.attemptId, completed ? "completed" : "failed");
     const task = tasks.getTask(run.taskId);
     if (completed) {
       tasks.setTaskStatus(run.taskId, "completed");
       return;
     }
-    // No completion marker: retried by the queue loop while attempts under the
-    // server-wide default remain, otherwise failed. Never left hanging.
+    // No completion marker: the queue loop runs this same Task again while
+    // attempts under the server-wide default remain — it is the first Task not
+    // finished, so it is the one taken — and otherwise the Task is marked
+    // failed, which the loop stalls on rather than passing. Never left hanging.
     tasks.setTaskStatus(
       run.taskId,
       task.attempts < DEFAULT_MAX_ATTEMPTS ? "pending" : "failed",
     );
-  });
+  } finally {
+    // The Task's outcome is written: the run is over, and the queue's gate may
+    // answer for the next Task. Deleting before these writes, or never at all,
+    // would leave the gate closed forever or open over work still in hand.
+    judging.delete(run.taskId);
+  }
 };

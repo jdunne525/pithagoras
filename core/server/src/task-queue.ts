@@ -8,8 +8,14 @@ import * as tasks from "./tasks.js";
  * A loop drives one project's Tasks through the durable queue: it polls for the
  * next work item, launches it through the shared execution module, and advances
  * when it settles. Across all projects only one agent runs at a time. The loop
- * processes Tasks strictly in queue order and cannot bypass a failed one — it
- * stalls on it until the user intervenes.
+ * takes Tasks strictly in queue order and never past the present one: a Task is
+ * worked until it is done, so the loop waits on a Task that is running — one
+ * whose run is going, or whose run has ended and is being judged complete-or
+ * failed — rather than starting the Task behind it, and a Task that errored out
+ * comes back pending with its attempts kept as history, so the loop runs that
+ * same Task again. A Task that cannot be run again at all — failed, or stopped
+ * by hand — cannot be bypassed either, and the loop stalls until the person
+ * intervenes.
  *
  * Minimal per-project state (running flag + current task) is persisted so a
  * restart could later recover an interrupted loop. Recovery itself is Phase 8;
@@ -118,16 +124,32 @@ export function stopLoop(workspace: string): void {
 // --- polling ---------------------------------------------------------------
 
 /**
- * The next item to run for a project, or undefined to stall.
+ * The next item to run for a project, or undefined to wait.
  *
- * Returns the first pending Task in queue order. If a failed or stopped Task
- * comes before any pending one, returns undefined: a failed Task cannot be
- * bypassed, so the loop stalls on it rather than skipping ahead.
+ * The queue is walked in order, and the first Task that is not finished decides
+ * on its own — nothing behind it is ever taken over it:
+ *   - a pending Task is the next work, and the only one the loop may start;
+ *   - a running Task is the present one. Its run may be going, or it may have
+ *     reached its end and be being judged: for the whole of that read the Task
+ *     and its attempt still say working, and were the loop to skip past them it
+ *     would begin a later Task over one that was not done — what the Tasks of a
+ *     Project did across a night, each of them losing an attempt while another
+ *     started in the middle of settling it. A Task marked running with nothing
+ *     executing it is the same state after a process died mid-run, and recovery
+ *     of that is the restart's, not the loop's to answer by skipping ahead.
+ *   - a failed or stopped Task cannot be bypassed, so the loop stalls until the
+ *     person Reruns it or drops it.
+ * A Task that errored out is settled by the execution module back to pending
+ * with its runs kept as history, which is the first case again: the same Task
+ * is the one started, never the one after it.
  */
 function nextWorkItem(workspace: string): ReturnType<typeof listTasksByWorkspace>[number] | undefined {
   for (const t of listTasksByWorkspace(workspace)) {
     if (t.status === "pending") return t;
-    if (t.status === "failed" || t.status === "stopped") return undefined;
+    // Finished, so the walk moves on to whatever the person queued behind it.
+    if (t.status === "completed") continue;
+    // Anything else is unfinished: the present Task, waited for.
+    return undefined;
   }
   return undefined;
 }
@@ -137,7 +159,9 @@ function poll(workspace: string, holder: LoopHolder): void {
     if (!loops.get(workspace)) return; // Stopped meanwhile.
 
     // One agent at a time across every project: wait while any attempt anywhere
-    // is still live, so two loops never share the single agent slot.
+    // is still live, or has reached its end and is being judged, so two loops
+    // never share the single agent slot and no loop takes a next Task across the
+    // moment a present one's outcome is being written.
     if (hasLiveTaskRun()) {
       poll(workspace, holder);
       return;
