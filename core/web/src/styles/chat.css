@@ -150,7 +150,7 @@
 /* ── Compaction marker in the transcript ── */
 .chat-compaction { padding: 6px 0; }
 .chat-compaction, .chat-compaction-line { display: flex; align-items: center; gap: 10px; }
-.chat-compaction.is-done, .chat-compaction.is-failed { flex-direction: column; align-items: stretch; gap: 0; }
+.chat-compaction.is-done, .chat-compaction.is-failed, .chat-compaction.is-refused { flex-direction: column; align-items: stretch; gap: 0; }
 .chat-compaction-rule { flex: 1; height: 1px; background: linear-gradient(90deg, transparent, rgb(var(--line)) 30%, rgb(var(--line)) 70%, transparent); }
 .chat-compaction.is-running .chat-compaction-rule { background: linear-gradient(90deg, transparent, rgb(var(--accent) / .5), transparent); background-size: 200% 100%; animation: chat-rule 1.6s ease-in-out infinite; }
 .chat-compaction.is-running .chat-compaction-rule:first-child { animation-direction: reverse; }
@@ -161,6 +161,9 @@ button.chat-compaction-pill:disabled { cursor: default; }
 .chat-compaction-pill > svg { width: 13px; height: 13px; }
 .chat-compaction.is-done .chat-compaction-pill { animation: chat-settle .6s var(--ease-spring) both; }
 .chat-compaction.is-failed .chat-compaction-pill { color: rgb(var(--warn)); border-color: rgb(var(--warn) / .35); }
+/* Nothing about the chat went wrong: the room it was asked for was refused, and the chat is left where it was. So no warn tone here — the line beside it, the portal's own, already says what a refusal means, and a second one in the colours of a failure reads as a chat that broke. */
+.chat-compaction.is-refused .chat-compaction-pill { border-style: dashed; border-color: rgb(var(--line)); }
+.chat-compaction.is-refused .chat-compaction-rule { background: rgb(var(--line)); opacity: .55; }
 @keyframes chat-settle { from { transform: scaleX(1.12) scaleY(.85); opacity: .5; } to { transform: none; opacity: 1; } }
 .chat-compaction-summary { margin: 8px auto 2px; max-width: 42rem; max-height: 20rem; overflow-y: auto; padding: 10px 14px; border-radius: 12px; background: rgb(var(--surface)); border: 1px solid rgb(var(--line)); font-size: 12px; line-height: 1.6; color: rgb(var(--fg-muted)); }
 /* Its headings are the summary's sections, not titles: the text's own size. */

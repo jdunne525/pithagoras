@@ -522,6 +522,7 @@ const de: Locale = {
     "empty": "leer",
     "Compacting the conversation": "Der Chat wird komprimiert",
     "Compaction did not finish": "Komprimierung nicht abgeschlossen",
+    "Nothing was left to take out of the chat": "It was nothing left to take out of the Chat",
     "Conversation compacted": "Chat komprimiert",
     "{n} tokens summarized": "{n} Tokens zusammengefasst",
     "{n} from cache": "{n} aus dem Cache",

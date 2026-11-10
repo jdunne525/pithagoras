@@ -135,8 +135,17 @@ export type Item =
       since?: number;
       until?: number;
     }
-  /** The conversation summarized to make room, while that runs and after. */
-  | { kind: "compaction"; id: string; status: "running" | "done" | "failed"; tokensBefore?: number; summary?: string; since?: number; until?: number }
+  /**
+   * The conversation summarized to make room, while that runs and after.
+   * `refused`: the room was asked for and the chat answered there was none to be had —
+   * nothing about the chat changed, and no summary was ever being written. This is not
+   * `failed`: that is an attempt that ended without one, and it is the state a page is
+   * meant to answer by making the chat smaller. The portal says this one with its own
+   * line (see `COMPACT_ROOM_REFUSED`); the marker beside it must not also claim a
+   * compaction did not finish, which is what a chat that was only ever asked, and only
+   * ever refused, came to report as a failure it was never having.
+   */
+  | { kind: "compaction"; id: string; status: "running" | "done" | "failed" | "refused"; tokensBefore?: number; summary?: string; since?: number; until?: number }
   /** `portal`: the portal's own words, a msg() key translated where it is drawn; otherwise text as it came. */
   | { kind: "notice"; id: string; text: string; tone: "info" | "warn" | "error"; portal?: true }
   /**
@@ -299,6 +308,21 @@ const PORTAL_LINES: { text: string; resume: "compaction" | "cut-off" }[] = [
   { text: "Compaction detected, resume where you left off if needed.", resume: "compaction" },
   { text: "Carry on where you left off. Your last answer was cut off at the model's output limit, mid-sentence, not at the end of the work.", resume: "cut-off" },
 ];
+
+/**
+ * Whether a compaction answered that it found nothing to take out of the chat.
+ *
+ * pi's own words for it, `Nothing to compact (session too small)`, come when the part of
+ * the chat a compaction reads has no cut to make — the newest stretch is all there is. The
+ * ask for room is refused and the chat is left exactly as it was; the summary never ran,
+ * so this is not an attempt that failed. `session-manager.ts` reads the same words through
+ * `nothingLeftToCompact` in `compaction-ladder.ts` and posts the refusal as a line of the
+ * portal's; the marker of the same ask, drawn from the same two events, has to hear it the
+ * same way or the page says one thing twice and the wrong one of them.
+ */
+function nothingLeftToCompact(errorMessage: unknown): boolean {
+  return /nothing to compact/i.test(String(errorMessage ?? ""));
+}
 
 /** Whether two values hold the same, however deep: what an entry is made of is strings, numbers and plain objects. */
 function sameValue(a: any, b: any, depth = 0): boolean {
@@ -610,7 +634,11 @@ export function buildTranscript(events: PortalEvent[], options: { ended?: boolea
         // The start can be on a page not loaded yet.
         if (!open) items.push((open = { kind: "compaction", id: `c${ev.seq}`, status: "running" }));
         const result = p.result ?? {};
-        open.status = p.aborted || p.errorMessage ? "failed" : "done";
+        // A room the chat refused is not a compaction that did not finish — there was
+        // nothing to take out of it, and the chat is where it was. A compaction the
+        // person stopped keeps its own line, ahead of this reading: the portal answers
+        // the stop before it answers the refusal, and the two must not trade places.
+        open.status = p.aborted ? "failed" : nothingLeftToCompact(p.errorMessage) ? "refused" : p.errorMessage ? "failed" : "done";
         if (ev.at !== undefined) open.until = ev.at;
         if (typeof result.tokensBefore === "number") open.tokensBefore = result.tokensBefore;
         if (typeof result.summary === "string" && result.summary) open.summary = result.summary;

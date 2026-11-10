@@ -524,8 +524,13 @@ export function CompactionMarker({ item }: { item: CompactionItem }) {
     );
   }
   const failed = item.status === "failed";
+  // The room was asked for and the chat answered there was none to be had. It is drawn
+  // apart on its own account: the portal's line for the refusal is already in the chat,
+  // and the two of them must read as one thing — a refusal, not a second and opposite
+  // claim that the compaction did not finish.
+  const refused = item.status === "refused";
   return (
-    <div className={`chat-compaction ${failed ? "is-failed" : "is-done"}`}>
+    <div className={`chat-compaction ${failed ? "is-failed" : refused ? "is-refused" : "is-done"}`}>
       <div className="chat-compaction-line">
         <span className="chat-compaction-rule" />
         <button
@@ -535,10 +540,14 @@ export function CompactionMarker({ item }: { item: CompactionItem }) {
           aria-expanded={item.summary ? open : undefined}
           disabled={!item.summary}
         >
-          {failed ? <LuTriangleAlert aria-hidden /> : <LuFoldVertical aria-hidden />}
+          {failed ? <LuTriangleAlert aria-hidden /> : refused ? <LuCircleSlash aria-hidden /> : <LuFoldVertical aria-hidden />}
           <span>
-            {failed ? t("Compaction did not finish") : t("Conversation compacted")}
-            {!failed && item.tokensBefore ? ` · ${t("{n} tokens summarized", { n: formatTokens(item.tokensBefore) })}` : ""}
+            {refused
+              ? t("Nothing was left to take out of the chat")
+              : failed
+                ? t("Compaction did not finish")
+                : t("Conversation compacted")}
+            {!failed && !refused && item.tokensBefore ? ` · ${t("{n} tokens summarized", { n: formatTokens(item.tokensBefore) })}` : ""}
           </span>
           {item.summary && <LuChevronRight className="chat-chevron" aria-hidden />}
         </button>

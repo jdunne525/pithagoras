@@ -215,6 +215,16 @@ test('tool calls keep their arguments, output and timing; compaction shows where
   assert.deepEqual([tool.args, tool.output, tool.status, tool.until - tool.since], [{ command: 'ls -la' }, 'a\nb', 'done', 500]);
   assert.deepEqual(items[1], { kind: 'compaction', id: 'c4', status: 'done', since: 2000, until: 3000, tokensBefore: 90000, summary: 'S' });
 });
+test('a room the chat refused is drawn as a refusal, and only a summary that did not work is a failure', () => {
+  const items = buildTranscript([
+    { seq: 1, at: 1000, type: 'compaction_start', payload: { reason: 'manual' } },
+    { seq: 2, at: 2000, type: 'compaction_end', payload: { reason: 'manual', aborted: false, errorMessage: 'Error: Nothing to compact (session too small)' } },
+    { seq: 3, at: 4000, type: 'compaction_start', payload: { reason: 'threshold' } },
+    { seq: 4, at: 5000, type: 'compaction_end', payload: { reason: 'threshold', aborted: false, errorMessage: 'Error: the summary ran out of the room the model has for one answer' } },
+  ] as any);
+  assert.deepEqual((items[0] as any).status, 'refused');
+  assert.deepEqual((items[1] as any).status, 'failed');
+});
 test('a finished reply keeps how long it thought, though the deltas that timed it are gone', async () => {
  const { LiveEvents } = await import('../core/server/src/live-events.ts');
  let stored: any;
