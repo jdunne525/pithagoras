@@ -139,7 +139,7 @@ import {
   COMPACT_SHORT_SUMMARY,
   COMPACT_NO_ROOM_NOTICE,
   CONTEXT_AT_WALL_PERCENT,
-  nothingLeftToCompact,
+  roomRefused,
   COMPACT_ROOM_REFUSED,
   planForModel,
   planRoom,
@@ -1119,18 +1119,31 @@ class SessionManager extends EventEmitter {
       void this.keepCompactionRoom(sessionId, msg);
       return;
     }
-    // One of the portal's own attempts, which pi reports as a manual compaction: the ladder
-    // watches its own calls, and this is no failure of the chat's.
-    if (msg.reason === "manual" && this.compactionLadder.has(sessionId)) return;
+    // One of the portal's own asks, which pi reports as a manual compaction: the
+    // ladder watches its own calls, and this is no failure of the chat's. The ladder
+    // is not enough on its own, and was not holding the chat at these events: its
+    // `delete` runs in the ask's own `finally`, and pi writes the compaction's records
+    // before its ask answers — so at a refusal of a room the portal asked the guard
+    // below answered no, and a night of Tasks wrote 17 lines about a room being refused
+    // into chats beside compactions that had just worked, and turned a chat's
+    // compaction switch off over two of them (fact 10 of `compaction-ladder.ts`).
+    // `roomAskAwaiting` holds the ask until its answer's records have been read here.
+    if (msg.reason === "manual" &&
+      (this.compactionLadder.has(sessionId) || this.roomAskAwaiting.has(sessionId))) {
+      this.roomAskAwaiting.delete(sessionId);
+      return;
+    }
     // A compaction that found no cut to make, however it was asked for: the part of the
     // chat a compaction reads has nothing left to take out of it, so the room the chat
-    // was asked for is refused (fact 4 — `Nothing to compact (session too small)`). Nothing
-    // about a summary went wrong here, and no further try changes it: the state is one the
+    // was asked for is refused (fact 4 — `Nothing to compact (session too small)`, and
+    // pi's other words for the same answer, `Already compacted`: the newest record of
+    // the read path is a cut already, which is that answer's first case, facts 9 and
+    // 11). Nothing about a summary went wrong here, and no further try changes it: the state is one the
     // chat's own pair answers, not one the portal's attempts answer. Said as what it is,
     // and counted as none of the chat's — counted among its attempts, a room the chat
     // refused is what turned the chat's compaction off, over and over, for a chat that
     // was never failing and never would be.
-    if (nothingLeftToCompact(msg.errorMessage)) {
+    if (roomRefused(msg.errorMessage)) {
       this.compactionFailures.delete(sessionId);
       this.record(sessionId, "portal_notice", { text: COMPACT_ROOM_REFUSED, warning: true });
       return;
@@ -1169,6 +1182,9 @@ class SessionManager extends EventEmitter {
     if (this.compactionLadder.has(sessionId)) return;
     if (!this.live.has(sessionId)) return;
     this.compactionLadder.add(sessionId);
+    // The answer of this ask is read at an event, and this is what holds it until
+    // that event is read — see `noteCompactionFailure`.
+    this.awaitRoomAnswered(sessionId);
     // The compact() below is pi's own, and pi stops the run before it summarises:
     // the turn that was going comes back to nobody. That is the case
     // `compactionInterruptedRun` exists for, and it has to be marked here rather
@@ -1187,19 +1203,22 @@ class SessionManager extends EventEmitter {
       markCompactionResume(sessionId);
     }
     // Three answers, not two: pi's compaction can also say there is nothing to take
-    // out (`Nothing to compact (session too small)`), which is the room written where
-    // no cut can be reached — see fact 4 of `compaction-ladder.ts`. It is not a summary
-    // too long for one answer, and a chat that cannot be cut is not a chat whose summary
-    // was too long, so it is not called a failure here.
-    let roomRefused = false;
+    // out (`Nothing to compact (session too small)`, or `Already compacted`), which is
+    // the room written where no cut can be reached — see facts 4, 9 and 11 of
+    // `compaction-ladder.ts`. It is not a summary too long for one answer, and a chat
+    // that cannot be cut is not a chat whose summary was too long, so it is not called
+    // a failure here.
+    let refusedRoom = false;
     const worked = async (instructions?: string): Promise<"compacted" | "nothing" | "failed"> => {
       try {
         await this.compact(sessionId, instructions);
         return "compacted";
       } catch (error) {
         // The reason is pi's own sentence, which the chat hears from its compaction_end.
-        const refused = nothingLeftToCompact(error instanceof Error ? `${error.message} ${error.stack ?? ""}` : error);
-        if (refused) roomRefused = true;
+        const refused = roomRefused(
+          error instanceof Error ? `${error.message} ${error.stack ?? ""}` : error,
+        );
+        if (refused) refusedRoom = true;
         return refused ? "nothing" : "failed";
       }
     };
@@ -1288,6 +1307,13 @@ class SessionManager extends EventEmitter {
       });
     } finally {
       this.compactionLadder.delete(sessionId);
+      // The ask is let go here only where its answer is not a refusal of the room:
+      // pi writes the record of a refusal and answers after writing it, so at a
+      // refusal the claim stays, and `noteCompactionFailure` lets it go at the
+      // record. An ask that never reached a compaction — stopped on the way out,
+      // or a client with no such call — has no record coming, and nothing is
+      // allowed to hold this chat's next ask.
+      if (!refusedRoom) this.noteRoomAnswered(sessionId);
       // A marker no compaction_end handed over: the attempt was stopped on the way
       // out, or never reported, so nothing is coming for this turn and the room it
       // was held for stops being held here.
@@ -1302,7 +1328,7 @@ class SessionManager extends EventEmitter {
       // Not where an ask was refused with no cut to make: that ask changed nothing
       // about the chat, so a line about picking the turn up beside it is read as an
       // order to work, which is a chat answering the same sentence every turn.
-      if (!roomRefused && this.compactionResumePending.has(sessionId)) this.scheduleResumeAfterCompaction(sessionId);
+      if (!refusedRoom && this.compactionResumePending.has(sessionId)) this.scheduleResumeAfterCompaction(sessionId);
     }
   }
 
@@ -1561,26 +1587,34 @@ class SessionManager extends EventEmitter {
     }
     // Whether an ask came back with no cut to make: the ask is then refused, and the
     // chat is left exactly as it was — see the refusal's own note.
-    let roomRefused = false;
+    let refusedRoom = false;
     // The portal's own attempt, so its events are none of the chat's count — see the
-    // guard noteCompactionFailure keeps for exactly this.
+    // guard noteCompactionFailure keeps for exactly this, and `awaitRoomAnswered`,
+    // which holds the ask until those events have been read.
     this.compactionLadder.add(sessionId);
+    this.awaitRoomAnswered(sessionId);
     try {
       await this.compact(sessionId, COMPACT_SHORT_SUMMARY);
     } catch (error) {
       // It did not work. Nothing is said here: the next merge that fails is the chat's,
       // and the ladder answers it with what it tried and what it found — except a room
       // the chat refused, which says no merge of the chat's own will change it either.
-      roomRefused = nothingLeftToCompact(error instanceof Error ? `${error.message} ${error.stack ?? ""}` : error);
+      refusedRoom = roomRefused(
+        error instanceof Error ? `${error.message} ${error.stack ?? ""}` : error,
+      );
     } finally {
       this.compactionLadder.delete(sessionId);
+      // Held until its answer is read, except where the ask never reached a
+      // compaction's record: nothing is coming for that one, and the claim must
+      // not sit on this chat's next attempt.
+      if (!refusedRoom) this.noteRoomAnswered(sessionId);
       this.compactionInterruptedRun.delete(sessionId);
       // A compaction that took the turn and handed it on, with no run coming of its own
       // after it — the same ending giveCompactionRoom's attempts end at. Not where the
       // ask was refused with no cut to make: nothing about the chat changed, so a line
       // about picking the turn up beside it is read as an order to work, which is a
       // chat answering the same sentence about resuming every turn, and never finishing.
-      if (!roomRefused && this.compactionResumePending.has(sessionId)) this.scheduleResumeAfterCompaction(sessionId);
+      if (!refusedRoom && this.compactionResumePending.has(sessionId)) this.scheduleResumeAfterCompaction(sessionId);
     }
   }
 
@@ -2623,6 +2657,41 @@ class SessionManager extends EventEmitter {
    * own calls, and these events are its business alone.
    */
   private compactionLadder = new Set<string>();
+
+  /**
+   * A room the portal asked a chat for, whose answer has not been read yet.
+   *
+   * The set above answers whether a chat is in the ladder's hands, and it is let go in
+   * the `finally` of the ask — which is not the moment the ask's answer is read. pi
+   * writes the compaction's records before its ask answers, so at the event of an ask
+   * the ladder no longer held the chat, the guard that asked whether it did answered
+   * no at every one of those, and a refusal of a room the portal asked was heard as
+   * the chat's own: said in the chat, and counted among the chat's attempts. Held
+   * until its answer's events have been read, an answer of a room the portal asked
+   * is none of the chat's count and is not said in the chat (fact 10 of
+   * `compaction-ladder.ts`); a refusal of the person's own ask of the chat still is
+   * told, since that is a question they put to it. Where the ask never reached a
+   * compaction's record — stopped on the way out, or a client with no such call —
+   * the ask's own end lets it go, since nothing is coming to read it.
+   */
+  private roomAskAwaiting = new Set<string>();
+
+  /** Hold a room the portal is asking this chat for, until its answer is read. */
+  private awaitRoomAnswered(sessionId: string): void {
+    this.roomAskAwaiting.add(sessionId);
+  }
+
+  /**
+   * Let go a room the portal asked for, at the reading that answers it.
+   *
+   * Called at a compaction's record, where the claim answers whether that record
+   * is the portal's ask or the person's own. It is called at the ask's own end
+   * only where the ask never reached a compaction's record — see the two places
+   * that ask, and why a refusal of a room is left held there.
+   */
+  private noteRoomAnswered(sessionId: string): void {
+    this.roomAskAwaiting.delete(sessionId);
+  }
 
   /**
    * Which models the portal has said "these numbers cannot work" about.

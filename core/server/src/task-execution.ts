@@ -5,7 +5,7 @@ import * as db from "./db.js";
 import * as tasks from "./tasks.js";
 import { buildTaskPrompt, DEFAULT_MAX_ATTEMPTS } from "./task-prompt.js";
 import { readTaskInstructions } from "./projects.js";
-import { nothingLeftToCompact, runAway } from "./compaction-ladder.js";
+import { roomRefused, runAway } from "./compaction-ladder.js";
 import { waitForCompletionPromise } from "./task-completion.js";
 
 /**
@@ -359,7 +359,7 @@ function trackEnd(run: TaskRun): void {
       compactionSeen = true;
       try {
         const landed = JSON.parse(row.payload);
-        if (landed.type === "compaction_end" && nothingLeftToCompact(landed.errorMessage)) {
+        if (landed.type === "compaction_end" && roomRefused(landed.errorMessage)) {
           // Pi found nothing to take out: the chat's count of failures and its
           // switch are nobody's to move, and the run's end is not the Task's.
           endedByCompaction = true;

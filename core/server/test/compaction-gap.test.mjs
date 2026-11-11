@@ -55,6 +55,21 @@ class FakePi extends EventEmitter {
   compacts = [];
   async compact(instructions) {
     this.compacts.push(instructions ?? "");
+    // A room the portal asked, on a chat that has only just been cut: pi writes the
+    // record of the refusal and answers after writing it, in its own words.
+    if (noCutInHands.has(this.sessionId)) {
+      this.emit("event", { type: "compaction_start", reason: "manual" });
+      this.emit(
+        "event",
+        {
+          type: "compaction_end",
+          reason: "manual",
+          willRetry: false,
+          errorMessage: PI_NO_CUT_WORDS,
+        },
+      );
+      throw new Error(PI_ALREADY_COMPACTED);
+    }
     if (!canCompact.has(this.sessionId)) throw new Error("this pi cannot compact on request");
   }
   /**
@@ -120,6 +135,11 @@ const knownSizes = new Map();
 const wallAt = new Map();
 /** Chats whose pi answers a compaction asked of it, for the tests that read the portal's attempts. */
 const canCompact = new Set();
+/** Chats whose pi answers one asked of it with no cut to make, in the words it writes on a chat that was just cut. */
+const noCutInHands = new Set();
+/** pi's own throw for a room it found nothing to take out of, and the record it writes before it answers. */
+const PI_ALREADY_COMPACTED = "Already compacted";
+const PI_NO_CUT_WORDS = "Compaction failed: Already compacted";
 SdkPiClient.create = async (opts) => {
   started.push(opts.sessionId);
   const pi = new FakePi(opts);
@@ -144,6 +164,7 @@ async function reset() {
   sessions.inRun.clear();
   sessions.compacting.clear();
   sessions.compactionInterruptedRun.clear();
+  sessions.roomAskAwaiting.clear();
   sessions.compactionResumePending.clear();
   sessions.compactionFailures.clear();
   // Nor one test's line about a model whose numbers cannot work the next one's.
@@ -154,6 +175,7 @@ async function reset() {
   knownSizes.clear();
   wallAt.clear();
   canCompact.clear();
+  noCutInHands.clear();
   sessions.contextWallSaid.clear();
   // One test's stopped chats are not the next one's record.
   clearCompactionStops({});
@@ -989,6 +1011,81 @@ test("a compaction with no cut to make is said as what pi found, not as an attem
     assert.match(said[3], /Pi has nothing to take out of this chat/, "and what pi found, in the words for what it means");
     assert.equal(said.filter((t) => t.includes("That did not work either")).length, 0, "no cut to make is not an attempt that failed");
     assert.equal(pi.autoCompaction, true, "and the chat's switch is left to the person: a chat cannot be cut is not its count of failures");
+  } finally {
+    await reset();
+  }
+});
+
+// The other words pi gives for that same answer, and the one that reaches a chat most
+// often: the newest entry of the read path is already a compaction's record, which is
+// `Already compacted`. On a machine over a night of Tasks it was in no part of the
+// portal's vocabulary, so it came out as `Auto-compaction failed: Already compacted`
+// and was counted among a chat's failures, which turned the chat's compaction off two
+// asks later. It is not a second state and not a second thing to say: the same refusal
+// of the room, read as the same answer, said in the same words, counted as nothing.
+test("pi's other words for no cut to make are read as the same refusal, and count as nothing", async () => {
+  try {
+    setSingleActiveSession(false);
+    const a = chat();
+    knownSizes.set(a, { contextWindow: 131_072, maxTokens: 16_384 });
+    await sessions.prompt(a, "work on A");
+    await flush();
+    const pi = pis.get(a);
+
+    // The chat's own attempt, with the summary stopped in the middle of its answer:
+    // the shape the ladder is asked for.
+    pi.emit("event", { type: "compaction_start", reason: "threshold" });
+    pi.emit("event", { type: "compaction_end", ...COMPACT_FAILED });
+    // pi doing the portal's compact, on a chat that has only just been compacted: the
+    // newest record of the read path is a cut already, so the call has nothing to cut.
+    pi.compact = async () => {
+      throw new Error(PI_ALREADY_COMPACTED);
+    };
+    await flush();
+    const said = noticesOf(a);
+    assert.equal(said.length, 4, "the failure, the one try, the room, and what pi found on the try that followed");
+    assert.match(said[1], /Trying it once more with the summary asked for short/, "the try the ladder makes first");
+    assert.match(said[3], /Pi has nothing to take out of this chat/, "the same words for the same answer, whichever of pi's two sentences it wrote");
+    assert.equal(said.filter((t) => t.includes("Already compacted")).length, 0, "pi's own sentence is not repeated to the chat as a failure");
+    assert.equal(said.filter((t) => t.includes("That did not work either")).length, 0, "no cut to make is not an attempt that failed, in either of pi's words");
+    assert.equal(pi.autoCompaction, true, "and the chat's switch is left to the person: a room with nothing in it is not the chat's count of failures");
+  } finally {
+    await reset();
+  }
+});
+
+// The refusal of a room the portal asked is the ask's own business, and it is not said
+// in the chat at all. The claim the ask holds cannot be released in the ask's own
+// `finally`, because pi writes the record of the refusal and answers only after writing
+// it: on the newest chats of 11 and 12 November one chat asked, was refused, and answered
+// itself with a line about the room being refused — four to five a chat per hour, beside
+// compactions that had just worked, and two of those turned the chat's compaction off.
+// The claim is held until the record has been read.
+test("a room the portal asked, which pi refused with its other words, says nothing in the chat and is none of the chat's count", async () => {
+  try {
+    setSingleActiveSession(false);
+    const a = chat();
+    knownSizes.set(a, { contextWindow: 131_072, maxTokens: 16_384 });
+    noCutInHands.add(a);
+    await sessions.prompt(a, "work on A");
+    await flush();
+    const pi = pis.get(a);
+    const said = noticesOf(a).length;
+
+    // A compaction that worked, and left the document the bounded ask is worked at.
+    const measured = { summary: "x".repeat(20_948), usage: { input: 22_396, output: 11_993 } };
+    pi.emit("event", { type: "compaction_start", reason: "threshold" });
+    pi.emit("event", { type: "compaction_end", reason: "threshold", willRetry: false, result: measured });
+    await flush();
+    assert.deepEqual(pi.compacts, [COMPACT_SHORT_SUMMARY], "the bounded ask was worked, and pi refused it with `Already compacted`");
+    assert.deepEqual(noticesOf(a).slice(said), [], "the record of a room the portal asked is none of the chat's words: the chat says nothing about it");
+    assert.equal(pi.autoCompaction, true, "and none of the chat's count, so nothing turns its compaction off");
+
+    // The claim did not sit on the chat's next attempt: its own failures are still
+    // heard as the chat's, and its second one in a row still stops them.
+    noCutInHands.delete(a);
+    await failCompactionTwice(pi);
+    assert.equal(pi.autoCompaction, false, "the chat's own two failures in a row still stop its attempts");
   } finally {
     await reset();
   }

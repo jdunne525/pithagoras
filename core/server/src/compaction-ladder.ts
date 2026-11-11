@@ -200,6 +200,49 @@
  * which is what runs for hours afterwards; the document beside its keep is the bound's,
  * not the pair's, and is what keeps that state inside one answer instead of three merges
  * from its cap.
+ *
+ * ## What a refusal of a room the portal asked is
+ *
+ * 9. **A refusal of a room is not a failure of the chat, and it is not the
+ *    state of a chat left where it was asked.** pi answers a room it was asked
+ *    for with nothing to take out of the chat in two sentences, and they are
+ *    one answer: `Nothing to compact (session too small)` (the part it reads
+ *    since the last cut holds only what the keep keeps) and `Already compacted`
+ *    (the newest entry of the read path is already a compaction's record — that
+ *    answer's first case). On a machine over a night of Tasks the first was
+ *    heard 17 times over 8 chats; on the newest chats of 11 November it is one
+ *    refusal at every compaction of a chat, four to five a chat per hour, and
+ *    each of those came out in the chat as a line about the room being refused,
+ *    beside a compaction that had just worked. The ask is worked at most of
+ *    these chats' compactions (the paragraph above), and an ask of a chat that
+ *    was just cut cannot find a cut: what it says is that this ask found no
+ *    cut, and the room's own answer (`isCompactionEnabledFor` says whether a
+ *    pair would be asked at all) is what decides whether the chat's attempts
+ *    are stopped. A refusal is never counted among a chat's own failures, and
+ *    a refusal of a room the portal asked is never said in the chat at all —
+ *    the person's own ask, which is answered with nothing to take out, is the
+ *    one that is told.
+ *
+ * 10. **The portal's ask is not held at the moment its events are read, so its
+ *     refusals were heard as the chat's own.** `compactionLadder.delete` runs in
+ *     the `finally` of the portal's ask, and pi writes the compaction's records
+ *     before its ask answers, so the guard in `noteCompactionFailure` that asked
+ *     whether the portal's ask held the chat answered no at every one of those
+ *     events — which is why a night of Tasks wrote 17 of these lines in the
+ *     chats, and why two refusals of a room turned a chat's compaction switch
+ *     off. The ask is held until its answer's events have been read
+ *     (`awaitRoomAnswered` in `session-manager.ts`), and an answer that comes
+ *     while the ask is held is none of the chat's count.
+ *
+ * 11. **The second sentence was not in the portal's vocabulary until 12
+ *     November.** `Already compacted` reached the chat as
+ *     `Auto-compaction failed: Already compacted` and was counted among the
+ *     chat's failures, which turned the chat's compaction switch off at its
+ *     second ask after the first refusal of room — fact 9's state read as the
+ *     shape of fact 6's. It is the same answer as `Nothing to compact
+ *     (session too small)`, and a chat's switch is turned off over refusals of
+ *     room alone only where the room's answer says the chat will not be asked
+ *     again, and only at its own second refusal there.
  */
 
 /** pi's own keep-free, and the floor for the portal's: a chat must compact before the answer is squeezed. */
@@ -506,17 +549,41 @@ export function nothingLeftToCompact(errorMessage: unknown): boolean {
 }
 
 /**
+ * pi's other words for that same answer: the newest entry of the read path is
+ * already a compaction's record, so there is nothing newer to take out. This is
+ * not a second state — it is `nothingLeftToCompact`'s first case, and the
+ * refusal of a room that was asked a chat that had just been cut.
+ */
+export function alreadyCompacted(errorMessage: unknown): boolean {
+  return /already compacted/i.test(String(errorMessage ?? ""));
+}
+
+/**
+ * A compaction's end that refused the room it was asked for, in either of
+ * pi's two sentences. Neither of them says anything of the chat's numbers: a
+ * chat's failures are the attempts that worked and the model refused, and a room
+ * that has nothing new in it to take out is none of those (fact 9 above).
+ */
+export function roomRefused(errorMessage: unknown): boolean {
+  return nothingLeftToCompact(errorMessage) || alreadyCompacted(errorMessage);
+}
+
+/**
  * A room the portal asked for that the chat refused. (fact 4, read at the ask)
  *
- * Where the chat asked, and pi answers `Nothing to compact (session too small)`
- * — fact 4's words — the part of the chat a compaction reads has nothing left
- * to take out of it, so the room the chat was asked for is not there to be had:
- * that is a refusal of the ask, not a summary too long for one answer and not a
- * failure of the chat's own compaction. It is said as what it is, and it is none
- * of the chat's count of its own attempts: the state is one the chat's own pair
- * answers, and a count of asks the chat refused is what stopped the switch for a
- * chat that was never failing — a room asked for beside a run, answered with no
- * cut to make, and a switch turned off for it.
+ * Where the chat asked, and pi answers with no cut to take out — `Nothing to
+ * compact (session too small)`, fact 4's words, or `Already compacted`, its
+ * other words for the same answer — the part of the chat a compaction reads has
+ * nothing left to take out of it, so the room the chat was asked for is not
+ * there to be had: that is a refusal of the ask, not a summary too long for one
+ * answer and not a failure of the chat's own compaction. It is said as what it
+ * is, and it is none of the chat's count of its own attempts: the state is one
+ * the chat's own pair answers, and a count of asks the chat refused is what
+ * stopped the switch for a chat that was never failing — a room asked for
+ * beside a run, answered with no cut to make, and a switch turned off for it.
+ * This is the line for the person's own ask of the chat, which is the one
+ * refusal the chat is told about; a refusal of a room the portal asked is not
+ * said in the chat at all (fact 10 above).
  */
 export const COMPACT_ROOM_REFUSED =
   "The room this chat was asked for was refused: the part of it a compaction reads has nothing left to take out of it.";
