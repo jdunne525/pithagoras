@@ -163,12 +163,17 @@ export const TranscriptRow = memo(function TranscriptRow({
   // An open question is drawn above the message box (see QuestionCard); what is kept here is its record.
   if (item.kind === "question") return item.state === "open" ? null : <QuestionRecord item={item} enter={enter} />;
   // The portal's own line carrying an unfinished turn on: a compaction that caught
-  // the run mid-turn, or an answer the model stopped in mid-sentence. Not a
-  // message, and not a bubble — one muted line. As a message it read as the person
-  // saying the same sentence again, which is what a chat that carried a cut-off
-  // answer on three times came to look like.
+  // the run mid-turn, an answer the model stopped in mid-sentence, or a turn that
+  // ended with only its thinking. Not a message, and not a bubble — one muted line.
+  // As a message it read as the person saying the same sentence again, which is what
+  // a chat that carried a cut-off answer on three times came to look like.
   if (item.kind === "user" && item.resume) {
-    const asked = item.resume === "compaction" ? t("The portal asked the agent to pick the turn back up after the compaction") : t("The portal asked the agent to carry on where its answer was cut off");
+    const asked =
+      item.resume === "compaction"
+        ? t("The portal asked the agent to pick the turn back up after the compaction")
+        : item.resume === "silent"
+          ? t("The portal asked the agent to carry on after a turn that ended with only its thinking")
+          : t("The portal asked the agent to carry on where its answer was cut off");
     return (
       <div data-key={item.id} className={`flex flex-wrap items-center justify-end gap-1.5${enter}${mine}`}>
         <LuArrowDownToLine aria-hidden className="h-3.5 w-3.5 shrink-0 text-fg-faint" />

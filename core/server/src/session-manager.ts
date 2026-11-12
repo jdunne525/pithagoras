@@ -246,8 +246,11 @@ export interface PromptOptions {
   onRecorded?: (seq: number, queued: boolean) => void;
 }
 
-/** What a portal resume of ours carries on: the compaction's turn, or a cut-off answer. */
-export type ResumeKind = "compaction" | "cut-off";
+/**
+ * What a portal resume of ours carries on: the compaction's turn, a cut-off answer, or a
+ * turn that ended having written nothing anyone can read (see `noteSilentEnd`).
+ */
+export type ResumeKind = "compaction" | "cut-off" | "silent";
 
 /** A message sent into a run, until pi takes it in: see SessionManager.waiting. */
 interface Waiting {
@@ -761,7 +764,8 @@ class SessionManager extends EventEmitter {
    * finished" alert. The same question covers a run that ended with the model
    * cut off at its output limit (cutOffResumePending): that idle is not a real
    * end either, and settling on it is what made the Task start a brand-new
-   * session from nothing while the work was still in hand.
+   * session from nothing while the work was still in hand. A run that ended with
+   * only its thinking — no answer, no work asked for — sits in the same gap.
    */
   isCompacting(sessionId: string): boolean {
     return (
@@ -2345,6 +2349,24 @@ class SessionManager extends EventEmitter {
   }
 
   /**
+   * A run that ended with only its thinking, and is not being carried on: said once,
+   * where the person sees the chat end, so the chat's last line is why it stopped and
+   * not the carry-on that stopped the same way.
+   *
+   * This end is the model choosing to conclude a turn it wrote nothing of — the shape
+   * that reads as a chat finishing something it never answered, and, on a Task, as an
+   * attempt that failed over work still in hand. It is not the shape
+   * `noteCutOffEnd` says: nothing here says the context was full — the model had room
+   * and stopped anyway — so the line names the turns spent and what the person can do.
+   */
+  private noteSilentEnd(sessionId: string, carries: number): void {
+    this.record(sessionId, "portal_notice", {
+      text: `The model ended its turn ${carries + 1} times in a row having written only its thinking — no answer, and no work asked for — so the run was left as it is. Say the ask again, or try another model.`,
+      warning: true,
+    });
+  }
+
+  /**
    * Send the message that carries an unfinished turn on in the same session.
    *
    * Two ends of a run leave a turn in hand that nothing resumes by itself: a
@@ -2787,17 +2809,20 @@ class SessionManager extends EventEmitter {
   private modelOutputLimit = new Map<string, number>();
 
   /**
-   * How many times a session's run has been carried on after the model was cut
-   * off, in a row. Bounded: a model that keeps rambling to its output limit must
-   * not keep the room open forever, so after this many carries the run is left
-   * to end like any other. Cleared when a run ends on its own terms.
+   * How many times a session's run has been carried on with a turn left in hand,
+   * in a row — after the model was cut off at its output limit, or after a turn
+   * that ended having written nothing. Bounded: a model that keeps rambling to
+   * its output limit, or keeps ending on its thinking alone, must not keep the
+   * room open forever, so after this many carries the run is left to end like any
+   * other. Cleared when a run ends on its own terms.
    */
   private cutOffCarries = new Map<string, number>();
 
   /**
-   * Sessions sitting in the gap between a run that ended with the model cut off
-   * at its output limit and the carry-on prompt that resumes it in the same
-   * session. The same shape as the compaction gap just above: the session reads
+   * Sessions sitting in the gap between a run that ended mid-work and the carry-on
+   * prompt that resumes it in the same session: the model cut off at its output
+   * limit, or a turn that ended with only its thinking, no answer and no work
+   * asked for. The same shape as the compaction gap just above: the session reads
    * idle, but the turn is unfinished, so it must keep holding the room (handing
    * the room over inside that gap is what let a second session start beside it
    * and two Tasks run at once) and the Task watcher must not settle the attempt
@@ -3321,18 +3346,34 @@ class SessionManager extends EventEmitter {
       // all of it still the model working. Settling on agent_end is what made
       // the Stop button disappear halfway through.
       if (msg.type === "agent_settled") {
+        // Two ends of a run leave work in hand that nothing resumes by itself.
         // The model ran out of output tokens in mid-answer: pi ends the run, but
-        // the turn is not over — the answer was cut off. Carrying it on in the
-        // same session is what keeps the work: left as it is, this idle reads as
-        // a finished run, the Task watcher settles the attempt as failed, and
-        // the queue loop launches a brand-new session that starts the Task again
-        // from nothing. Held before the idle is published below, so neither the
-        // watcher nor the queue sees the room as free in the gap.
+        // the turn is not over — the answer was cut off. Or the model concluded the
+        // turn having written nothing anyone can read: only its thinking, no answer,
+        // and no work asked for. Carrying either on in the same session is what keeps
+        // the work: left as it is, this idle reads as a finished run, the Task watcher
+        // settles the attempt as failed, and the queue loop launches a brand-new
+        // session that starts the Task again from nothing — which is how BlastRunHero's
+        // `E2` Task (16717a00, 12 November) lost its first attempt: the chat compacted
+        // at 20:01:26, pi wrote the turn's next answer as thinking alone (26 tokens,
+        // `stopReason: stop`, "Both are already done — the summary cut off mid-work"),
+        // nothing was carried on, and a fresh session at 20:02:15 began the Task over.
+        // Held before the idle is published below, so neither the watcher nor the queue
+        // sees the room as free in the gap.
         const carries = this.cutOffCarries.get(sessionId) ?? 0;
-        const cutOff = this.lastStopReason.get(sessionId) === "length" ? this.cutOffAnswer.get(sessionId) : undefined;
+        const shape = this.cutOffAnswer.get(sessionId);
+        const reason = this.lastStopReason.get(sessionId);
+        const cutOff = reason === "length" ? shape : undefined;
+        // The other end: the model stopped of its own accord (not out of its output,
+        // not an error, not a Stop) with nothing in the answer to carry on from. The
+        // `length` shape of writing nothing is the context having no room left, which
+        // the test below answers — a carry-on of that is the same nothing written
+        // again, and it is said rather than carried. Here the chat had room and the
+        // turn simply ended on its thinking, which is no end of the work.
+        const silent = reason === "stop" && shape !== undefined && !shape.wrote;
         const limit = this.modelOutputLimit.get(sessionId) ?? 0;
         let carryingOn = false;
-        if (cutOff && this.answerWasCutOff(cutOff, limit) && carries < 3) {
+        if (carries < 3 && cutOff && this.answerWasCutOff(cutOff, limit)) {
           carryingOn = true;
           this.cutOffCarries.set(sessionId, carries + 1);
           this.cutOffResumePending.add(sessionId);
@@ -3341,13 +3382,21 @@ class SessionManager extends EventEmitter {
           // compaction resume uses.
           markCompactionResume(sessionId);
           this.scheduleResumeAfterCompaction(sessionId, "Carry on where you left off. Your last answer was cut off at the model's output limit, mid-sentence, not at the end of the work.", "cut-off");
+        } else if (silent && carries < 3) {
+          carryingOn = true;
+          this.cutOffCarries.set(sessionId, carries + 1);
+          this.cutOffResumePending.add(sessionId);
+          markCompactionResume(sessionId);
+          this.scheduleResumeAfterCompaction(sessionId, "Carry on where you left off. Your last turn ended with only its thinking, no answer and no work asked for, which is not the end of the work.", "silent");
         } else {
-          // A stop that was not a cut-off answer, or the budget spent: said once,
-          // where the person sees the chat end, so the chat's last line is why it
-          // stopped and not the carry-on that stopped the same way.
+          // A stop that was neither a cut-off answer nor an answer that wrote nothing,
+          // or the budget spent: said once, where the person sees the chat end, so the
+          // chat's last line is why it stopped and not the carry-on that stopped the
+          // same way.
           if (cutOff) this.noteCutOffEnd(sessionId, cutOff, limit, carries);
-          // Ended on its own terms: the carry-on budget is spent, so a later run
-          // in this session gets a fresh one.
+          else if (silent) this.noteSilentEnd(sessionId, carries);
+          // Ended on its own terms, or out of carries: the carry-on budget is spent,
+          // so a later run in this session gets a fresh one.
           this.cutOffCarries.delete(sessionId);
         }
         this.inRun.delete(sessionId);

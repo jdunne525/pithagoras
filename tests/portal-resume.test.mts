@@ -21,9 +21,13 @@ import { addLocale, setLanguage } from '../core/web/src/i18n.ts';
 
 const CARRY_ON = "Carry on where you left off. Your last answer was cut off at the model's output limit, mid-sentence, not at the end of the work.";
 const PICK_UP = "Compaction detected, resume where you left off if needed.";
+// What carries a turn that ended with only its thinking, no answer and no work
+// asked for, back on (see core/server/test/silent-answer-run.test.mjs).
+const NOTHING_SAID = "Carry on where you left off. Your last turn ended with only its thinking, no answer and no work asked for, which is not the end of the work.";
 
 const cutOff = { seq: 4, type: 'portal_prompt', payload: { message: CARRY_ON, resume: 'cut-off' } };
 const compact = { seq: 9, type: 'portal_prompt', payload: { message: PICK_UP, resume: 'compaction' } };
+const quiet = { seq: 12, type: 'portal_prompt', payload: { message: NOTHING_SAID, resume: 'silent' } };
 const said = { seq: 2, type: 'portal_prompt', payload: { message: 'Change the gunner enemies to fire in 3 round bursts' } };
 
 const row = (item: any, over: Record<string, any> = {}) =>
@@ -77,6 +81,32 @@ test('the chat draws a carry-on as one line saying the portal asked, not as the 
 
   const picked = row(buildTranscript([compact] as any)[0]);
   assert.match(picked, /The portal asked the agent to pick the turn back up after the compaction/);
+});
+
+// A turn that ended with only its thinking is carried on by a third line of the
+// portal's. It is the portal asking, and drawn as one muted line like the other
+// two; and where the record does not say whose it is, its sentence says it.
+test('a carry-on of a turn that ended with nothing said is the portal’s line, and says which', () => {
+  const items = buildTranscript([said, quiet] as any);
+  assert.equal((items[0] as any).resume, undefined, 'what the person said is not the portal’s line');
+  assert.equal((items[1] as any).resume, 'silent');
+
+  const html = row(items[1]);
+  assert.match(html, /The portal asked the agent to carry on after a turn that ended with only its thinking/);
+  // The sentence is only the line's hover text; what is on show is one muted line.
+  const shown = html.replace(/title="[^"]*"/g, "");
+  assert.ok(!shown.includes(NOTHING_SAID), 'the sentence itself is not on show');
+  assert.ok(!html.includes('rounded-2xl'), 'no bubble: it is not a message of the person’s');
+
+  // Known by its sentence, the way the other two are, for a chat whose record
+  // predates the marker.
+  const plain = buildTranscript([{ seq: 12, type: 'portal_prompt', payload: { message: NOTHING_SAID } }] as any);
+  assert.equal((plain[0] as any).resume, 'silent');
+
+  // Not the line ↑ takes back for sending again.
+  const waiting = buildTranscript([said, { seq: 12, type: 'portal_prompt', payload: { message: NOTHING_SAID, queued: true, resume: 'silent' } }] as any);
+  assert.equal(lastWaiting(waiting), undefined, "the portal's line is not offered as the person's message");
+  assert.equal(lastSaid(waiting)?.seq, 2, 'and the chat’s last thing said is still the person’s message');
 });
 
 test('a carry-on that never got there is said as not sent, the way a message of the person’s is', () => {

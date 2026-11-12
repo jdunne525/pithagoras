@@ -739,6 +739,14 @@ distinguishes the two shapes of a model that stops on `length`:
   few seconds. Nothing is sent, the room is handed over, and the chat gets one
   line saying the context is full and what would give it room.
 
+A third shape leaves a turn in hand without running out of room: the model stopped
+of its own accord with only its thinking in the answer — no words, and no work
+asked for. That is not the end of the work; left as it is, the chat reads as a run
+that finished, and on a Task the attempt is settled as failed over work still in
+hand while a new session starts the Task from nothing. So this end is carried on
+in the same chat too, bounded to three in a row, and the fourth is said as an end
+with the reason.
+
 Those carry-on lines are the portal's, not yours: they are recorded as such, and
 drawn as one short muted line — *the portal asked the agent to carry on where its
 answer was cut off* — so three of them are not three messages of yours, and ↑ in

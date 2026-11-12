@@ -95,13 +95,14 @@ export type Item =
       steer?: boolean;
       /**
        * The portal's own line carrying an unfinished turn on — after a compaction that
-       * caught the run mid-turn, or after a run the model cut itself off on. Drawn as the
-       * portal speaking for the work, not as a message of the person's: left as a message,
+       * caught the run mid-turn, after a run the model cut itself off on, or after a turn
+       * that ended with only its thinking and no answer. Drawn as the portal speaking for
+       * the work, not as a message of the person's: left as a message,
        * a chat that carried a cut-off answer on three times showed the person having said
        * the same sentence three times, which is what they came to report as "a repeated
        * message".
        */
-      resume?: "compaction" | "cut-off";
+      resume?: "compaction" | "cut-off" | "silent";
       unsent?: "stopped" | "restarted" | "unsure";
     }
   /** `thinkingSince`/`thinkingUntil`: when the reasoning started and last grew, for "Thought for 12s". */
@@ -282,8 +283,8 @@ function userItem(seq: number, p: any): UserItem {
   // Whose line it is: the record says, and a chat that ran this before the record
   // said it is recognised by the sentence the portal sends.
   const resume =
-    p?.resume === "compaction" || p?.resume === "cut-off"
-      ? (p.resume as "compaction" | "cut-off")
+    p?.resume === "compaction" || p?.resume === "cut-off" || p?.resume === "silent"
+      ? (p.resume as "compaction" | "cut-off" | "silent")
       : PORTAL_LINES.find((line) => line.text === text)?.resume;
   return {
     kind: "user",
@@ -307,9 +308,10 @@ function userItem(seq: number, p: any): UserItem {
  * purpose: a Task's prompt that quotes the same sentence inside its own text is the person's
  * message and stays one.
  */
-const PORTAL_LINES: { text: string; resume: "compaction" | "cut-off" }[] = [
+const PORTAL_LINES: { text: string; resume: "compaction" | "cut-off" | "silent" }[] = [
   { text: "Compaction detected, resume where you left off if needed.", resume: "compaction" },
   { text: "Carry on where you left off. Your last answer was cut off at the model's output limit, mid-sentence, not at the end of the work.", resume: "cut-off" },
+  { text: "Carry on where you left off. Your last turn ended with only its thinking, no answer and no work asked for, which is not the end of the work.", resume: "silent" },
 ];
 
 
