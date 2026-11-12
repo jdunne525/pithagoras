@@ -1181,6 +1181,22 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ tokens }),
     }),
+  /**
+   * How much of a chat's opening prompt one of its context files is held to
+   * (see the server's `context-budget.ts`). `0` reads whole files, `null` goes
+   * back to the portal's own number.
+   */
+  setContextCap: (tokens: number | null) =>
+    json<{ ok: true; contextCap: number; contextCapStored: number | null; contextCapDefault: number; applied?: number; waiting?: number }>("/api/context-cap", {
+      method: "PUT",
+      body: JSON.stringify({ tokens }),
+    }),
+  /**
+   * Where a chat's context goes, part by part. Only where its pi can be asked
+   * inside itself: `unsupported` on a chat whose pi runs in a container.
+   */
+  context: (id: string) =>
+    json<{ live: boolean; breakdown: ContextBreakdown | null; unsupported?: boolean }>(`/api/sessions/${id}/context`),
   compact: (id: string) =>
     json<{ ok: true }>(`/api/sessions/${id}/compact`, { method: "POST" }),
 
@@ -1210,6 +1226,10 @@ export const api = {
       compaction: CompactionSettings;
       compactionDefaults: CompactionSettings;
       contextDefault: number | null;
+      /** The hold on one context file, in force, as stored, and what it falls back to. */
+      contextCap: number;
+      contextCapStored: number | null;
+      contextCapDefault: number;
       executor: string;
       workspaceRoot: string;
     }>("/api/settings"),
@@ -1336,6 +1356,38 @@ export interface PiState {
   thinkingLevel: string;
   autoCompactionEnabled?: boolean;
   messageCount?: number;
+}
+
+/** One named part of a chat's context, in tokens (the server's estimate, as pi's own). */
+export interface ContextPart {
+  name: string;
+  tokens: number;
+  /** Where the part is a file loaded as project context. */
+  path?: string;
+  /** What the cap left out of this file, and the cap that left it out. */
+  leftOut?: { wholeTokens: number; cap: number };
+}
+
+/**
+ * Where a chat's context goes: its opening prompt part by part, the files inside
+ * it, the tools declared to the model, and the conversation. `tokens` is what pi
+ * counts — the same figure as the pill — and `sentTokens` what the provider
+ * counted on the last answer, which is the tool declarations larger.
+ */
+export interface ContextBreakdown {
+  contextWindow: number;
+  tokens: number | null;
+  percent: number | null;
+  sentTokens?: number;
+  prompt: ContextPart[];
+  promptTokens: number;
+  files: ContextPart[];
+  tools: ContextPart[];
+  toolTokens: number;
+  history: ContextPart[];
+  historyTokens: number;
+  /** What each context file is held to; 0 where whole files are read. */
+  cap: number;
 }
 
 export interface PiConfig {

@@ -29,6 +29,7 @@ export const SETTINGS_INDEX: SettingEntry[] = [
   { tab: "general", section: msg("For new chats"), title: msg("Default model"), words: "model provider default new chat standard modell" },
   { tab: "general", section: msg("For new chats"), title: msg("Effort"), words: "thinking reasoning level effort denken nachdenken" },
   { tab: "general", section: msg("Context"), title: msg("Context window"), words: "tokens ctx context window size length kontext fenster" },
+  { tab: "general", section: msg("Context"), title: msg("Each context file"), words: "agents md claude agents.md knowledge base file cap hold prompt how much a chat starts with full third of the window where it goes breakdown read to the cap tokens grenze kontextdatei anfangsprompt aufschlüsselung" },
   { tab: "general", section: msg("Context"), title: msg("Kept when compacting"), words: "compaction compact keep recent summary kompaktieren zusammenfassung" },
   { tab: "general", section: msg("Context"), title: msg("Kept free at the end"), words: "compaction compact keep free reserve threshold room summary chat too big fails kompaktieren freier platz zusammenfassung" },
   { tab: "models", section: msg("Providers"), title: msg("Max output tokens"), words: "max output tokens answer length summary compaction cut off one answer gets room maximale ausgabe tokens antwort zusammenfassung" },

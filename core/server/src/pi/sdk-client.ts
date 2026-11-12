@@ -22,6 +22,8 @@ import { OUTSIDE_CONTENT_GUIDELINE, declaredFiles, declaredGuard, guardExtension
 import { CODEMODE_TOOL, CODEMODE_TOOLS, codemodeExtension } from "./codemode.js";
 import { findSessionFile } from "./session-file.js";
 import { CONTEXT_FILES, SHARED_FILES } from "./context-files.js";
+import { capContextFiles, getContextCap, tokensOf, type LeftOut } from "./context-budget.js";
+import type { ContextBreakdown, ContextPart } from "./types.js";
 import { heartbeatTool } from "./heartbeat-tool.js";
 import { ToolsGateway } from "./tools-gateway.js";
 import { CALLED_TOOL_KEY, GATEWAY_TOOL, calledThrough } from "./tools-gateway-names.js";
@@ -376,6 +378,81 @@ function callable(obj: any, key: string): any {
 }
 
 /**
+ * pi's own estimate of a message's weight, in tokens.
+ * 
+ * The same chars/4 rule pi's `estimateTokens` uses — including the 4,800
+ * characters it reads a picture as — so the breakdown adds up to the figure the
+ * context percentage is worked from rather than to a second, different guess.
+ */
+function messageTokens(message: any): number {
+  const text = (content: unknown): number => {
+    if (typeof content === "string") return content.length;
+    if (!Array.isArray(content)) return 0;
+    let chars = 0;
+    for (const block of content) {
+      if (block?.type === "text") chars += typeof block.text === "string" ? block.text.length : 0;
+      // A picture is not its bytes: pi weighs what the model is given for one.
+      else if (block?.type === "image") chars += 4_800;
+    }
+    return chars;
+  };
+  switch (message?.role) {
+    case "system": {
+      let chars = text(message.content);
+      for (const section of Object.values(message.sections ?? {})) if (typeof section === "string") chars += section.length;
+      if (message.toolsAdded) chars += JSON.stringify(message.toolsAdded).length;
+      return tokensOf(chars);
+    }
+    case "assistant": {
+      let chars = 0;
+      for (const block of message.content ?? []) {
+        if (block?.type === "text") chars += typeof block.text === "string" ? block.text.length : 0;
+        else if (block?.type === "thinking") chars += typeof block.thinking === "string" ? block.thinking.length : 0;
+        else if (block?.type === "toolCall") chars += String(block.name ?? "").length + JSON.stringify(block.arguments ?? {}).length;
+      }
+      return tokensOf(chars);
+    }
+    case "bashExecution":
+      return tokensOf(String(message.command ?? "").length + String(message.output ?? "").length);
+    case "branchSummary":
+    case "compactionSummary":
+      return tokensOf(String(message.summary ?? "").length);
+    default:
+      return tokensOf(text(message?.content));
+  }
+}
+
+/** What the provider counted on the chat's last answer, as pi counts it; nothing where none reported any. */
+function sentTokensOf(messages: any[]): number | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m?.role !== "assistant" || !m.usage) continue;
+    if (m.stopReason === "aborted" || m.stopReason === "error") continue;
+    const u = m.usage;
+    const total = u.totalTokens || (u.input ?? 0) + (u.output ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
+    if (total > 0) return total;
+  }
+  return undefined;
+}
+
+/** One `<project_instructions path="…">…</project_instructions>` of the prompt's project context. */
+const PROJECT_FILE = /<project_instructions path="([^"]+)">([\s\S]*?)<\/project_instructions>/g;
+
+/** How a kind of message is called in the breakdown, in the words a person reads. */
+const HISTORY_NAMES: Record<string, string> = {
+  user: "What was asked",
+  assistant: "Its own answers",
+  toolResult: "What its tools returned",
+  bashExecution: "Commands run",
+  compactionSummary: "The compaction's summary",
+  branchSummary: "A branch's summary",
+  custom: "Notes of the portal's",
+};
+
+/** Before a chat has answered anything, pi has the prompt as one text and no section names. */
+const t_promptWhole = "The prompt as pi has it, part by part at its first answer";
+
+/**
  * pi driven through its SDK, in this process.
  *
  * Preferred over the RPC subprocess for host sessions: pi's own docs recommend
@@ -407,6 +484,8 @@ export class SdkPiClient extends EventEmitter implements PiClient {
   }
   /** The portal's own id for this conversation — what prefill progress is reported against. */
   portalSessionId?: string;
+  /** What this chat's opening prompt left out of a context file, once its prompt has been built. */
+  contextCaps?: () => LeftOut[];
   /** The extensions' event bus, when this client made one. */
   bus?: { emit(channel: string, data: unknown): void };
   unbridge?: Bridge;
@@ -537,6 +616,10 @@ export class SdkPiClient extends EventEmitter implements PiClient {
     // The line that outside content is data, while a tool that declares it is on or lazy: asked once the session is there (below).
     let outsideLines: () => string[] = () => [];
     const gateway = new ToolsGateway(opts.lazySets);
+    // What this chat's opening prompt left out of a context file, filled each time
+    // the prompt is built (see the override below) and told by `/context` and by
+    // the notice the session manager records from it (see `contextCaps`).
+    const caps: LeftOut[] = [];
     // What the tools that are on ask to be told in a spoken turn, whoever registered them: `voiceGuidelines` on a
     // tool, as pi's own promptGuidelines are for every turn. Asked once the session is there (below).
     let toolVoiceLines: () => string[] = () => [];
@@ -618,9 +701,19 @@ export class SdkPiClient extends EventEmitter implements PiClient {
         // handed to pi as context files directly. Nothing to regenerate, and an
         // edit is live for the next session that starts. Both halves are read
         // as the chat's agent could read them: see readOwn.
-        agentsFilesOverride: (base: { agentsFiles: any[] }) => ({
-          agentsFiles: [...agentsFilesFor(base.agentsFiles, pi.getAgentDir(), opts.sessionId), ...extraContextFiles(opts.cwd, opts.role, opts.sessionId)],
-        }),
+        // Held to the cap on the way out, as well as read as the agent could: a
+        // project's knowledge base grows without anything saying no, and the whole
+        // of it goes into every turn of the chat (see context-budget.ts).
+        agentsFilesOverride: (base: { agentsFiles: any[] }) => {
+          const all = [
+            ...agentsFilesFor(base.agentsFiles, pi.getAgentDir(), opts.sessionId),
+            ...extraContextFiles(opts.cwd, opts.role, opts.sessionId),
+          ];
+          const held = capContextFiles(all);
+          caps.length = 0;
+          caps.push(...held.leftOut);
+          return { agentsFiles: held.files };
+        },
         // Content alone is not enough. Handed over as plain context files, pi
         // presents them as reference material and the model answers "who are
         // you" from its own base identity — verified: it read a fact out of
@@ -714,6 +807,7 @@ export class SdkPiClient extends EventEmitter implements PiClient {
         ? [OUTSIDE_CONTENT_GUIDELINE]
         : [];
     client.portalSessionId = opts.sessionId;
+    client.contextCaps = () => caps;
     client.dialogs = opts.dialogs !== false;
     client.rememberChatModel = opts.rememberChatModel;
     client.canReloadNow = opts.canReloadNow;
@@ -1409,6 +1503,104 @@ export class SdkPiClient extends EventEmitter implements PiClient {
     return Array.isArray(levels) && levels.length
       ? levels
       : ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+  }
+
+  /**
+   * Where this chat's context goes, part by part.
+   *
+   * Read from what pi is about to send rather than from what was sent last: the
+   * prompt it has built, the files inside its project context (with what the cap
+   * left out of each), the tools declared to the model, and the conversation it
+   * has so far. pi's own figure counts the prompt and the conversation only, so
+   * what the provider counted is given beside it — the two differ by about the
+   * weight of the tool declarations, which is the part a person cannot see in
+   * the percentage.
+   */
+  async getContextBreakdown(): Promise<ContextBreakdown | undefined> {
+    const session: any = this.session;
+    if (!session) return undefined;
+    const stats = await this.getStats();
+
+    let messages: any[] = [];
+    try {
+      messages = session.sessionManager?.buildSessionProjection?.()?.messages ?? [];
+    } catch {
+      // A projection that cannot be read leaves the prompt and the tools, which
+      // come from elsewhere; the conversation is simply not counted.
+    }
+
+    // The prompt as pi built it: the sections it keeps are what the model is
+    // given, and the text between them is only the tags around them. pi names them
+    // when it writes the system message, which it does at the first request — a
+    // chat that has answered nothing has its prompt as one text, and its files are
+    // in it, so it is reported as one part rather than as nothing.
+    const system = [...messages].reverse().find((m) => m?.role === "system");
+    const sections = (system?.sections ?? {}) as Record<string, string>;
+    const whole = String(session.systemPrompt ?? "");
+    const prompt: ContextPart[] = system
+      ? Object.entries(sections)
+          .filter(([, content]) => typeof content === "string" && content.length > 0)
+          .map(([name, content]) => ({ name, tokens: tokensOf(content.length) }))
+          .sort((a, b) => b.tokens - a.tokens)
+      : whole
+        ? [{ name: t_promptWhole, tokens: tokensOf(whole.length) }]
+        : [];
+    const promptTokens = system
+      ? prompt.reduce((n, one) => n + one.tokens, 0)
+      : tokensOf(whole.length);
+
+    // The files inside the project context, as the chat reads them now: the wrapper
+    // is read out of what is being sent rather than from disk, which is where a cap
+    // or a dropped context file has already had its say.
+    const cut = new Map<string, LeftOut>((this.contextCaps?.() ?? []).map((one) => [one.path, one]));
+    const inside = sections.project_context ?? whole;
+    const files: ContextPart[] = [...String(inside).matchAll(PROJECT_FILE)]
+      .map(([, at, body]): ContextPart => {
+        const one = cut.get(at);
+        return one
+          ? { name: at, path: at, tokens: tokensOf(body.length), leftOut: { wholeTokens: one.wholeTokens, cap: one.cap } }
+          : { name: at, path: at, tokens: tokensOf(body.length) };
+      })
+      .sort((a, b) => b.tokens - a.tokens);
+
+    // Only what is declared to the model: a tool registered and switched off
+    // costs nothing, and naming it as a cost would be a lie about the request.
+    const declared = new Set<string>(session.getActiveToolNames?.() ?? []);
+    const tools: ContextPart[] = (session.getAllTools?.() ?? [])
+      .filter((one: any) => declared.has(one?.name))
+      .map((one: any): ContextPart => ({
+        name: one.name,
+        tokens: tokensOf(JSON.stringify({ name: one.name, description: one.description ?? "", parameters: one.parameters ?? {} }).length),
+      }))
+      .sort((a: ContextPart, b: ContextPart) => b.tokens - a.tokens);
+    const toolTokens = tools.reduce((n, one) => n + one.tokens, 0);
+
+    const kinds = new Map<string, number>();
+    for (const message of messages) {
+      if (message?.role === "system") continue;
+      const name = HISTORY_NAMES[message?.role] ?? String(message?.role ?? "other");
+      kinds.set(name, (kinds.get(name) ?? 0) + messageTokens(message));
+    }
+    const history = [...kinds]
+      .map(([name, tokens]) => ({ name, tokens }))
+      .sort((a, b) => b.tokens - a.tokens);
+    const historyTokens = history.reduce((n, one) => n + one.tokens, 0);
+
+    const sent = sentTokensOf(messages);
+    return {
+      contextWindow: stats.contextUsage.contextWindow,
+      tokens: stats.contextUsage.tokens,
+      percent: stats.contextUsage.percent,
+      ...(sent ? { sentTokens: sent } : {}),
+      prompt,
+      promptTokens,
+      files,
+      tools,
+      toolTokens,
+      history,
+      historyTokens,
+      cap: getContextCap(),
+    };
   }
 
   /** When pi's model and key files were last read here. */

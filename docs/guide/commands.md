@@ -78,6 +78,7 @@ menu of things that quietly do nothing.
 | Command | Does |
 | --- | --- |
 | `/compact` | Summarise the conversation to free context |
+| `/context` | Where this chat's context goes: its opening prompt part by part, its files, its tools, its conversation |
 | `/session` | Model, effort, context, tokens, cost, tool calls |
 | `/export` | Write the session out — HTML, or `.jsonl` if you name one |
 | `/reload` | Reload extensions, skills, prompts and settings |
@@ -87,11 +88,21 @@ menu of things that quietly do nothing.
 | `/clear` | The same as `/new` |
 | `/name` | Rename the session |
 
-The first four act on the session server-side and report through the event
-stream. The rest open portal UI and never reach pi.
+The five the portal answers itself — `/compact`, `/context`, `/session`,
+`/export`, `/reload` — act on the session server-side and report through the
+event stream. The rest open portal UI and never reach pi.
 
 `/compact` is not awaited — it is a model call, and holding the HTTP request
 open for it would time out. It reports when it finishes.
+
+`/context` answers how full the chat is and what is filling it. A chat can read
+as a third full before anyone has asked it anything, and the answer to that is
+in its opening prompt rather than in its conversation: the command names each
+part of the prompt, each project file inside it — with what a context file was
+held to, see [what a chat starts with](/guide/sessions#what-a-chat-starts-with)
+— the tools declared to the model, and the conversation so far. A chat whose pi
+runs in a container cannot be asked inside itself, and says so; `/session` still
+gives its whole figure.
 
 ## Extension commands
 

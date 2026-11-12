@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { LuChevronRight, LuRefreshCw } from "react-icons/lu";
-import { api, type PiConfig } from "../api";
+import { api, type ContextBreakdown, type ContextPart, type PiConfig } from "../api";
 import { parseWindow } from "../context-window";
 import { KeepFree, KeepRecent, useKeepFreeSave, useKeepRecentSave } from "./KeepRecent";
 import { modelKeyOf, roomOf, type Room } from "../compaction";
@@ -152,6 +152,95 @@ function ContextWindow({
       </div>
       <p className="mt-1.5 text-[11px] text-fg-faint">
         {t("What the server holds for one chat. Applies to every chat on this model.")}
+      </p>
+    </div>
+  );
+}
+
+/**
+ * Where a chat's context goes, part by part.
+ *
+ * The pill says how full a chat is; this says what is filling it, which is the
+ * question a chat that opens a third full actually asks. Largest first, with the
+ * files named under the part of the prompt they sit in: a project's AGENTS.md can
+ * hold a window on its own, and nothing else on this page says so.
+ *
+ * Every figure is the server's estimate — four characters to a token, pi's own
+ * rule — so the parts add up to the percentage above them rather than to a second
+ * guess at the same thing.
+ */
+function ContextMap({ sessionId }: { sessionId: string }) {
+  const [data, setData] = useState<null | "loading" | ContextBreakdown | "unsupported" | "notStarted" | "error">(null);
+
+  useEffect(() => {
+    if (data !== null) return;
+    api
+      .context(sessionId)
+      .then((r) => setData(r.breakdown ? r.breakdown : r.unsupported ? "unsupported" : r.live ? "error" : "notStarted"))
+      .catch(() => setData("error"));
+  }, [sessionId, data]);
+
+  if (data === null || data === "loading") return <div className="skeleton mt-3 h-16 w-full" />;
+  if (data === "error" || data === "unsupported" || data === "notStarted") {
+    return (
+      <p className="mt-3 rounded-lg bg-raised/40 px-2 py-2 text-[11px] text-fg-faint">
+        {data === "unsupported"
+          ? t("This chat's pi runs in a container, which cannot say what its parts weigh.")
+          : data === "notStarted"
+            ? t("Its pi is not running, so its parts are not counted. Ask it something, and open this again.")
+            : t("The breakdown could not be read.")}
+      </p>
+    );
+  }
+
+  const row = (name: string, tokens: number, indented = false) => (
+    <div key={name} className={`flex items-baseline justify-between gap-2 ${indented ? "pl-3" : ""}`}>
+      <dt className={`min-w-0 truncate ${indented ? "text-[10px] text-fg-faint" : "text-[11px] text-fg-subtle"}`} title={name}>
+        {name}
+      </dt>
+      <dd className="shrink-0 text-[11px] tabular-nums text-fg-muted">{formatNumber(tokens)}</dd>
+    </div>
+  );
+  const part = (one: ContextPart) => (
+    <div key={one.path ?? one.name}>
+      {row(one.path ?? one.name, one.tokens, true)}
+      {one.leftOut ? (
+        <p className="pl-3 text-[10px] text-fg-faint">
+          {t("{n} more were left out of it", { n: formatNumber(Math.max(0, one.leftOut.wholeTokens - one.tokens)) })}
+        </p>
+      ) : null}
+    </div>
+  );
+  const sum = (list: ContextPart[]) => list.reduce((n, one) => n + one.tokens, 0);
+
+  return (
+    <div className="mt-3 rounded-lg bg-raised/40 px-2 py-2">
+      <dl className="space-y-1">
+        {row(t("Opening prompt"), data.promptTokens)}
+        {data.prompt.slice(0, 5).map((one) => part({ ...one, path: undefined }))}
+        {data.prompt.length > 5 ? row(t("{n} smaller parts", { n: data.prompt.length - 5 }), sum(data.prompt.slice(5)), true) : null}
+        {/* The files are inside the prompt, inside `project_context` — which is only the
+            wrapper — and they are where a chat's opening is heavy, so they are named. */}
+        {data.files.slice(0, 4).map(part)}
+        {data.files.length > 4 ? row(t("{n} other files", { n: data.files.length - 4 }), sum(data.files.slice(4)), true) : null}
+        {row(t("Tools declared"), data.toolTokens)}
+        {row(t("The conversation"), data.historyTokens)}
+        {data.history.slice(0, 3).map((one) => row(one.name, one.tokens, true))}
+      </dl>
+      {data.sentTokens !== undefined && (
+        <p className="mt-2 text-[10px] text-fg-faint">
+          {t("On its last answer the provider counted {n}.", { n: formatNumber(data.sentTokens) })}
+        </p>
+      )}
+      {data.contextWindow > 0 && (
+        <p className="mt-1 text-[10px] text-fg-faint">
+          {t("The prompt alone is {n}% of the window.", { n: ((data.promptTokens / data.contextWindow) * 100).toFixed(1) })}
+        </p>
+      )}
+      <p className="mt-1 text-[10px] text-fg-faint">
+        {data.cap > 0
+          ? t("Each context file is held to {n} tokens — Settings → General.", { n: formatNumber(data.cap) })
+          : t("Context files are read whole.")}
       </p>
     </div>
   );
@@ -337,6 +426,11 @@ export function ContextPill({
           ) : (
             <ContextWindow cfg={cfg} onChanged={onChanged} onError={(e) => setNote({ text: e.message, error: true })} />
           )}
+
+          <div className="my-3 border-t border-line" />
+
+          <p className="text-[11px] text-fg-subtle">{t("Where it goes")}</p>
+          <ContextMap sessionId={sessionId} />
 
           <div className="my-3 border-t border-line" />
 

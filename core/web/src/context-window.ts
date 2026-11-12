@@ -66,3 +66,32 @@ export function parseAnswer(text: string): ParsedWindow {
   }
   return { kind: "ok", tokens: n };
 }
+
+/**
+ * How much of what a chat starts with one of its context files may take, in
+ * tokens — the portal's own hold, not the model's window.
+ *
+ * The bounds are the server's (its `context-budget.ts`), so this field refuses
+ * what the server would. 0 is read as it is asked for: whole files, no hold.
+ * Under the floor nothing of an overview survives the cut; over the ceiling the
+ * hold holds nothing, which is what 0 already says, with one number fewer.
+ */
+const CAP_MIN = 1_000;
+const CAP_MAX = 200_000;
+
+export function parseCap(text: string): ParsedWindow {
+  const trimmed = text.trim();
+  if (!trimmed) return { kind: "empty" };
+  const n = WINDOW_TEXT.test(trimmed) ? Number(trimmed.replace(/[ ,._]/g, "")) : NaN;
+  if (n === 0) return { kind: "ok", tokens: 0 };
+  if (!Number.isInteger(n) || n < CAP_MIN || n > CAP_MAX) {
+    return {
+      kind: "bad",
+      message: t("Enter the cap as a whole number of tokens, from {min} to {max}, or 0 to read whole files", {
+        min: typeable(CAP_MIN),
+        max: typeable(CAP_MAX),
+      }),
+    };
+  }
+  return { kind: "ok", tokens: n };
+}

@@ -97,6 +97,12 @@ choice under the chat box, and a running chat is never rewritten.
 - **Kept when compacting** — how much of the most recent conversation is kept
   word for word; only what is older becomes a summary. pi's default is a third of
   a 64k window, which is why compacting can look as though it did nothing.
+- **Each context file** — how much of what a chat starts with one of its
+  `AGENTS.md` or `CLAUDE.md` files may take. What is past it stays in the file,
+  and the chat is told what it did not get and how to read the rest, so a
+  project's notes that grow do not sit in every turn of every chat in that
+  folder. `0` reads whole files. See
+  [What a chat starts with](/guide/sessions#what-a-chat-starts-with).
 - **Kept free at the end** — what pi leaves empty at the top of the window: a
   chat is compacted above window minus this. It is the other half of the same
   arithmetic, and it decides how much the model has to write in one answer when

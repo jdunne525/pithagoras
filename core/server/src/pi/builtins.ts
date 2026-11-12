@@ -1,4 +1,4 @@
-import type { PiClient, PiCommand } from "./types.js";
+import type { ContextBreakdown, PiClient, PiCommand } from "./types.js";
 import { piFile } from "./package.js";
 
 /**
@@ -18,6 +18,7 @@ import { piFile } from "./package.js";
 const PORTAL_SUPPORTED: Record<string, "server" | "client"> = {
   compact: "server",
   session: "server",
+  context: "server",
   export: "server",
   reload: "server",
   model: "client",
@@ -35,12 +36,14 @@ const PORTAL_SUPPORTED: Record<string, "server" | "client"> = {
 const PORTAL_DESCRIPTIONS: Record<string, string> = {
   new: "Start a new chat in this folder",
   clear: "Start a fresh chat in this folder",
+  context: "Say where this chat's context goes, part by part",
 };
 
 /** Used only if the SDK's internal module moves; keeps `/` working regardless. */
 const FALLBACK_DESCRIPTIONS: Record<string, string> = {
   compact: "Manually compact the session context",
   session: "Show session info and stats",
+  context: "Break the context down: prompt, files, tools, conversation",
   export: "Export session (HTML default, or specify path: .html/.jsonl)",
   reload: "Reload extensions, skills, prompts and settings",
   model: "Select model",
@@ -112,6 +115,16 @@ export async function runBuiltin(name: string, args: string, client: PiClient): 
       await client.compact();
       return "Context compacted.";
 
+    case "context": {
+      const breakdown = await client.getContextBreakdown?.();
+      // A pi in a container is reached over RPC, which answers the whole figure and
+      // nothing inside it. Say so, and where else to look, rather than invent parts.
+      if (!breakdown) {
+        return "This chat's pi runs in a container, which reports how full the chat is and not what its parts weigh. `/session` gives the whole figure; a chat on the portal's own host answers `/context` in full.";
+      }
+      return contextBreakdownText(breakdown);
+    }
+
     case "reload":
       await client.reload();
       return "Reloaded extensions, skills, prompts and settings.";
@@ -138,4 +151,68 @@ export async function runBuiltin(name: string, args: string, client: PiClient): 
     default:
       throw new Error(`'${name}' is not a server-side command`);
   }
+}
+
+/** Numbers as the portal writes them, whatever the host's locale is set to. */
+const num = (n: number) => Math.round(n).toLocaleString("en-US");
+
+/**
+ * The breakdown, in the words a person reads in the transcript.
+ *
+ * Largest part first, and the files under the part they sit in: the question
+ * `/context` is asked to is "what is holding my window", and the answer is the
+ * first line of it. Every figure is pi's own estimate (four characters to a
+ * token), so they add up to the percentage the pill shows rather than to a
+ * second guess at the same thing.
+ */
+export function contextBreakdownText(b: ContextBreakdown): string {
+  const window = b.contextWindow;
+  const pct = (n: number, of: number) => (of > 0 ? ` (${((n / of) * 100).toFixed(1)}%)` : "");
+  const lines: string[] = [];
+
+  lines.push(
+    b.tokens === null || b.percent === null
+      ? `Context: counted again at the next reply · ${num(window)} tokens in the window`
+      : `Context: ${num(b.tokens)} of ${num(window)} tokens (${b.percent.toFixed(1)}%)`,
+  );
+  // What the provider counted is a different thing from what pi counts, and the
+  // gap is the part nobody can see in the pill: the tool declarations.
+  if (b.sentTokens) {
+    const gap = b.tokens === null ? 0 : b.sentTokens - b.promptTokens - b.historyTokens;
+    lines.push(
+      `What the provider counted on its last answer: ${num(b.sentTokens)}${gap > 0 ? ` — ${num(gap)} of it is the tool declarations, which pi's figure above leaves out` : ""}`,
+    );
+  }
+
+  lines.push(`It opens with ${num(b.promptTokens)} tokens${window ? ` (${((b.promptTokens / window) * 100).toFixed(1)}% of the window)` : ""}:`);
+  for (const part of b.prompt) lines.push(`  ${part.name} — ${num(part.tokens)} tokens${pct(part.tokens, b.promptTokens)}`);
+  // The files are inside the prompt — inside `project_context`, which is only the
+  // wrapper — and named under it, because that is where the weight of a chat's
+  // opening sits: a project's own file is usually the whole of the first line.
+  for (const file of b.files) {
+    const cut = file.leftOut;
+    lines.push(
+      `    ${file.path} — ${num(file.tokens)} tokens${
+        cut ? `, of ${num(cut.wholeTokens)}: read to the cap of ${num(cut.cap)} on one context file, and the chat was told what is missing` : ""
+      }`,
+    );
+  }
+
+  const toolNames = b.tools.map((one) => `${one.name} ${num(one.tokens)}`);
+  const shown = toolNames.slice(0, 8);
+  const rest = b.tools.length - shown.length;
+  lines.push(
+    `Tools declared to the model: ${num(b.toolTokens)} tokens${window ? ` (${((b.toolTokens / window) * 100).toFixed(1)}%)` : ""} — ${num(b.tools.length)} of them` +
+      (shown.length ? ` (${shown.join(", ")}${rest > 0 ? `, and ${rest} more` : ""})` : ""),
+  );
+
+  lines.push(`The conversation: ${num(b.historyTokens)} tokens${window ? ` (${((b.historyTokens / window) * 100).toFixed(1)}%)` : ""}`);
+  for (const one of b.history) lines.push(`  ${one.name} — ${num(one.tokens)} tokens`);
+
+  lines.push(
+    b.cap > 0
+      ? `Each context file is held to ${num(b.cap)} tokens of a chat's prompt — yours to change in Settings → General. What is past it stays in the file, and a chat reads it when it needs it.`
+      : "Context files are read whole: the cap is off.",
+  );
+  return lines.join("\n");
 }

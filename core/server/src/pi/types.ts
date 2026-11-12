@@ -1,5 +1,6 @@
 import type { EventEmitter } from "node:events";
 import type { ImageContent } from "../prompt-images.js";
+import type { LeftOut } from "./context-budget.js";
 
 export interface PiState {
   model: {
@@ -32,6 +33,58 @@ export interface PiStats {
   contextUsage: { tokens: number | null; contextWindow: number; percent: number | null };
   toolCalls: number;
   totalMessages: number;
+}
+
+/**
+ * One named part of what a chat is made of, in tokens.
+ *
+ * Estimated the way pi estimates (four characters to a token), which is what the
+ * context percentage is worked out from — the same rule as `context-budget.ts`,
+ * so the two numbers agree rather than each guessing their own.
+ */
+export interface ContextPart {
+  name: string;
+  tokens: number;
+  /** Where the part is a file loaded as context: its path, as the chat reads it. */
+  path?: string;
+  /** What was left out of this file, and the cap that left it out. */
+  leftOut?: { wholeTokens: number; cap: number };
+}
+
+/**
+ * Where a chat's context goes: its opening prompt part by part, the files inside
+ * it, the tools declared to the model, and the conversation.
+ *
+ * Asked for by `/context` and by the context card. A chat that reads as full
+ * before anything was asked of it has its whole answer here — which part of the
+ * prompt is the one holding the window.
+ */
+export interface ContextBreakdown {
+  contextWindow: number;
+  /** As pi counts the chat, and its share of the window; null just after a compaction. */
+  tokens: number | null;
+  percent: number | null;
+  /**
+   * What the provider counted on the last answer, where the chat has had one.
+   *
+   * More than `tokens` by about what the tool declarations weigh: pi's figure
+   * counts the prompt and the conversation, and the declarations go with them in
+   * the request but are not part of it.
+   */
+  sentTokens?: number;
+  /** The prompt's sections, largest first. */
+  prompt: ContextPart[];
+  promptTokens: number;
+  /** Each file loaded as project context, largest first, with what was left out of it. */
+  files: ContextPart[];
+  /** The tools declared to the model, largest first. */
+  tools: ContextPart[];
+  toolTokens: number;
+  /** The conversation, by kind of message. */
+  history: ContextPart[];
+  historyTokens: number;
+  /** What each context file is held to; 0 where whole files are read. */
+  cap: number;
 }
 
 /** A tool a session could use, and where it came from. */
@@ -176,6 +229,18 @@ export interface PiClient extends EventEmitter {
 
   getState(): Promise<PiState>;
   getStats(): Promise<PiStats>;
+  /**
+   * Where this chat's context goes, part by part. Optional: only the in-process
+   * client can see inside pi's prompt; a chat whose pi runs in a container is
+   * asked through RPC, which reports the whole figure and nothing inside it.
+   */
+  getContextBreakdown?(): Promise<ContextBreakdown | undefined>;
+  /**
+   * The context files this chat's prompt was built from that were read to the cap
+   * (see `context-budget.ts`), so the chat can say what it did not get. Optional,
+   * like the above.
+   */
+  contextCaps?(): LeftOut[];
   getThinkingLevels(): Promise<string[]>;
   getModels(): Promise<PiState["model"][]>;
   getCommands(): Promise<PiCommand[]>;

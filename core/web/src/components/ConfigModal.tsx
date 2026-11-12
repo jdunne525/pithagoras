@@ -39,7 +39,7 @@ import { McpPanel } from "./McpPanel";
 import { LogsPanel } from "./LogsPanel";
 import { PasswordPanel } from "./PasswordPanel";
 import { SsoPanel } from "./SsoPanel";
-import { parseWindow } from "../context-window";
+import { parseCap, parseWindow } from "../context-window";
 import { KeepFree, KeepRecent, useKeepFreeSave, useKeepRecentSave } from "./KeepRecent";
 import { formatTokens } from "../transcript";
 import { useAsksBeforeDeleting } from "../confirm-prefs";
@@ -1094,6 +1094,11 @@ function GeneralPanel({ onError, onProviders, onExtensions, onSource }: { onErro
   const [ctxText, setCtxText] = useState(r?.contextDefault ? String(r.contextDefault) : "");
   const [ctxSaved, setCtxSaved] = useState<number | null>(r?.contextDefault ?? null);
   const [ctxNote, setCtxNote] = useState<(() => string) | null>(null);
+  /** The hold on one context file: what was set, and the typed text while it is being typed. */
+  const [capSaved, setCapSaved] = useState<number | null>(r?.contextCapStored ?? null);
+  const [capText, setCapText] = useState(r?.contextCapStored === null ? "" : String(r?.contextCapStored));
+  const [capNote, setCapNote] = useState<(() => string) | null>(null);
+  const capField = useRef<HTMLInputElement>(null);
   /** The window's field, which what is saved elsewhere does not overwrite while it is being typed in. */
   const ctxField = useRef<HTMLInputElement>(null);
   // One chat at a time. Read fresh from what was loaded; the server keeps its
@@ -1135,6 +1140,10 @@ function GeneralPanel({ onError, onProviders, onExtensions, onSource }: { onErro
     setCtxSaved(r.contextDefault);
     if (document.activeElement !== ctxField.current) {
       setCtxText(r.contextDefault ? String(r.contextDefault) : "");
+    }
+    setCapSaved(r.contextCapStored);
+    if (document.activeElement !== capField.current) {
+      setCapText(r.contextCapStored === null ? "" : String(r.contextCapStored));
     }
   }, [r]);
 
@@ -1209,6 +1218,39 @@ function GeneralPanel({ onError, onProviders, onExtensions, onSource }: { onErro
     } catch (e) {
       onError((e as Error).message);
       setCtxText(ctxSaved ? String(ctxSaved) : "");
+    }
+  };
+
+  /**
+   * The hold on one context file, on leaving the field, on its own.
+   *
+   * Empty hands the number back to the portal's default; 0 reads whole files.
+   * What comes back says how many open chats took it: a chat that is working is
+   * marked due rather than reloaded in the middle of a request, so the panel
+   * says where it landed rather than promising it has already arrived.
+   */
+  const saveContextCap = async () => {
+    const parsed = parseCap(capText);
+    if (parsed.kind === "bad") {
+      onError(t("{problem} — or leave it empty for the portal's own number", { problem: parsed.message }));
+      return setCapText(capSaved === null ? "" : String(capSaved));
+    }
+    const n = parsed.kind === "ok" ? parsed.tokens : null;
+    if (n === capSaved) return setCapText(capSaved === null ? "" : String(capSaved));
+    try {
+      const res = await api.setContextCap(n);
+      setCapSaved(res.contextCapStored);
+      setCapText(res.contextCapStored === null ? "" : String(res.contextCapStored));
+      setCapNote(() => () =>
+        (res.applied ?? 0) > 0
+          ? tp(res.applied ?? 0, "Saved, and {n} open chat takes it", "Saved, and {n} open chats take it")
+          : t("Saved"),
+      );
+      void load();
+      setTimeout(() => setCapNote(null), 3000);
+    } catch (e) {
+      onError((e as Error).message);
+      setCapText(capSaved === null ? "" : String(capSaved));
     }
   };
 
@@ -1336,6 +1378,24 @@ function GeneralPanel({ onError, onProviders, onExtensions, onSource }: { onErro
               </p>
             )}
             {ctxNote && <p className="mt-1 text-xs text-ok">{ctxNote()}</p>}
+          </div>
+          <div className="border-t border-line/70 pt-3">
+            <p className="text-xs text-fg-muted">{t("Each context file")}</p>
+            <input
+              ref={capField}
+              value={capText}
+              inputMode="numeric"
+              onChange={(e) => setCapText(e.target.value)}
+              onBlur={saveContextCap}
+              onKeyDown={(e) => isEnter(e) && e.currentTarget.blur()}
+              placeholder={t("the portal's own {n}", { n: formatTokens(r?.contextCapDefault ?? 12_000) })}
+              aria-label={t("Tokens of a chat's prompt per context file")}
+              className={`${inputCls} mt-1 font-mono`}
+            />
+            <p className="mt-1.5 text-xs text-fg-faint">
+              {t("How much of what a chat starts with one of its AGENTS.md files may take. What is past it stays in the file, and the chat is told what it did not get and how to read the rest: a project's notes that grow past this sit in every turn of every chat in that folder otherwise, and a chat can open a third of the way full before anything is asked of it. 0 reads whole files. Saved when you leave the field; open chats are reloaded to take it up, and one that is working takes it at its next step.")}
+            </p>
+            {capNote && <p className="mt-1 text-xs text-ok">{capNote()}</p>}
           </div>
           <div className="border-t border-line/70 pt-3">
             <p className="text-xs text-fg-muted">{t("Kept when compacting")}</p>

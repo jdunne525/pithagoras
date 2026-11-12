@@ -24,6 +24,7 @@ import { ASK_QUESTION_TOOL, asksQuestions, describeAnswers, readAnswers, type An
 import { CODEMODE_TOOL } from "./pi/codemode.js";
 import { CHAT_QUESTION, CHAT_QUESTION_END, holdAnswers, openChatQuestion, openChatQuestions, takeHeldAnswers, type ChatQuestion, type QuestionOutcome } from "./questions.js";
 import { flaggedResult, forgetTaint, sessionTainted, taintSession } from "./pi/guard.js";
+import { cappedNotice } from "./pi/context-budget.js";
 import { neutralise } from "./channels/framing.js";
 import { textOf } from "./pi/entries.js";
 import { removeSessionFiles } from "./session-files.js";
@@ -2727,6 +2728,33 @@ class SessionManager extends EventEmitter {
    */
   private contextWallSaid = new Map<string, number>();
 
+  /** What each chat was last told it left out of its opening prompt, keyed by the chat. */
+  private contextCapsSaid = new Map<string, string>();
+
+  /**
+   * The line saying a context file was read to its cap rather than whole into the chat.
+   *
+   * Nothing else says it: the chat simply starts shorter, which reads as nothing
+   * having happened, while a project's knowledge base sits outside its prompt. The
+   * notice is the person's half of it; the chat's own half is the note left inside the
+   * file, naming the sections it did not get (see `context-budget.ts`).
+   *
+   * Once per chat, and again only where what was left out is different: a restart
+   * that cut the same file says nothing new, and a chat whose file grew past the cap
+   * — or whose cap was lowered — says the new state.
+   */
+  private sayContextCaps(sessionId: string, client: PiClient): void {
+    const left = client.contextCaps?.() ?? [];
+    if (!left.length) {
+      this.contextCapsSaid.delete(sessionId);
+      return;
+    }
+    const said = cappedNotice(left);
+    if (this.contextCapsSaid.get(sessionId) === said) return;
+    this.contextCapsSaid.set(sessionId, said);
+    this.record(sessionId, "portal_notice", { text: said, warning: true });
+  }
+
   /**
    * The stopReason the last assistant message pi wrote into a session ended on.
    * `"length"` is the model running out of output tokens in mid-answer: pi ends
@@ -3084,6 +3112,11 @@ class SessionManager extends EventEmitter {
       updateSession(sessionId, { pi_session_file: file });
     };
     rememberSessionFile();
+
+    // What this chat's opening prompt left out of a context file, and the room that
+    // came from it: said here, in the chat, because this is the moment the file was
+    // read to its cap (see context-budget.ts).
+    this.sayContextCaps(sessionId, client);
 
     // A chat reopened after it was told to keep its compaction off — by its person, or
     // by the portal's stop — keeps that. pi's switch is one switch in its own file, and

@@ -643,6 +643,29 @@ Neither is available with `EXECUTOR=container`. pi runs inside the container
 there and the portal cannot change its model, so the field and the default are
 turned off rather than accepting a number that would do nothing.
 
+### What a chat starts with
+
+Before anything is asked of it, a chat carries its opening prompt: the portal's
+rules and tool list, its skills, and every `AGENTS.md` or `CLAUDE.md` from the
+chat's folder up to the root. A project's knowledge base grows as the agent
+writes what it learned into that file, and pi hands the whole of each to the
+model on every turn — a 254,261-character one filled a third of a 204,800-token
+window, on every turn, and no compaction can give it back, because the prompt is
+not part of what a compaction summarises.
+
+So each context file is **held to a cap**, and the chat is told what it did not
+get: the size of the whole, the line the reading stopped at, and the headings
+past it. The file is untouched on disk; a chat that needs a section reads it
+with `read`, which is what the note is for. What is left out is said in the chat
+as well, beside the room it saved.
+
+The number is **Each context file** under Settings → Defaults — the portal holds
+one file to 12,000 tokens unless you set another, and `0` reads whole files. It
+belongs to every chat; the open ones are reloaded to take it up, and one that is
+working takes it at its next step. `/context`, or **Where it goes** on the
+chat's context card, says what each part of a chat's opening prompt weighs, so a
+chat that opens fuller than you expected says which file did it.
+
 ### When a chat compacts
 
 A chat is compacted once it passes **its window minus what it keeps free**, and

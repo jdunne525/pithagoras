@@ -143,6 +143,7 @@ import {
   writeCompactionSettings,
 } from "./pi-settings.js";
 import { getBuiltinCommands, picturesRefused } from "./pi/builtins.js";
+import { CONTEXT_CAP_DEFAULT, contextCapProblem, getContextCap, setContextCap, storedContextCap } from "./pi/context-budget.js";
 import { SessionEditError } from "./pi/session-edit.js";
 import {
   NEW_CHAT_TITLE,
@@ -345,6 +346,11 @@ app.get("/api/settings", (_req, res) => {
     compaction: readCompactionSettings(),
     compactionDefaults: COMPACTION_DEFAULTS,
     contextDefault: getDefaultContextLimit() ?? null,
+    // The portal's own hold on a context file (see context-budget.ts): what is in
+    // force, what was set, and what a chat is held to when nothing was.
+    contextCap: getContextCap(),
+    contextCapStored: storedContextCap(),
+    contextCapDefault: CONTEXT_CAP_DEFAULT,
     executor: EXECUTOR_KIND,
     workspaceRoot: WORKSPACE_ROOT,
   });
@@ -1858,6 +1864,55 @@ app.put("/api/context-default", (req, res) => {
   setDefaultContextLimit(tokens);
   sessions.applyContextLimits();
   res.json({ ok: true, contextDefault: tokens });
+});
+
+/**
+ * How much of a chat's opening prompt one of its context files is held to
+ * (see context-budget.ts). 0 reads whole files; empty hands the number back to
+ * the portal's default.
+ *
+ * A chat takes it when its pi builds its prompt, so the open chats are reloaded
+ * to take it up now: the idle ones at once, and one that is working when the
+ * number changes takes it at its next step rather than in the middle of a
+ * request.
+ */
+app.put("/api/context-cap", async (req, res) => {
+  if (!req.body || !("tokens" in req.body)) return res.status(400).json({ error: "tokens required" });
+  const tokens = req.body.tokens;
+  if (tokens === null || tokens === "") {
+    setContextCap(null);
+  } else if (tokens === 0) {
+    setContextCap(0);
+  } else {
+    const problem = contextCapProblem(tokens);
+    if (problem) return res.status(400).json({ error: problem });
+    setContextCap(tokens as number);
+  }
+  const pushed = await sessions.reloadIdle().catch((e: Error) => {
+    console.error(`[portal] could not push the context cap to the open chats: ${e.message}`);
+    return undefined;
+  });
+  res.json({ ok: true, contextCap: getContextCap(), contextCapStored: storedContextCap(), contextCapDefault: CONTEXT_CAP_DEFAULT, ...(pushed ? { applied: pushed.reloaded, waiting: pushed.waiting } : {}) });
+});
+
+/**
+ * Where this chat's context goes, part by part: what `/context` says.
+ *
+ * Only where its pi can be asked inside itself — a chat on the container
+ * executor answers `unsupported`, and its `/context` says the same. Asked when
+ * the context card is opened and when `/context` is typed, so nothing about it
+ * is worked on every glance at a session.
+ */
+app.get("/api/sessions/:id/context", async (req, res) => {
+  const session = getSession(req.params.id);
+  if (!session) return res.status(404).json({ error: "Not found" });
+  if (!sessions.isRunning(session.id)) return res.json({ live: false, breakdown: null });
+  try {
+    const breakdown = await (await sessions.client(session.id)).getContextBreakdown?.();
+    res.json(breakdown ? { live: true, breakdown } : { live: true, unsupported: true, breakdown: null });
+  } catch (e) {
+    res.status(500).json({ error: (e as Error).message });
+  }
 });
 
 app.post("/api/sessions/:id/compact", async (req, res) => {

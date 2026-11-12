@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseAnswer, parseWindow } from '../core/web/src/context-window.ts';
+import { parseAnswer, parseCap, parseWindow } from '../core/web/src/context-window.ts';
 
 test('a typed window is read the way it is written, grouping and all', () => {
   assert.deepEqual(parseWindow('131072'), { kind: 'ok', tokens: 131072 });
@@ -68,4 +68,24 @@ test("an answer's limit out of the range the server accepts is refused with its 
   }
   assert.deepEqual(parseAnswer('1024'), { kind: 'ok', tokens: 1024 });
   assert.deepEqual(parseAnswer('10000000'), { kind: 'ok', tokens: 10_000_000 });
+});
+
+// The cap is the portal's own hold on one context file, not a window: its bounds are
+// the server's (its context-budget.ts), and 0 is asked for outright rather than refused.
+test('the cap on one context file is read the same way, with its own bounds and its own zero', () => {
+  assert.deepEqual(parseCap('12000'), { kind: 'ok', tokens: 12_000 });
+  assert.deepEqual(parseCap(' 12,000 '), { kind: 'ok', tokens: 12_000 });
+  assert.deepEqual(parseCap('12.000'), { kind: 'ok', tokens: 12_000 }, 'as it is written where the dot groups');
+  assert.deepEqual(parseCap('0'), { kind: 'ok', tokens: 0 }, 'whole files, which is what 0 says');
+  assert.deepEqual(parseCap(''), { kind: 'empty' }, 'emptied: the portal goes back to its own number');
+  for (const bad of ['16,000.00', '16000.0', '1,000.000', '1,00', ',12000']) {
+    assert.equal(parseCap(bad).kind, 'bad', bad);
+  }
+  for (const bad of ['abc', '-5', '999', '200001', '99999999999']) {
+    const r = parseCap(bad);
+    assert.equal(r.kind, 'bad', bad);
+    assert.match((r as { message: string }).message, /1,000 to 200,000/);
+  }
+  assert.deepEqual(parseCap('1000'), { kind: 'ok', tokens: 1_000 });
+  assert.deepEqual(parseCap('200000'), { kind: 'ok', tokens: 200_000 });
 });

@@ -214,6 +214,7 @@ Completed assistant messages and tool results are saved; their streaming updates
 | `POST /api/sessions/:id/config` | `{ provider?, modelId?, thinkingLevel?, autoCompaction?, autoRetry? }` |
 | `PUT /api/context-limit` | `{ provider, model, tokens }` — the context window this model really has here; `tokens: null` goes back to the default, or the model's own |
 | `PUT /api/context-default` | `{ tokens }` — a ceiling on the window of every model; `null` removes it. Also returned by `GET /api/settings` as `contextDefault` |
+| `PUT /api/context-cap` | `{ tokens }` — how much of a chat's opening prompt one of its context files is held to; `0` reads whole files, `null` goes back to the portal's own number. Answers `{ contextCap, contextCapStored, contextCapDefault, applied, waiting }`, where `applied` is how many open chats were reloaded to take it up and `waiting` how many are working and take it at their next step. Also returned by `GET /api/settings` as `contextCap`, `contextCapStored` and `contextCapDefault` |
 | `POST /api/sessions/:id/compact` | Compact now |
 | `GET /api/sessions/:id/commands` | The slash command palette |
 
@@ -252,6 +253,7 @@ model.
 | `POST /api/sessions/:id/messages/:seq/version` | `{ to }` — shows another version of the message, and what followed it then |
 | `PUT /api/sessions/:id/draft` | `{ text, caret?: { start, end } }` — what is in the chat box, which an extension can ask for. Starts nothing |
 | `GET /api/sessions/:id/stats` | Context usage and token counts, without the model catalogue |
+| `GET /api/sessions/:id/context` | Where this chat's context goes, part by part: `{ live, breakdown }` — its opening prompt section by section, each project file inside it with what was read to the cap, the tools declared to the model, and the conversation. `live: false` where its pi is not running; `unsupported: true` where its pi runs in a container and cannot be asked inside itself |
 
 ## Git
 
