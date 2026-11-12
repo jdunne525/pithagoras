@@ -363,6 +363,73 @@ test("a run pi stops for a mid-turn compaction is carried on at its end", async 
   }
 });
 
+// A Stop taken while a compaction is in flight is the person's own end of the
+// work: abort() calls the resume off, and the room the resume held is let go
+// with it. pi, though, writes the record of that compaction AFTER the Stop —
+// at 12:36:12.904 the Stop came, and the record came at 12:36:12.907, in
+// BlastRunHero — and reads of it that ask "did this compaction take a turn that
+// had started, with no run of its own coming?" answer yes, because the marker of
+// the interrupted turn is still held. Called back, the resume starts a run in a
+// chat the person stopped, that run answers "This operation was aborted" with
+// nothing in it, and the Task's attempt is settled as failed over work still in
+// hand. An aborted compaction says nothing about the work — the reading
+// `noteCompactionFailure` already keeps — and a room released by a Stop is of
+// the queue's to take.
+
+test("a compaction the person stopped calls for no resume of ours", async () => {
+  try {
+    setSingleActiveSession(true);
+    const a = chat();
+    const b = chat();
+
+    await sessions.prompt(a, "work on A");
+    await flush();
+    const aPi = pis.get(a);
+    await assert.rejects(sessions.prompt(b, "work on B"), PromptQueuedForSingleActive);
+    await flush();
+    assert.equal(sessions.singleActiveQueue.length, 1, "B waits its turn");
+
+    // The compaction catches the run, pi stops the run for it, and the person
+    // stops the chat while the compaction is still unwinding it.
+    aPi.emit("event", { type: "compaction_start", reason: "threshold" });
+    assert.equal(sessions.compactionInterruptedRun.has(a), true, "the compaction caught the run");
+    // pi stops the run for it: the run's own end comes, and the turn is left in
+    // nobody's hands.
+    aPi.settle();
+    await flush();
+    assert.equal(sessions.isActive(a), true, "the gap between the run and its resume keeps the room");
+
+    // The person's Stop, taken while that is still unwinding.
+    aPi.running = false;
+    await sessions.abort(a);
+    assert.equal(sessions.compactionResumePending.has(a), false, "the Stop called the resume off");
+
+    // pi's own record of that compaction, written after the Stop, naming it as
+    // one that was stopped.
+    aPi.emit("event", { type: "compaction_end", reason: "threshold", willRetry: false, aborted: true });
+    assert.equal(sessions.compactionInterruptedRun.has(a), false, "the compaction itself is over");
+    assert.equal(
+      sessions.compactionResumePending.has(a),
+      false,
+      "its record of a compaction that was stopped calls no resume back",
+    );
+    assert.equal(sessions.isActive(a), false, "and no room is held for a run nobody is coming");
+
+    await flush();
+    assert.deepEqual(aPi.prompts, ["work on A"], "no resume line reaches a chat the person stopped");
+
+    // The room the Stop let go is the queue's to take. The hand-over usually
+    // comes from a run's own end (agent_settled); here the run was stopped and
+    // its resume called off, so nothing else asks for it — and B, waiting its
+    // turn behind a chat the person had stopped, is what a queue of six
+    // BlastRunHero chats turned into silence at 12:36 on 11 November.
+    assert.deepEqual(started, [a, b], "B takes the room once A is stopped for good");
+    assert.equal(sessions.singleActiveQueue.length, 0, "the queue drained");
+  } finally {
+    await reset();
+  }
+});
+
 // The same turn, from the other direction: the compaction is not pi's and not the
 // person's, it is the portal's — the ladder's attempt at a summary the chat's own
 // call could not write. pi stops the run for it exactly as it does for a manual

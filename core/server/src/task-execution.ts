@@ -321,7 +321,23 @@ function trackEnd(run: TaskRun): void {
       // beside a carry that has not gone is the failure the queue loop would
       // otherwise answer by starting the Task again in a fresh session.
       void sessions.prompt(run.sessionId, COMPACT_PICK_UP, { resume: "compaction" }).then(
-        () => {
+        (sent: boolean) => {
+          if (!sent) {
+            // A Stop got there first, and the line never went: prompt() says so
+            // by answering false, not by throwing, and it wrote the line in the
+            // chat as not sent. Read as a carry that reached the chat, that is
+            // a carry counted that never was — the reason the work is still in
+            // hand is cleared, the next look at the run's end settles the
+            // attempt as failed, and nothing carries the work on. That is
+            // exactly the shape of a night in BlastRunHero: at 12:35:59 the run
+            // settled, the carry was asked at 12:35:59.576, a Stop taken during
+            // the compaction behind it answered it as not sent at 12:36:12.904,
+            // and the Task's attempt was written failed over work still in hand.
+            // The carry will not come, so this is the same end as the refusal
+            // below.
+            settle();
+            return;
+          }
           // The line reached the chat and started its run there: that is one of
           // this run's carries, and the turn is no longer waiting for one.
           carries += 1;

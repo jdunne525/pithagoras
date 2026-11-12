@@ -2379,15 +2379,29 @@ class SessionManager extends EventEmitter {
         this.clearResumePending(sessionId);
         return;
       }
-      void this.prompt(sessionId, resumeText, { resume }).catch((e) => {
-        // Held behind another room-holder under the single-active setting: the
-        // queue starts it once the room frees, so this is not a failure.
-        if (e instanceof PromptQueuedForSingleActive) return;
-        console.error(`[portal] could not carry an unfinished turn on: ${e.message}`);
-        // The resume will not come: the turn is over as far as we know, so the
-        // room stops being held and the attempt settles like any ended run.
-        this.clearResumePending(sessionId);
-      });
+      void this.prompt(sessionId, resumeText, { resume }).then(
+        (sent: boolean) => {
+          if (sent) return;
+          // A Stop got there first and the line never went: prompt() says so by
+          // answering false, not by throwing, and writes the line in the chat as
+          // not sent. Left pending, the marker keeps the room held for a resume
+          // that will not come, and the next compaction's record arms it again —
+          // which is how a chat the person had stopped went on answering the
+          // same "resume where you left off" and never carried on. 11 November,
+          // at 12:35:59.576 beside a compaction stopped at 12:36:12.904, is that
+          // order. The resume will not come: the same end as the failure below.
+          this.clearResumePending(sessionId);
+        },
+        (e) => {
+          // Held behind another room-holder under the single-active setting: the
+          // queue starts it once the room frees, so this is not a failure.
+          if (e instanceof PromptQueuedForSingleActive) return;
+          console.error(`[portal] could not carry an unfinished turn on: ${e.message}`);
+          // The resume will not come: the turn is over as far as we know, so the
+          // room stops being held and the attempt settles like any ended run.
+          this.clearResumePending(sessionId);
+        },
+      );
     });
   }
 
@@ -3365,10 +3379,35 @@ class SessionManager extends EventEmitter {
         // mid-compaction, or the queue would hand the room to another session
         // (or settle this one's attempt) in the gap before the resume starts.
         const interrupted = this.compactionInterruptedRun.delete(sessionId);
-        if (interrupted && msg.willRetry !== true) {
+        // A compaction the person stopped is not a turn left unfinished: the
+        // Stop already called the resume off (see abort(), "the Stop is the end
+        // of the work, so the resume is called off"), and pi writes this record
+        // of it AFTER that — at 12:36:12.904 on 11 November in BlastRunHero the
+        // Stop came first and this record came at 12:36:12.907. Read as a turn
+        // in hand, the record calls the resume back: a run is started in a chat
+        // the person stopped, answers "This operation was aborted" with nothing
+        // in it, and the Task's attempt is settled as failed over work still in
+        // hand. The same reading `noteCompactionFailure` already keeps: an
+        // aborted compaction says nothing about the chat's work.
+        const armed = interrupted && msg.willRetry !== true && msg.aborted !== true;
+        if (armed) {
           this.compactionResumePending.add(sessionId);
         }
         this.noteCompactionFailure(sessionId, msg);
+        // This record ends the marker of a turn pi stopped for a compaction, and
+        // where it arms no resume of ours there is no run's end after it to hand
+        // the room over: the marker was the last thing keeping the session's room
+        // held, so it goes free here. Left alone, the queue waits on a session
+        // nobody is coming back to — which is the rest of 12:36 on 11 November in
+        // BlastRunHero: six chats left a queue that never started again, the one
+        // that did answer nothing at zero tokens and settle the Task's attempt as
+        // failed over work still in hand. Same hand-over agent_settled does when
+        // a run ends; the guards are its own — a run still going, a resume of
+        // ours still to come, or the portal's own compaction still unwinding keep
+        // the room read as held, and `processQueue` finds it held.
+        if (interrupted && !armed && !this.inRun.has(sessionId) && !this.compactionResumePending.has(sessionId)) {
+          if (singleActiveSessionEnabled()) void this.processQueue();
+        }
       }
       // A turn starting is the work carrying on: pi's own next turn after a
       // mid-turn compaction, or a queued follow-up drained into the run going.
@@ -3610,15 +3649,34 @@ class SessionManager extends EventEmitter {
     const due = this.live.get(sessionId)?.client;
     if (!insideEdit && due?.reloadDue && getSession(sessionId)?.status !== "running") await this.reloadSettled(sessionId, due);
     this.prompting.set(sessionId, (this.prompting.get(sessionId) ?? 0) + 1);
+    // Kept so the block below can tell a line that never went (a Stop got
+    // there first, answered as false — see prompt()'s contract) from one that
+    // went and failed on its way through: only the first leaves nothing to
+    // lift the claim later.
+    let sent: boolean | undefined;
     try {
-      return await this.promptNow(sessionId, message, options, insideEdit, stopsBefore);
+      sent = await this.promptNow(sessionId, message, options, insideEdit, stopsBefore);
+      return sent;
     } finally {
       const left = (this.prompting.get(sessionId) ?? 1) - 1;
       if (left) this.prompting.set(sessionId, left);
       else this.prompting.delete(sessionId);
       // If the run did not get as far as starting pi, there is nothing left to
       // lift the claim later, so lift it now: a failed start must not leave the
-      // room locked for good.
+      // room locked for good. The same is true of a message a Stop got in front
+      // of: prompt() says so by answering false, and the line never went, so
+      // the claim made for it is let go the same way — leaving it held a room
+      // for a line that will not come is what left a queue waiting on a chat
+      // the person had stopped (11 November, at 12:36:12.904 beside a
+      // compaction stopped there, in BlastRunHero).
+      if (sent === false && !insideEdit && singleActiveSessionEnabled() && !this.inRun.has(sessionId)) {
+        this.singleActiveClaiming.delete(sessionId);
+        // Nothing else is coming for this session's turn, and the mark of a
+        // resume that will come is dropped where the resume is refused — see
+        // scheduleResumeAfterCompaction — so the room may pass to the next
+        // request waiting its turn.
+        void this.processQueue();
+      }
       if (!insideEdit && singleActiveSessionEnabled() && !this.live.has(sessionId) && !this.inRun.has(sessionId)) {
         this.singleActiveClaiming.delete(sessionId);
       }
@@ -5076,6 +5134,12 @@ class SessionManager extends EventEmitter {
       // had finished starting — the same bounded wait, so the answer arrives
       // when the thing it describes is actually over.
       await this.settleCompaction(sessionId);
+      // The Stop let the room go, so the queue takes its next turn here: nothing
+      // else will. The path below gets the hand-over from the run's own end
+      // (agent_settled), and there is no run to end here — leaving the room
+      // released with nothing asked of it is what left a queue waiting on a chat
+      // the person had stopped.
+      if (singleActiveSessionEnabled()) void this.processQueue();
       return;
     }
     // What is sent from here on waits for the Stop to be over, and then starts
