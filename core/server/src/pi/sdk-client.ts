@@ -23,6 +23,7 @@ import { CODEMODE_TOOL, CODEMODE_TOOLS, codemodeExtension } from "./codemode.js"
 import { findSessionFile } from "./session-file.js";
 import { CONTEXT_FILES, SHARED_FILES } from "./context-files.js";
 import { capContextFiles, getContextCap, tokensOf, type LeftOut } from "./context-budget.js";
+import { holdInstructionSkills } from "./held-skills.js";
 import type { ContextBreakdown, ContextPart } from "./types.js";
 import { heartbeatTool } from "./heartbeat-tool.js";
 import { ToolsGateway } from "./tools-gateway.js";
@@ -691,6 +692,11 @@ export class SdkPiClient extends EventEmitter implements PiClient {
         // deploy without saying so.
         // Its own only once it has one: pi reports a skill path that is not there as an error.
         additionalSkillPaths: [...(builtinSkills ? [builtinSkills] : []), ...(skillsOf && existsSync(agentSkillsDir(skillsOf)) ? [agentSkillsDir(skillsOf)] : [])],
+        // A skill whose job is rewriting the folder's AGENTS.md is offered only when the
+        // person asks for it: every chat in that folder reads what such a rewrite adds
+        // (see held-skills.ts). pi keeps the skill itself — as `/skill:<name>` and by
+        // reading the file — and holds nothing else.
+        skillsOverride: holdInstructionSkills,
         // The portal's own extensions, inline rather than an installed package:
         // the portal owns routines, so a package would have to call back over
         // HTTP to reach the database it sits beside. The list is built above,

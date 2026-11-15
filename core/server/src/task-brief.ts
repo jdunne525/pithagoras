@@ -115,6 +115,24 @@ export function briefReminder(where: string): string {
 }
 
 /**
+ * The one line saying the folder's own instructions are not this Task's to extend.
+ *
+ * Its own line rather than a clause on the reminder above, because that one is held
+ * short on purpose — it is said at every turn of a Task. This is said at system level
+ * for the same reason the reminder is: the habit it holds against is falling into a
+ * docs commit that appends to `AGENTS.md` at the *end* of a long run, by which point
+ * the prompt that opened the run may be a compaction's summary. What each byte of such
+ * an append costs every later chat is in `task-prompt.ts`.
+ */
+export function instructionRule(): string {
+  return (
+    `The folder's own instructions — AGENTS.md, CLAUDE.md, whatever pi reads as instructions — are read ` +
+    `again at the start of every turn of every chat that works here, so this Task does not extend them: ` +
+    `commit the work, and keep a record only where the project's own instructions ask for one.`
+  );
+}
+
+/**
  * What a chat is told about its brief as its prompt is loaded, and nothing for a
  * chat with none.
  *
@@ -129,5 +147,5 @@ export function briefReminder(where: string): string {
  */
 export function briefLines(sessionId: string, executor: string): string[] {
   if (!briefExists(sessionId)) return [];
-  return [briefReminder(briefSeenBy(sessionId, executor))];
+  return [briefReminder(briefSeenBy(sessionId, executor)), instructionRule()];
 }

@@ -88,6 +88,15 @@ The agent works in the folder and may write `AGENTS.md` too. A save made from a
 copy that has changed since is not applied: the dialog says "This file changed
 after you opened it" and offers **Load the new version** or **Save mine anyway**.
 
+An autonomous Task is told not to extend it. pi reads this file into every turn
+of every chat that works in the folder, so a note one Task appends — the
+"docs commit" that records what it just decided — is paid again by every chat
+that comes after it, and the file grows until it eats the window. A Task is
+still told to write where *your* instructions point, to a plan or record file
+the folder already keeps, and its own decisions go in the answer it finishes
+on. Ask it in a chat to change `AGENTS.md` and it will; nothing stops you
+editing it either way.
+
 Chats started after a change pick it up. A chat that is already open does after
 `/reload`.
 

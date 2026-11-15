@@ -73,7 +73,35 @@ const roleLine = (): string => "You are Pithagoras, an AI assistant helping exec
 
 const workingAlone = (): string =>
   `You work on your own: no question is put to the person while you run, and none is answered. ` +
-  `Read the task as it is written, decide everything it leaves open yourself, and write down what you decided and why.`;
+  `Read the task as it is written, decide everything it leaves open yourself, and say what you decided ` +
+  `and why in the answer you finish on.`;
+
+/**
+ * Said with the standing instructions of every Task, in the prompt that carries them
+ * all — and in the brief. Where the prompt points at a brief instead, the file holds
+ * this and the short line of `instructionRule` (task-brief.ts) is said at system level
+ * beside a compaction's summary, so it is not said twice in the conversation.
+ *
+ * What pi loads as the folder's instructions is read again at the start of every
+ * turn of every chat that works in that folder, so anything one Task appends is
+ * paid by every chat after it. This repo has seen it twice over: one project's
+ * `AGENTS.md` reached 254,261 characters, was cleared to 21,163 on 12 November,
+ * and was back to 49,901 two days later, each byte of the second growth written
+ * by a Task that ended on a "docs commit" appending what it had just learned.
+ *
+ * The demand to record decisions used to be here as "write down what you decided
+ * and why", with no place named — and the standing file in the folder is the
+ * nearest one, which is how the habit started. What a Task decided now goes in
+ * its final answer, and only the record the project itself asks for is written.
+ */
+const instructionsStay = (): string =>
+  `## The Folder's Instructions Stay As They Are\n\n` +
+  `\`AGENTS.md\`, \`CLAUDE.md\` and every other file pi loads as instructions are read again at the ` +
+  `start of every turn of every chat in this folder, so what this Task writes there is paid by every ` +
+  `chat that comes after it. Finishing a Task is not a reason to edit them, and not a reason for a ` +
+  `docs commit: commit the work the task asked for. Where the project's own instructions ask for a ` +
+  `record — a plan or design file it names — write to that file. Change an instructions file only when ` +
+  `the task is about that file.`;
 
 const specificTask = (task: Pick<TaskRow, "id" | "title" | "description">): string =>
   `Task: ${task.title}\n\nDescription:\n${task.description ?? ""}`;
@@ -131,8 +159,9 @@ const completionShort = (maxAttempts: number): string =>
     and read it again after a compaction, when the prompt that named it may be gone. */
 const briefPointer = (briefPath: string): string =>
   `## The Standing Instructions Are in a File\n\n` +
-  `\`${briefPath}\` holds this run's standing instructions: working alone, the project's workflow, ` +
-  `review & commit, and the full completion requirement. Read that file before you start.\n\n` +
+  `\`${briefPath}\` holds this run's standing instructions: working alone, what the folder's own ` +
+  `instructions are for, the project's workflow, review & commit, and the full completion requirement. ` +
+  `Read that file before you start.\n\n` +
   `A compaction summarizes this conversation — the prompt you are reading and your earlier answers ` +
   `can be gone from it later. The file cannot, and it does not change. Whenever you find you no longer ` +
   `hold those instructions, read the file again and carry on from where you left off; do not ask for ` +
@@ -179,6 +208,7 @@ export function buildTaskBrief(
     text += `\n\n## This Is Attempt ${attemptNumber}\n\n${attemptNote(attemptNumber)}`;
   }
 
+  text += `\n\n${instructionsStay()}`;
   text += `\n\n## Review & Commit\n\n${reviewAndCommit()}`;
   text += `\n\n## Completion Requirement\n\n${completionRequirement(maxAttempts)}`;
 
@@ -231,6 +261,7 @@ export function buildTaskPrompt(
     prompt += `\n\n## Additional Instructions\n\n${additionalInstructions.trim()}`;
   }
 
+  prompt += `\n\n${instructionsStay()}`;
   prompt += `\n\n## Review & Commit\n\n${reviewAndCommit()}`;
   prompt += `\n\n## Completion Requirement\n\n${completionRequirement(maxAttempts)}`;
 

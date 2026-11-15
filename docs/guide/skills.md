@@ -35,6 +35,16 @@ contains: "Use when cutting a release: version bump, changelog, tag and push".
 A skill marked **/skill only** is never picked by the model on its own. It runs
 when you type it, as `/skill:name`, see [Slash commands](/guide/commands).
 
+One kind is marked that way for you: a skill whose own description says it
+writes what a folder loads as its instructions — an `AGENTS.md` or `CLAUDE.md`
+generator, a "project knowledge base" refresh. pi reads those files into every
+turn of every chat that works in the folder, so what such a skill adds is paid
+again by every chat afterwards, and a model offered it will take it up on its
+own. Nothing is taken away: the skill still runs as `/skill:name`, and asking
+for it by name is how it is used. Switching it off is the usual move —
+**Disable** for a skill you own, removing the package for one that arrived with
+a package.
+
 ## Create one
 
 **+ New** asks for a name and a "When to use it" sentence and writes a first

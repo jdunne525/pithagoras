@@ -9,7 +9,7 @@ import { scratch } from "./server-harness.mjs";
 
 const root = scratch("pithagoras-brief-");
 process.env.TASK_BRIEF_DIR = root;
-const { briefDirOf, briefExists, briefFileOf, briefLines, briefReminder, briefRoot, briefSeenBy, removeBrief, writeBrief } = await import("../dist/task-brief.js");
+const { briefDirOf, briefExists, briefFileOf, briefLines, briefReminder, briefRoot, briefSeenBy, instructionRule, removeBrief, writeBrief } = await import("../dist/task-brief.js");
 const { buildTaskBrief, buildTaskPrompt } = await import("../dist/task-prompt.js");
 
 const task = {
@@ -166,8 +166,10 @@ test("a chat is told of its brief only while the file is there, and by where it 
   assert.deepEqual(briefLines("no-brief", "host"), []);
 
   writeBrief(briefFileOf("briefed"), "text");
-  assert.deepEqual(briefLines("briefed", "host"), [briefReminder(path.resolve(briefFileOf("briefed")))]);
-  assert.deepEqual(briefLines("briefed", "container"), [briefReminder("/briefs/task-brief.md")]);
+  // Two lines of prompt state: the pointer, and what the folder's own
+  // instructions are not this Task's to extend (see instructionRule).
+  assert.deepEqual(briefLines("briefed", "host"), [briefReminder(path.resolve(briefFileOf("briefed"))), instructionRule()]);
+  assert.deepEqual(briefLines("briefed", "container"), [briefReminder("/briefs/task-brief.md"), instructionRule()]);
 
   // The attempt is over, the file went with it, and so does the line.
   removeBrief("briefed");

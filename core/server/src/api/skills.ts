@@ -12,6 +12,7 @@ import { writeFileAtomic } from "../atomic-write.js";
 import { piAgentDir } from "../pi-settings.js";
 import { agentHome } from "../agent-home.js";
 import { builtinSkillsDir } from "../pi/sdk-client.js";
+import { holdInstructionSkills } from "../pi/held-skills.js";
 import { isValidSlug, slugify } from "../slug.js";
 import { importFromGit, previewFromGit, readSource, type SkillSource } from "../skills/github.js";
 import { isUnderText, realPath } from "../within.js";
@@ -72,7 +73,11 @@ async function loadFromPi(): Promise<{ skills: LoadedSkill[]; diagnostics: any[]
     // are open.
     noExtensions: true,
     // Same list a session gets, builtins included — this page disagreeing with
-    // what the model is offered is the failure it exists to prevent.
+    // what the model is offered is the failure it exists to prevent. Held the
+    // same way too: a skill that rewrites the folder's instructions is marked for
+    // the person's own call in both, so the page says `manual only` for what the
+    // model is never offered on its own (see held-skills.ts).
+    skillsOverride: holdInstructionSkills,
     ...(builtin ? { additionalSkillPaths: [builtin] } : {}),
   });
   await loader.reload();
