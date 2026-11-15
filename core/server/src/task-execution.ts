@@ -3,7 +3,8 @@ import { sessions, PromptQueuedForSingleActive } from "./session-manager.js";
 import { EXECUTOR_KIND } from "./executor-kind.js";
 import * as db from "./db.js";
 import * as tasks from "./tasks.js";
-import { buildTaskPrompt, DEFAULT_MAX_ATTEMPTS } from "./task-prompt.js";
+import { buildTaskBrief, buildTaskPrompt, DEFAULT_MAX_ATTEMPTS } from "./task-prompt.js";
+import { briefFileOf, briefSeenBy, removeBrief, writeBrief } from "./task-brief.js";
 import { readTaskInstructions } from "./projects.js";
 import { roomRefused, runAway } from "./compaction-ladder.js";
 import { waitForCompletionPromise } from "./task-completion.js";
@@ -32,6 +33,9 @@ interface TaskRun {
   attemptId: string;
   /** The fresh session the attempt worked in. */
   sessionId: string;
+  /** Where this attempt's brief file is, as its agent reads it; unset when it could
+      not be written, and then the prompt holds the instructions itself. */
+  briefPath?: string;
   /** Set once the run has settled, whether by ending or stopping, so a later
       stop or second end cannot double-count it. */
   ended: boolean;
@@ -119,16 +123,42 @@ export const startTask = (taskId: string): { task: db.TaskRow; attempt: db.TaskA
   // judges complete-or-failed.
   trackEnd(run);
 
-  // Project-specific Task instructions (§14 / Phase 7): appended as their own
-  // block inside this prompt for every autonomous run. Kept out of AGENTS.md,
-  // so they never leak into ordinary chats — read straight from the folder and
-  // handed here explicitly. A failure to read them must not stop the Task.
+  // Project-specific Task instructions (§14 / Phase 7): read straight from the folder for
+  // every autonomous run, and put in the brief the attempt works from (task-brief.ts) rather
+  // than only in its prompt, so a compaction cannot take them out of the run. Kept out of
+  // AGENTS.md, so they never leak into ordinary chats. A failure to read them must not stop
+  // the Task.
   let projectInstructions = "";
   try {
     projectInstructions = readTaskInstructions(task.workspace);
   } catch (e) {
     console.error(`[portal] task ${taskId}: could not read project instructions:`, e);
   }
+
+  // The brief: the standing instructions of this attempt, in a file the attempt can read
+  // (task-brief.ts). A compaction summarizes the conversation — the prompt this run opens
+  // with goes into it — and a Task left without the Completion Requirement does not invent
+  // one: it finishes without the marker, the attempt is written failed, and a fresh session
+  // begins the Task from nothing. The file is those same words where no compaction can reach
+  // them, and the run's carry-on line below names it again at the moment a compaction is what
+  // ended the turn. Written before the prompt, so the session's first load of its prompt
+  // already points at it (session-manager.ts says the pointer from then on).
+  const briefPath = writeBrief(
+    briefFileOf(sessionId),
+    buildTaskBrief(task, {
+      maxAttempts: DEFAULT_MAX_ATTEMPTS,
+      projectInstructions,
+      attemptNumber: attempt.attempt_number,
+      // Where the agent will read it, which is not where the portal wrote it for a
+      // container's pi: that one has the attempt's brief folder mounted beside its workspace.
+      briefPath: briefSeenBy(sessionId, EXECUTOR_KIND),
+    }),
+  )
+    ? briefSeenBy(sessionId, EXECUTOR_KIND)
+    : undefined;
+  // Kept on the run as well: a turn a compaction cut short is carried on by a line of
+  // ours, and that line has to name the file the model no longer holds.
+  run.briefPath = briefPath;
 
   // Kick off the autonomous work. The CodeLoop prompt marks the session
   // running itself; listen first so the guard only settles the attempt after
@@ -138,7 +168,12 @@ export const startTask = (taskId: string): { task: db.TaskRow; attempt: db.TaskA
   // earlier attempt left uncommitted (see `buildTaskPrompt`).
   void sessions.prompt(
     sessionId,
-    buildTaskPrompt(task, { maxAttempts: DEFAULT_MAX_ATTEMPTS, projectInstructions, attemptNumber: attempt.attempt_number }),
+    buildTaskPrompt(task, {
+      maxAttempts: DEFAULT_MAX_ATTEMPTS,
+      projectInstructions,
+      attemptNumber: attempt.attempt_number,
+      briefPath,
+    }),
   )
     .catch((e: unknown) => {
       // Held because something else holds the room under the single-active
@@ -169,6 +204,8 @@ export const stopTask = (taskId: string): db.TaskRow => {
     tasks.finishAttempt(run.attemptId, "stopped");
     // An intentional stop is its own state, kept distinct from a natural-end
     // failure. Retain the attempt/session as history; it can be Rerun later.
+    // The brief goes with the attempt: nothing is going to read it again.
+    removeBrief(run.sessionId);
     tasks.setTaskStatus(taskId, "stopped");
     void sessions.abort(run.sessionId).catch(() => {});
   } else {
@@ -189,6 +226,7 @@ export const abortLiveRun = (taskId: string): void => {
   if (!run) return;
   run.ended = true;
   forget(run);
+  removeBrief(run.sessionId);
   void sessions.abort(run.sessionId).catch(() => {});
 };
 
@@ -207,6 +245,22 @@ const COMPACT_CARRY_BUDGET = 3;
  *  words for the same act: the run continues because of a compaction either way,
  *  and a chat reads one kind of resumption, not a third sentence of its own. */
 const COMPACT_PICK_UP = "Compaction detected, resume where you left off if needed.";
+
+/**
+ * The line that carries a Task's turn back on, with its brief named.
+ *
+ * A compaction is exactly the moment this run needs the file: it has just lost
+ * part of what it was told, including, very likely, the Completion Requirement
+ * and the marker it must finish with. The brief is untouched by it, so the
+ * carry-on says where to read it again rather than leaving the model to
+ * remember words that are no longer in its context.
+ */
+const carryLine = (briefPath?: string): string =>
+  briefPath
+    ? `${COMPACT_PICK_UP} The instructions of this task — including the completion marker you must ` +
+      `print to finish it — are in \`${briefPath}\`; read that file again before you go on, and do not ` +
+      `begin the task from nothing.`
+    : COMPACT_PICK_UP;
 
 /**
  * Detect the moment a run reaches its own end and settle it, so completion
@@ -322,7 +376,7 @@ function trackEnd(run: TaskRun): void {
       // The reason stays set while the line is in flight: a settled attempt
       // beside a carry that has not gone is the failure the queue loop would
       // otherwise answer by starting the Task again in a fresh session.
-      void sessions.prompt(run.sessionId, COMPACT_PICK_UP, { resume: "compaction" }).then(
+      void sessions.prompt(run.sessionId, carryLine(run.briefPath), { resume: "compaction" }).then(
         (sent: boolean) => {
           if (!sent) {
             // A Stop got there first, and the line never went: prompt() says so
@@ -471,6 +525,9 @@ const finishSettled = async (run: TaskRun): Promise<void> => {
   try {
     const completed = await waitForCompletionPromise(run.sessionId, run.startSeq);
     tasks.finishAttempt(run.attemptId, completed ? "completed" : "failed");
+    // The attempt is over: its brief has nothing left to hold for the run. A retry
+    // of the Task is a fresh session with a brief of its own.
+    removeBrief(run.sessionId);
     const task = tasks.getTask(run.taskId);
     if (completed) {
       tasks.setTaskStatus(run.taskId, "completed");

@@ -62,8 +62,18 @@ test("a Task's run is started without it, and its prompt says the run decides on
   const task = createTask({ workspace: process.env.WORKSPACE_ROOT, title: "Fix the login bug", description: "Users cannot sign in." });
   const { sessionId } = startTask(task.id);
   assert.deepEqual(prompts.map((p) => p.sessionId), [sessionId], "the run was handed its prompt");
-  assert.match(prompts[0].message, /## Working Alone[\s\S]*no question is put to the person/);
-  assert.equal((await startedWith(sessionId)).questions, false);
+  assert.match(prompts[0].message, /no question is put to the person/, "the run is told it decides for itself");
+  // And where those instructions live: a file, so that a compaction of the chat
+  // cannot take them — nor the marker the run has to finish on — out of it.
+  assert.match(prompts[0].message, /`[^`]*task-brief\.md`/, "and pointed at its brief file");
+  // The same pointer at system level, which is what outlives a compaction: a line in the
+  // conversation is exactly what a compaction summarizes away, while pi's prompt is replayed
+  // beside the summary (session-manager.ts hands over briefLines, sdk-client.ts says them).
+  const launch = await startedWith(sessionId);
+  assert.equal(launch.questions, false);
+  assert.equal(typeof launch.briefLines, "function", "the run is given a pointer to say as its prompt is loaded");
+  assert.match(launch.briefLines().join("\n"), /Task brief:/);
+  assert.match(launch.briefLines().join("\n"), /<PROMISE>THIS TASK IS DONE<\/PROMISE>/, "with the marker it must finish on");
   stopTask(task.id);
 });
 

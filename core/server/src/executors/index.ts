@@ -1,5 +1,5 @@
 import { executorLimits } from "./limits.js";
-import { mkdirSync, accessSync, constants } from "node:fs";
+import { mkdirSync, accessSync, constants, existsSync } from "node:fs";
 import { promisify } from "node:util";
 import { hostMountPath, type DockerMount } from "./host-mounts.js";
 import { execFile, spawn } from "node:child_process";
@@ -48,6 +48,17 @@ export interface LaunchOptions {
   codemode?: "only";
   /** Said after the portal's rules each time the prompt is built: the chat's mode's instructions. */
   modeLines?: () => string[];
+  /**
+   * Said with the rest as the chat's prompt is loaded: the line pointing at this chat's task
+   * brief, the file that holds a Task's standing instructions (task-brief.ts). Only the host
+   * executor can say it — a container's pi has no portal resource loader to say it in.
+   *
+   * It is said at system level because that is what a compaction leaves alone: pi summarizes
+   * the conversation, and a Task that loses the Completion Requirement with it finishes without
+   * the marker and is begun again from nothing. What is in the prompt is rebuilt and replayed,
+   * so the pointer to the file — and the marker named in it — outlives every cut of the chat.
+   */
+  briefLines?: () => string[];
   /** The agent whose heartbeat this session is, when it is one: gives it the note tool. */
   heartbeatAgent?: string;
   /** Told the chat's model when a spoken turn is about to run on another. */
@@ -115,6 +126,7 @@ export class HostExecutor implements Executor {
       lazySets: opts.lazySets,
       codemode: opts.codemode,
       modeLines: opts.modeLines,
+      briefLines: opts.briefLines,
       heartbeatAgent: opts.heartbeatAgent,
       rememberChatModel: opts.rememberChatModel,
       canReloadNow: opts.canReloadNow,
@@ -139,12 +151,19 @@ export class ContainerExecutor implements Executor {
   constructor(
     private readonly image: string,
     private readonly sessionRoot: string,
-    private readonly limits: { memoryMb: number; cpus: number; pidsLimit: number }
+    private readonly limits: { memoryMb: number; cpus: number; pidsLimit: number },
+    /** Where the task briefs are kept (task-brief.ts); unset mounts nothing, as no chat of a portal without briefs has one to read. */
+    private readonly briefRoot?: string,
   ) {}
 
   async launch(opts: LaunchOptions): Promise<PiClient> {
     const containerName = `pithagoras-${opts.sessionId}`;
     const sessionDir = path.join(this.sessionRoot, opts.sessionId);
+    /** This session's own brief folder, mounted read-only inside: see below. Only a session
+        that has one — an autonomous Task's run, whose brief was written before this launch —
+        is mounted, so an ordinary chat leaves no folder of its own in the briefs' place. */
+    const briefDir = this.briefRoot ? path.join(this.briefRoot, opts.sessionId) : undefined;
+    const hasBrief = briefDir !== undefined && existsSync(briefDir);
     // Create it as the portal user, rather than letting Docker create a root-owned bind source.
     // Before the mount translation below, so the directory exists as ours either way.
     mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
@@ -154,11 +173,20 @@ export class ContainerExecutor implements Executor {
 
     let workspaceMount = opts.workspacePath;
     let sessionMount = sessionDir;
+    let briefMount = hasBrief ? briefDir : undefined;
     if (process.env.PORTAL_CONTAINER_NAME) {
       const { stdout } = await promisify(execFile)("docker", ["inspect", "--format", "{{json .Mounts}}", process.env.PORTAL_CONTAINER_NAME]);
       const mounts = JSON.parse(stdout) as DockerMount[];
       workspaceMount = hostMountPath(opts.workspacePath, mounts);
       sessionMount = hostMountPath(sessionDir, mounts);
+      // Briefs kept outside every mount of this portal cannot be mounted for the runner
+      // either, and the run is then told nothing of them (see briefLines) rather than the
+      // launch failing over a folder no work needs.
+      try {
+        briefMount = hasBrief ? hostMountPath(briefDir!, mounts) : undefined;
+      } catch {
+        briefMount = undefined;
+      }
     }
 
 
@@ -192,6 +220,9 @@ export class ContainerExecutor implements Executor {
       "/workspace",
       "-v",
       `${workspaceMount}:/workspace`,
+      // The brief of an autonomous Task's run, read-only: the pi inside reads the same file
+      // the portal wrote and cannot change what its instructions say (task-brief.ts).
+      ...(briefMount ? ["-v", `${briefMount}:/briefs:ro`] : []),
       "-v",
       `${sessionMount}:/sessions`,
       // Same hardening posture as the sandboxes: no extra capabilities, no
@@ -228,12 +259,13 @@ export class ContainerExecutor implements Executor {
   }
 }
 
-export function buildExecutor(kind: ExecutorKind, sessionRoot: string): Executor {
+export function buildExecutor(kind: ExecutorKind, sessionRoot: string, briefRoot?: string): Executor {
   if (kind === "container") {
     return new ContainerExecutor(
       process.env.PI_IMAGE || "pithagoras-runner:latest",
       sessionRoot,
-      executorLimits()
+      executorLimits(),
+      briefRoot
     );
   }
   return new HostExecutor(sessionRoot);

@@ -28,6 +28,7 @@ import { cappedNotice } from "./pi/context-budget.js";
 import { neutralise } from "./channels/framing.js";
 import { textOf } from "./pi/entries.js";
 import { removeSessionFiles } from "./session-files.js";
+import { briefLines, briefRoot } from "./task-brief.js";
 import { dropImages, forLog, forPi, loadImages, removeImages, storedIn, type Attached } from "./prompt-images.js";
 import { BACKGROUND_SUPPORTED, listJobs, startedWhen, type BackgroundJob } from "./background.js";
 import { forgetSession as forgetLlamaProxy } from "./llama-progress.js";
@@ -3106,7 +3107,7 @@ class SessionManager extends EventEmitter {
     if (!existsSync(session.workspace)) {
       throw new Error(`The folder this chat worked in, ${session.workspace}, is gone. Its history can still be read, but it cannot go on.`);
     }
-    const executor = buildExecutor(EXECUTOR_KIND, SESSION_ROOT);
+    const executor = buildExecutor(EXECUTOR_KIND, SESSION_ROOT, briefRoot());
     mkdirSync(path.join(SESSION_ROOT, sessionId), { recursive: true });
 
     // The session's own choices win over the portal defaults. Without this a
@@ -3143,6 +3144,13 @@ class SessionManager extends EventEmitter {
         const mode = modeOf(getSession(sessionId)?.mode);
         return mode?.instructions ? [mode.instructions] : [];
       },
+      // The standing instructions of an autonomous Task are kept in a file the attempt can
+      // read, outside the conversation, because a compaction rewrites the conversation and a
+      // Task that loses the Completion Requirement with it finishes without the marker and is
+      // begun again from nothing (task-brief.ts). Asked as the prompt is loaded, like the mode's
+      // lines are: the brief is written as an attempt starts and taken away when it ends, and a
+      // chat that has none is told nothing about one.
+      briefLines: () => briefLines(sessionId, session.executor),
       // A chat that names no model is reopened on the model of its last answer,
       // and after a spoken turn on the voice model that would be the voice's.
       rememberChatModel: (provider, model) => keepChatModel(sessionId, provider, model),

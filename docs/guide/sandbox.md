@@ -112,6 +112,12 @@ The defaults:
 | `/data/sessions` | no access | every chat's transcript |
 | `/data/backups`, `/certs` | no access | database backups, the TLS key |
 
+Nothing closes `/data/task-briefs`, and that is on purpose: an autonomous Task's
+brief — the standing instructions its attempt reads, so that a compaction of the
+chat cannot take them away — is in there, and the agent's own user has to be able
+to open it. That is why it is not in `/data/sessions`, and why the agent can only
+read it: the portal writes it and takes it away when the attempt ends.
+
 What an extension keeps for itself, in `/data/extension-data`, is made for the
 portal alone, closed to the agents: the [Browser](/guide/browser) extension's
 local Chrome profile, with the browser's cookies and logins, is there. A policy

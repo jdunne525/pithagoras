@@ -576,6 +576,8 @@ export class SdkPiClient extends EventEmitter implements PiClient {
     codemode?: "only";
     /** Said after the portal's rules each time the prompt is built: the chat's mode's instructions. */
     modeLines?: () => string[];
+    /** Said with the rest as the prompt is loaded: the pointer to a Task's brief file. See `LaunchOptions`. */
+    briefLines?: () => string[];
     /** The portal's session id, for tools that record against it. */
     sessionId?: string;
     /** The taint rules a run may act against after it read something untrusted, read at each call — see guardExtension. */
@@ -729,6 +731,7 @@ export class SdkPiClient extends EventEmitter implements PiClient {
         ...(skillsOf && (!opts.role || opts.role === "primary") && !opts.heartbeatAgent ? [skillsLine(skillsOf)] : []),
         ...memoryRule(opts.cwd, opts.role),
         ...outsideLines(),
+        ...(opts.briefLines?.() ?? []),
         ...(opts.modeLines?.() ?? []),
       ],
       // What the installed extensions' server halves add to the chat's pi, each under its package's name, as they are

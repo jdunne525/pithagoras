@@ -1,5 +1,6 @@
 import { getSetting, putSetting, listAllRunningTasks } from "./db.js";
 import * as tasks from "./tasks.js";
+import { removeBrief } from "./task-brief.js";
 import { activeLoopWorkspaces, clearPersistedLoop, startLoop } from "./task-queue.js";
 
 /**
@@ -54,6 +55,9 @@ export function reconcileInterruptedTasks(): number {
     const stuck = attempts.find((a) => a.status === "running") ?? attempts.at(-1);
     if (stuck && stuck.status === "running") {
       tasks.finishAttempt(stuck.id, "failed");
+      // The brief of a run no longer alive. Nothing was left to remove it with: a
+      // crash takes the attempt's own cleanup with it.
+      if (stuck.session_id) removeBrief(stuck.session_id);
     }
     // Back onto the queue, ready to run again. Never leaves the Task running.
     // (Not Rerun: that refuses a still-running Task, which this one is.)

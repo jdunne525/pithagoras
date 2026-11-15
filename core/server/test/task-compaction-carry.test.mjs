@@ -169,6 +169,17 @@ const NO_CUT = "Compaction failed: Nothing to compact (session too small)";
 const OUT_OF_ROOM = "Auto-compaction failed: Summarization failed: generation hit the token cap.";
 /** The line the portal sends for a compaction's turn — SessionManager's own words. */
 const PICK_UP = "Compaction detected, resume where you left off if needed.";
+/**
+ * The carry of a Task's turn, as it waits its turn: SessionManager's pick-up line,
+ * and the brief the run has to read again. A compaction is precisely when the run
+ * no longer holds what it was told, so the line that carries it on names the file
+ * that still holds it — including the marker the attempt has to finish on.
+ */
+const carried = (messages, why) => {
+  assert.equal(messages.length, 1, `${why}: one line`);
+  assert.ok(messages[0].startsWith(PICK_UP), `${why}: it is the pick-up line`);
+  assert.ok(messages[0].includes("task-brief.md"), `${why}: and it names the brief to read again`);
+};
 /** Carries the handler is allowed before the attempt is concluded as an end. */
 const COMPACT_CARRY_BUDGET = 3;
 
@@ -362,10 +373,9 @@ test("a carry the room will not take leaves the attempt, and the queue's gate, w
     await at().noCut();
     await flush(400);
 
-    assert.deepEqual(
+    carried(
       [...sessions.singleActiveQueue].filter((w) => w.sessionId === sessionId).map((w) => w.message),
-      [PICK_UP],
-      "the carry waits its turn in the queue: nothing was lost",
+      "the carry waits its turn in the queue",
     );
     assert.equal(db.getAttempt(attempt.id).status, "running", "the attempt is not settled while its carry has not gone");
     assert.equal(execution.hasLiveTaskRun(), true, "the gate every queue loop reads says work is in hand: no next Task is started");
@@ -413,12 +423,11 @@ test("a carry the room refused waits with the queue through several looks at the
     // carries that reached the chat, not to the looks the room refused.
     await flush(9000);
 
-    assert.deepEqual(
+    carried(
       [...sessions.singleActiveQueue]
         .filter((w) => w.sessionId === sessionId)
         .map((w) => w.message),
-      [PICK_UP],
-      "one line for this turn waits in the queue: a later look does not stack a second copy of it",
+      "a later look at the room stacks no second copy of it",
     );
     assert.equal(
       db.getAttempt(attempt.id).status,
