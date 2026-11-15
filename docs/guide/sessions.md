@@ -335,9 +335,11 @@ If an edit's replacement is refused — the model is unreachable, say — the
 conversation is put back as it was, rather than left without the messages the
 edit meant to replace.
 
-The portal sends two sentences of its own that carry an unfinished turn on: after
-a compaction that caught the run mid-turn, and after an answer the model stopped
-in mid-sentence. Those are drawn as one muted line naming what the portal asked,
+The portal sends sentences of its own that carry an unfinished turn on: after
+a compaction that caught the run mid-turn, after an answer the model stopped
+in mid-sentence, after a turn that wrote only its thinking, after an answer that
+wrote its tool call as text, and after an answer that failed with the model or
+the engine not there to write it. Those are drawn as one muted line naming what the portal asked,
 not as a message with Copy/Retry/Edit/Delete below it — see
 [When a chat compacts](/guide/sessions#when-a-chat-compacts). A chat that ran
 before the record said whose line such a sentence was is recognised by the
@@ -746,6 +748,30 @@ that finished, and on a Task the attempt is settled as failed over work still in
 hand while a new session starts the Task from nothing. So this end is carried on
 in the same chat too, bounded to three in a row, and the fourth is said as an end
 with the reason.
+
+Two more ends are the same mistake of reading: the work was not finished, and the
+run said nothing that would continue it.
+
+- **The tool call written as words.** Some models answer with
+  `<tool_call>…</function>` markup instead of asking for the call, and pi reads
+  an answer's text as prose, so nothing runs and the turn stops there. The portal
+  asks for the call as a call, in the same chat, on the same budget of three.
+- **Nothing there to answer.** An answer that comes back errored — the local
+  engine stopped, a connection dropped, the provider at a limit that resets —
+  ended a turn that had its work in hand, and pi has already retried what it
+  recognises. The portal asks the same chat again after a wait the failure asks
+  for: ten seconds for an engine or a connection, which the next request starts
+  back, and thirty for a limit whose own window is seconds. The room is held
+  through the wait, so nothing else takes it and no fresh session begins the work
+  beside it. An error nothing but you can change — no model, no key, a quota
+  spent, a request with no room in the context — is asked nothing: it answers the
+  same way when asked again, and the chat's own failure line says what it is.
+
+Carrying a run on in its own chat is what keeps its context: the alternative is a
+fresh session that reads the project from nothing. A Task that lost four attempts
+that way spent three hours and eighteen minutes on a change its fifth attempt
+found already written in the folder — and an attempt that is not the first one is
+now told to look at what the folder already holds before it starts writing again.
 
 Those carry-on lines are the portal's, not yours: they are recorded as such, and
 drawn as one short muted line — *the portal asked the agent to carry on where its

@@ -431,6 +431,8 @@ const de: Locale = {
     "Waiting — the agent has it, and reads it next": "Wartet — der Agent hat sie und liest sie als Nächstes",
     "The portal asked the agent to carry on where its answer was cut off": "Das Portal hat den Agenten gebeten, dort fortzufahren, wo seine Antwort abgebrochen wurde",
     "The portal asked the agent to carry on after a turn that ended with only its thinking": "Das Portal hat den Agenten gebeten, fortzufahren, nachdem seine Runde nur mit Gedanken endete",
+    "The portal asked the agent to carry on after it wrote its tool call as text": "Das Portal hat den Agenten gebeten, fortzufahren, nachdem er seinen Tool-Aufruf als Text geschrieben hatte",
+    "The portal asked the agent to carry on after its answer failed with a model or engine error": "Das Portal hat den Agenten gebeten, fortzufahren, nachdem seine Antwort mit einem Modell- oder Engine-Fehler fehlgeschlagen war",
     "The portal asked the agent to pick the turn back up after the compaction": "Das Portal hat den Agenten gebeten, die Runde nach der Verdichtung wieder aufzunehmen",
     "May not have been sent — the portal restarted, and could not tell whether the agent took it in": "Vielleicht nicht gesendet — das Portal wurde neu gestartet und konnte nicht feststellen, ob der Agent sie angenommen hat",
     "Not sent — the portal restarted before the agent took it in": "Nicht gesendet — das Portal wurde neu gestartet, bevor der Agent sie angenommen hat",

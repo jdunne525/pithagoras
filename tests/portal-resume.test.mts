@@ -202,3 +202,64 @@ test("a person's own words that ask for the same thing are not the portal's line
   const [item] = buildTranscript([mine] as any);
   assert.equal((item as any).resume, undefined);
 });
+
+// Two more ends that are not the work ending, both read off BlastRunHero's
+// `Brutes should shoot` Task (c67318ec, 15 November): the local engine gone before
+// the answer was written, and a tool call the model wrote as markup. Neither is the
+// person asking, and neither is the work finished — each is one muted line saying
+// the portal asked, like the other three.
+const ENGINE_GONE = 'Carry on where you left off. Your last answer failed with a model or engine error, not an end of the work; the work is still in hand. Pick up where you stopped.';
+const CALL_AS_TEXT = 'Carry on where you left off. Your last answer wrote the tool call it wanted as text, which asks for nothing — put the call in a call, and carry on where you stopped.';
+
+test('a carry-on of an answer the engine was not there to write is the portal’s line, and says which', () => {
+  const items = buildTranscript([said, { seq: 14, type: 'portal_prompt', payload: { message: ENGINE_GONE, resume: 'model-error' } }] as any);
+  assert.equal((items[0] as any).resume, undefined, 'what the person said is not the portal’s line');
+  assert.equal((items[1] as any).resume, 'model-error');
+
+  const html = row(items[1]);
+  assert.match(html, /The portal asked the agent to carry on after its answer failed with a model or engine error/);
+  const shown = html.replace(/title="[^"]*"/g, "");
+  assert.ok(!shown.includes(ENGINE_GONE), 'the sentence itself is not on show');
+  assert.ok(!html.includes('rounded-2xl'), 'no bubble: it is not a message of the person’s');
+
+  // Known by its sentence where the record does not say whose it is.
+  const plain = buildTranscript([{ seq: 14, type: 'portal_prompt', payload: { message: ENGINE_GONE } }] as any);
+  assert.equal((plain[0] as any).resume, 'model-error');
+
+  // Not the line ↑ takes back for sending again.
+  const waiting = buildTranscript([said, { seq: 14, type: 'portal_prompt', payload: { message: ENGINE_GONE, queued: true, resume: 'model-error' } }] as any);
+  assert.equal(lastWaiting(waiting), undefined, "the portal's line is not offered as the person's message");
+  assert.equal(lastSaid(waiting)?.seq, 2, 'and the chat’s last thing said is still the person’s message');
+});
+
+test('a carry-on of a tool call written as text is the portal’s line, and says which', () => {
+  const items = buildTranscript([said, { seq: 15, type: 'portal_prompt', payload: { message: CALL_AS_TEXT, resume: 'tool-text' } }] as any);
+  assert.equal((items[1] as any).resume, 'tool-text');
+
+  const html = row(items[1]);
+  assert.match(html, /The portal asked the agent to carry on after it wrote its tool call as text/);
+  assert.ok(!html.replace(/title="[^"]*"/g, "").includes(CALL_AS_TEXT), 'the sentence itself is not on show');
+  assert.ok(!html.includes('rounded-2xl'), 'no bubble');
+
+  const plain = buildTranscript([{ seq: 15, type: 'portal_prompt', payload: { message: CALL_AS_TEXT } }] as any);
+  assert.equal((plain[0] as any).resume, 'tool-text');
+
+  const waiting = buildTranscript([said, { seq: 15, type: 'portal_prompt', payload: { message: CALL_AS_TEXT, queued: true, resume: 'tool-text' } }] as any);
+  assert.equal(lastWaiting(waiting), undefined);
+  assert.equal(lastSaid(waiting)?.seq, 2);
+});
+
+test('a page in another language says the two new carry-ons in that language', () => {
+  const keys = [
+    'The portal asked the agent to carry on after its answer failed with a model or engine error',
+    'The portal asked the agent to carry on after it wrote its tool call as text',
+  ];
+  addLocale({ code: 'xx', name: 'Test', strings: Object.fromEntries(keys.map((key) => [key, `xx: ${key}`])) });
+  setLanguage('xx');
+  try {
+    assert.match(row(buildTranscript([{ seq: 14, type: 'portal_prompt', payload: { message: ENGINE_GONE, resume: 'model-error' } }] as any)[0]), /xx: The portal asked the agent to carry on after its answer failed/);
+    assert.match(row(buildTranscript([{ seq: 15, type: 'portal_prompt', payload: { message: CALL_AS_TEXT, resume: 'tool-text' } }] as any)[0]), /xx: The portal asked the agent to carry on after it wrote its tool call as text/);
+  } finally {
+    setLanguage('system');
+  }
+});

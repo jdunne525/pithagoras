@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { LiveEvents } from "./live-events.js";
 import type { Timings } from "./llama-progress.js";
 import { toolCallEnded, toolCallsCutOff, toolCallStarted } from "./tool-debug.js";
-import { ModelErrors, plainFailure } from "./model-errors.js";
+import { ModelErrors, plainFailure, carryWaitForModelError, toolCallWrittenAsText } from "./model-errors.js";
 import { markCompactionResume } from "./ntfy.js";
 import { EventEmitter } from "node:events";
 import { hasPrimary, lower, type PersonRow, type Role } from "./people.js";
@@ -247,10 +247,12 @@ export interface PromptOptions {
 }
 
 /**
- * What a portal resume of ours carries on: the compaction's turn, a cut-off answer, or a
- * turn that ended having written nothing anyone can read (see `noteSilentEnd`).
+ * What a portal resume of ours carries on: the compaction's turn, a cut-off answer, a
+ * turn that ended having written nothing anyone can read, an answer that wrote its tool
+ * call as markup, or an answer that failed with the model or engine not there to write it
+ * (see `noteSilentEnd`).
  */
-export type ResumeKind = "compaction" | "cut-off" | "silent";
+export type ResumeKind = "compaction" | "cut-off" | "silent" | "model-error" | "tool-text";
 
 /** A message sent into a run, until pi takes it in: see SessionManager.waiting. */
 interface Waiting {
@@ -2367,24 +2369,60 @@ class SessionManager extends EventEmitter {
   }
 
   /**
+   * A run whose answer wrote the tool call it wanted as markup, and is not being
+   * carried on: said once, in the same shape as the other ends, naming what the
+   * model did rather than what the model ran out of.
+   */
+  private noteToolTextEnd(sessionId: string, carries: number): void {
+    this.record(sessionId, "portal_notice", {
+      text: `The model wrote the tool call it wanted as text ${carries + 1} times in a row, which asks for nothing, so the run was left as it is. The work is unfinished where it stopped; ask it again, or try another model.`,
+      warning: true,
+    });
+  }
+
+  /**
+   * A run whose answer came back errored with nothing there to write it, and is not
+   * being carried on: said once, with what the model said last, so the chat's last
+   * line names the engine or the provider rather than reading as the work ending.
+   */
+  private noteModelErrorEnd(sessionId: string, errorMessage: string, carries: number): void {
+    const said = errorMessage ? ` Its last answer said: ${plainFailure(errorMessage)}` : "";
+    this.record(sessionId, "portal_notice", {
+      text: `The model's answer failed ${carries + 1} times in a row${said}. That is the model or the engine behind it not being there, not the work ending, so the run was left as it is. Start it again once the engine is back, or choose another model.`,
+      warning: true,
+    });
+  }
+
+  /**
    * Send the message that carries an unfinished turn on in the same session.
    *
-   * Two ends of a run leave a turn in hand that nothing resumes by itself: a
-   * compaction that caught the run mid-turn (pi stops it and goes quiet), and a
-   * run that ended with the model out of output tokens mid-answer. Both mark
-   * the session idle and let the run go; this is what sends the message that
-   * picks the turn back up, so the work keeps its context instead of the queue
-   * launching a fresh session that starts the Task again from nothing.
+   * Four ends of a run leave a turn in hand that nothing resumes by itself: a
+   * compaction that caught the run mid-turn (pi stops it and goes quiet), a run
+   * that ended with the model out of output tokens mid-answer, a turn that ended
+   * having written nothing of its answer, and a turn whose answer came back with
+   * the model or the engine behind it not there to answer. All four mark the
+   * session idle and let the run go; this is what sends the message that picks the
+   * turn back up, so the work keeps its context instead of the queue launching a
+   * fresh session that starts the Task again from nothing.
    *
    * Deferred to the next turn of the event loop so the compaction has fully
    * unwound first: compact() still marks the session idle on the way out, and a
-   * prompt started inside that unwind would be invisible to it. Fired once, when
-   * compaction_end reported pi will not resume the turn itself. The ntfy alert
-   * for the aborted run's idle is suppressed separately — the resumed turn ends
-   * naturally, and only that end is announced.
+   * prompt started inside that unwind would be invisible to it. A `waitMs` holds
+   * the ask longer than that, for the ends whose reason says the answer is not
+   * there yet — a rate limit's own window, an engine that has to be restarted by
+   * the next request — and the gap is held the same way either: the session reads
+   * idle with the room kept and the attempt left open until the carry lands.
+   * Fired once, when compaction_end reported pi will not resume the turn itself.
+   * The ntfy alert for the aborted run's idle is suppressed separately — the
+   * resumed turn ends naturally, and only that end is announced.
    */
-  private scheduleResumeAfterCompaction(sessionId: string, resumeText = "Compaction detected, resume where you left off if needed.", resume: ResumeKind = "compaction"): void {
-    setImmediate(() => {
+  private scheduleResumeAfterCompaction(
+    sessionId: string,
+    resumeText = "Compaction detected, resume where you left off if needed.",
+    resume: ResumeKind = "compaction",
+    waitMs = 0,
+  ): void {
+    const send = (): void => {
       // Cancelled in the meantime — a Stop, the pi going away, or the turn
       // already carrying on — so nothing is coming to pick the turn up, and the
       // room was let go at the same time: going on here would start a run nobody
@@ -2425,7 +2463,9 @@ class SessionManager extends EventEmitter {
           this.clearResumePending(sessionId);
         },
       );
-    });
+    };
+    if (waitMs > 0) setTimeout(send, waitMs).unref();
+    else setImmediate(send);
   }
 
   /**
@@ -3371,6 +3411,26 @@ class SessionManager extends EventEmitter {
         // again, and it is said rather than carried. Here the chat had room and the
         // turn simply ended on its thinking, which is no end of the work.
         const silent = reason === "stop" && shape !== undefined && !shape.wrote;
+        // A third shape of the same end: the turn asked for its next piece of work
+        // as words — tool-call markup written into the answer, where pi reads only
+        // prose — so nothing ran and the run stopped with the work unfinished. BlastRunHero's
+        // `Brutes should shoot` Task (c67318ec, 15 November) lost its fourth attempt
+        // that way at 06:04:03: 53 tokens of `<tool_call><function=build>` after a
+        // `grep` of the whole repo timed out at 60 seconds, `stopReason: stop`, no
+        // promise, and a fifth session begun from nothing.
+        const askedInText = reason === "stop" && shape?.askedAsText === true;
+        // And the fourth: the answer came back errored because nothing was there to
+        // write it — the local engine gone, a connection dropped, a provider at its
+        // limit. pi has already retried what it recognises three times; what is left
+        // at the run's end is a turn with its work unfinished and a provider that may
+        // well answer a minute later. Three of that Task's five attempts ended on
+        // exactly this (03:23:16, 04:38:58 mid-`write`, 05:16:59 mid-`write`), each
+        // settled failed and begun again in a fresh session: 3 hours 18 minutes for a
+        // change the fifth attempt described as already sitting in the working tree.
+        // An error that says the ask itself cannot be answered — a Stop, a stopped
+        // compaction, no model, a quota spent, a context with no room — is not this,
+        // and is left as the run's end.
+        const errorWait = reason === "error" && shape !== undefined ? carryWaitForModelError(shape.errorMessage) : null;
         const limit = this.modelOutputLimit.get(sessionId) ?? 0;
         let carryingOn = false;
         if (carries < 3 && cutOff && this.answerWasCutOff(cutOff, limit)) {
@@ -3388,6 +3448,22 @@ class SessionManager extends EventEmitter {
           this.cutOffResumePending.add(sessionId);
           markCompactionResume(sessionId);
           this.scheduleResumeAfterCompaction(sessionId, "Carry on where you left off. Your last turn ended with only its thinking, no answer and no work asked for, which is not the end of the work.", "silent");
+        } else if (askedInText && carries < 3) {
+          carryingOn = true;
+          this.cutOffCarries.set(sessionId, carries + 1);
+          this.cutOffResumePending.add(sessionId);
+          markCompactionResume(sessionId);
+          this.scheduleResumeAfterCompaction(sessionId, "Carry on where you left off. Your last answer wrote the tool call it wanted as text, which asks for nothing — put the call in a call, and carry on where you stopped.", "tool-text");
+        } else if (errorWait !== null && carries < 3) {
+          carryingOn = true;
+          this.cutOffCarries.set(sessionId, carries + 1);
+          this.cutOffResumePending.add(sessionId);
+          markCompactionResume(sessionId);
+          // Held for the wait the failure asks for: a rate limit's own window is
+          // seconds, and the engine is restarted by the next request, so the ask is
+          // what starts it. The room is held through the wait, so nothing else takes
+          // it and no fresh session begins the Task over beside it.
+          this.scheduleResumeAfterCompaction(sessionId, "Carry on where you left off. Your last answer failed with a model or engine error, not an end of the work; the work is still in hand. Pick up where you stopped.", "model-error", errorWait);
         } else {
           // A stop that was neither a cut-off answer nor an answer that wrote nothing,
           // or the budget spent: said once, where the person sees the chat end, so the
@@ -3395,6 +3471,8 @@ class SessionManager extends EventEmitter {
           // same way.
           if (cutOff) this.noteCutOffEnd(sessionId, cutOff, limit, carries);
           else if (silent) this.noteSilentEnd(sessionId, carries);
+          else if (askedInText) this.noteToolTextEnd(sessionId, carries);
+          else if (errorWait !== null) this.noteModelErrorEnd(sessionId, shape?.errorMessage ?? "", carries);
           // Ended on its own terms, or out of carries: the carry-on budget is spent,
           // so a later run in this session gets a fresh one.
           this.cutOffCarries.delete(sessionId);
@@ -5783,22 +5861,37 @@ function compactionFailureText(message: unknown): string {
  * message of nothing but thinking has a count and says nothing. `wrote` is whether the
  * message contains an answer the person sees (text) or work it asked for (a tool call):
  * pi's own tool-call parts are how a turn does things, and a message that carries one is
- * an answer in progress.
+ * an answer in progress. `askedAsText` is the other shape of the same thing: the model
+ * wrote `<tool_call>…</function>` markup into its answer, which pi reads as
+ * prose, so nothing ran and the run ended on it. `errorMessage` is what an errored
+ * message says, empty when the message is not an error.
  */
 function answerShape(message: any): CutOffAnswer {
-  const parts = Array.isArray(message?.content) ? message.content : [];
-  const wrote = parts.some((part: any) => (part?.type === "text" && String(part.text ?? "").trim()) || part?.type === "toolCall");
+  const parts: any[] = Array.isArray(message?.content) ? message.content : [];
+  const texts = parts.filter((part: any) => part?.type === "text").map((part: any) => String(part.text ?? ""));
+  const called = parts.some((part: any) => part?.type === "toolCall");
   const output = Number(message?.usage?.output);
-  return { output: Number.isFinite(output) && output > 0 ? output : 0, wrote };
+  return {
+    output: Number.isFinite(output) && output > 0 ? output : 0,
+    wrote: texts.some((text: string) => text.trim()) || called,
+    askedAsText: !called && texts.some(toolCallWrittenAsText),
+    errorMessage: String(message?.errorMessage ?? ""),
+  };
 }
+
+/**
+ * What the last answer of a run was: how much the model wrote in it, whether any of
+ * it reached the chat, whether what reached it was markup asking for a tool call, and
+ * what an error said. Together they tell a run that ended with its work in hand — out
+ * of output, out of nothing to say, markup nobody ran, or nothing there to answer —
+ * from a run that ended because the work was done. See `agent_settled`.
+ */
+type CutOffAnswer = { output: number; wrote: boolean; askedAsText: boolean; errorMessage: string };
 
 /** A token count as the chat says it: 16384 is "16,384", which reads as a size. */
 function tokensOf(tokens: number): string {
   return String(Math.round(tokens)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 }
-
-/** What the last assistant message of a run wrote; see the cutOffAnswer map on SessionManager. */
-type CutOffAnswer = { output: number; wrote: boolean };
 
 /**
  * Thrown by prompt() when only one session may be active at a time and another

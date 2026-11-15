@@ -95,14 +95,16 @@ export type Item =
       steer?: boolean;
       /**
        * The portal's own line carrying an unfinished turn on — after a compaction that
-       * caught the run mid-turn, after a run the model cut itself off on, or after a turn
-       * that ended with only its thinking and no answer. Drawn as the portal speaking for
+       * caught the run mid-turn, after a run the model cut itself off on, after a turn
+       * that ended with only its thinking and no answer, after an answer that wrote its
+       * tool call as markup, or after an answer that failed with nothing there to write
+       * it. Drawn as the portal speaking for
        * the work, not as a message of the person's: left as a message,
        * a chat that carried a cut-off answer on three times showed the person having said
        * the same sentence three times, which is what they came to report as "a repeated
        * message".
        */
-      resume?: "compaction" | "cut-off" | "silent";
+      resume?: ResumeKind;
       unsent?: "stopped" | "restarted" | "unsure";
     }
   /** `thinkingSince`/`thinkingUntil`: when the reasoning started and last grew, for "Thought for 12s". */
@@ -283,9 +285,7 @@ function userItem(seq: number, p: any): UserItem {
   // Whose line it is: the record says, and a chat that ran this before the record
   // said it is recognised by the sentence the portal sends.
   const resume =
-    p?.resume === "compaction" || p?.resume === "cut-off" || p?.resume === "silent"
-      ? (p.resume as "compaction" | "cut-off" | "silent")
-      : PORTAL_LINES.find((line) => line.text === text)?.resume;
+    PORTAL_KINDS.has(p?.resume) ? (p.resume as ResumeKind) : PORTAL_LINES.find((line) => line.text === text)?.resume;
   return {
     kind: "user",
     id: `u${seq}`,
@@ -308,11 +308,18 @@ function userItem(seq: number, p: any): UserItem {
  * purpose: a Task's prompt that quotes the same sentence inside its own text is the person's
  * message and stays one.
  */
-const PORTAL_LINES: { text: string; resume: "compaction" | "cut-off" | "silent" }[] = [
+const PORTAL_LINES: { text: string; resume: ResumeKind }[] = [
   { text: "Compaction detected, resume where you left off if needed.", resume: "compaction" },
   { text: "Carry on where you left off. Your last answer was cut off at the model's output limit, mid-sentence, not at the end of the work.", resume: "cut-off" },
   { text: "Carry on where you left off. Your last turn ended with only its thinking, no answer and no work asked for, which is not the end of the work.", resume: "silent" },
+  { text: "Carry on where you left off. Your last answer wrote the tool call it wanted as text, which asks for nothing — put the call in a call, and carry on where you stopped.", resume: "tool-text" },
+  { text: "Carry on where you left off. Your last answer failed with a model or engine error, not an end of the work; the work is still in hand. Pick up where you stopped.", resume: "model-error" },
 ];
+
+/** Whose line a portal carry-on is; mirrors the kinds the server records. */
+type ResumeKind = "compaction" | "cut-off" | "silent" | "tool-text" | "model-error";
+
+const PORTAL_KINDS = new Set<string>(["compaction", "cut-off", "silent", "tool-text", "model-error"]);
 
 
 /** Whether two values hold the same, however deep: what an entry is made of is strings, numbers and plain objects. */

@@ -246,7 +246,11 @@ test("a run that ended with nothing said carries on in its own session", async (
     assert.equal(sessions.cutOffResumePending.has(a), true, "the gap is marked");
     assert.equal(sessions.isActive(a), true, "the idle session still holds the room");
     assert.equal(sessions.isCompacting(a), true, "and is not read as ended");
-    assert.deepEqual(sessions.cutOffAnswer.get(a), { output: 26, wrote: false }, "the answer's shape is the test");
+    assert.deepEqual(
+      sessions.cutOffAnswer.get(a),
+      { output: 26, wrote: false, askedAsText: false, errorMessage: "" },
+      "the answer's shape is the test",
+    );
 
     await flush();
     assert.equal(aPi.carries(PICK_UP), 1, "the turn was carried on");

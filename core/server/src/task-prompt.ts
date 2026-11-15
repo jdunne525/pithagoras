@@ -25,6 +25,18 @@ interface BuildPromptOptions {
   additionalInstructions?: string;
   /** max_attempts, surfaced in the Completion Requirement warning. */
   maxAttempts?: number;
+  /**
+   * Which attempt of the Task this prompt is, 1 for the first. Above 1 the prompt
+   * says so and points at the work an earlier attempt may have left behind.
+   *
+   * An attempt that ends on a model or engine error leaves its edits where they were
+   * written — the workspace is the folder, not the session — and the next attempt has
+   * historically begun by re-reading the repo from nothing. BlastRunHero's
+   * `Brutes should shoot` Task (c67318ec, 15 November) spent 3 hours 18 minutes that
+   * way across five sessions, and the fifth one's own report says the implementation
+   * was already in the tree and uncommitted: what it had to do was find it.
+   */
+  attemptNumber?: number;
 }
 
 /** Assemble the CodeLoop prompt for a Task. */
@@ -36,6 +48,7 @@ export function buildTaskPrompt(
     projectInstructions = "",
     additionalInstructions = "",
     maxAttempts = DEFAULT_MAX_ATTEMPTS,
+    attemptNumber = 1,
   } = opts;
 
   let prompt =
@@ -45,6 +58,20 @@ export function buildTaskPrompt(
     `## Working Alone\n\nYou work on your own: no question is put to the person while you run, and none is answered. ` +
     `Read the task as it is written, decide everything it leaves open yourself, and write down what you decided and why.\n\n` +
     `## Specific Task\n\nTask: ${task.title}\n\nDescription:\n${task.description ?? ""}`;
+
+  // An attempt above the first is a second try at the same work in the same folder, and
+  // the work of the first is sitting in that folder. Said plainly, because without it
+  // every retry reads the repo from nothing and re-does what is already written.
+  if (attemptNumber > 1) {
+    prompt +=
+      `\n\n## This Is Attempt ${attemptNumber}\n\nAn earlier attempt at this task ran in the same folder and ` +
+      `may have left its work there, uncommitted and unfinished. Before you write anything, look at what is ` +
+      `already in the folder: ` +
+      '`git status` and `git diff`' +
+      `, the files the task names, and any notes or plan an earlier attempt left. Carry on from what you find ` +
+      `rather than starting it again, and do not redo work that is already done. What an earlier attempt wrote ` +
+      `is not reviewed yet: treat it as yours to check, revise and commit.`;
+  }
 
   if (projectInstructions.trim()) {
     prompt += `\n\n## Project Workflow\n\n${projectInstructions.trim()}`;

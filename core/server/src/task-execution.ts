@@ -133,10 +133,12 @@ export const startTask = (taskId: string): { task: db.TaskRow; attempt: db.TaskA
   // Kick off the autonomous work. The CodeLoop prompt marks the session
   // running itself; listen first so the guard only settles the attempt after
   // that. It wraps the task in the shared framing plus the completion marker,
-  // warning about the server-wide attempt budget.
+  // warning about the server-wide attempt budget. An attempt above the first is
+  // told what it is, so it reads the folder's own state before it re-does work an
+  // earlier attempt left uncommitted (see `buildTaskPrompt`).
   void sessions.prompt(
     sessionId,
-    buildTaskPrompt(task, { maxAttempts: DEFAULT_MAX_ATTEMPTS, projectInstructions }),
+    buildTaskPrompt(task, { maxAttempts: DEFAULT_MAX_ATTEMPTS, projectInstructions, attemptNumber: attempt.attempt_number }),
   )
     .catch((e: unknown) => {
       // Held because something else holds the room under the single-active
