@@ -454,6 +454,29 @@ const modelKeyOfState = (state: unknown): string => {
 };
 
 /**
+ * What happens when a message starts a run in a chat this server did not start.
+ *
+ * The autonomous Task execution module hands these to the chat path (see
+ * `setTaskRunBridge`): a chat made for a Task carries that Task in the database,
+ * not in this manager's memory, so a chat resumed after a restart belongs to a
+ * Task the running server has never heard of. The chat path says only that a line
+ * reached pi, or did not; what a Task is, and what its end means, stays in that
+ * module.
+ *
+ * Empty until it is wired: a server that never loads the execution module — a
+ * test of the chat path alone — runs ordinary chats with nothing to take over.
+ */
+let taskRunAdopt: (sessionId: string) => void = () => {};
+let taskRunRelease: (sessionId: string) => void = () => {};
+
+export function setTaskRunBridge(
+  bridge: { adopt: (sessionId: string) => void; release: (sessionId: string) => void },
+): void {
+  taskRunAdopt = bridge.adopt;
+  taskRunRelease = bridge.release;
+}
+
+/**
  * Owns every running pi process.
  *
  * The important property: a run is tied to this manager, not to any HTTP
@@ -3867,8 +3890,18 @@ class SessionManager extends EventEmitter {
     // and isBusy() reads false for however long pi takes to answer.
     this.mark(sessionId, "running");
     const logged = { images: false, queued: false, command: false, failedOnLine: false };
+    // Before the line reaches pi, so a chat that is an autonomous Task's run and
+    // was resumed into its own conversation has its brief back where it reads it —
+    // the restart took the previous attempt's file with it, and the file is what
+    // tells a run the marker it has to finish on — and so the Task is watched from
+    // this run onward (task-execution.ts).
+    taskRunAdopt(sessionId);
     try {
-      return await this.submit(sessionId, message, options, insideEdit, logged, stopsBefore);
+      const sent = await this.submit(sessionId, message, options, insideEdit, logged, stopsBefore);
+      // A Stop got in front of the line: nothing started, so whatever was taken up
+      // for it above is given back rather than left as a run that never went.
+      if (!sent) taskRunRelease(sessionId);
+      return sent;
     } catch (e) {
       const busy = this.live.get(sessionId)?.client.isIdle?.() === false;
       // A command refused: its line in the chat says so, and why. The chat

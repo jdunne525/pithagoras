@@ -1,5 +1,5 @@
 import { nanoid } from "nanoid";
-import { sessions, PromptQueuedForSingleActive } from "./session-manager.js";
+import { sessions, setTaskRunBridge, PromptQueuedForSingleActive } from "./session-manager.js";
 import { EXECUTOR_KIND } from "./executor-kind.js";
 import * as db from "./db.js";
 import * as tasks from "./tasks.js";
@@ -36,6 +36,15 @@ interface TaskRun {
   /** Where this attempt's brief file is, as its agent reads it; unset when it could
       not be written, and then the prompt holds the instructions itself. */
   briefPath?: string;
+  /** Where the Task goes when this run ends without the marker, for a run the
+      person resumed rather than one the portal started: the state the chat was in
+      before the resume. A resume is not the queue's attempt, so it does not put
+      the Task back on the queue — that would have a loop begin it again in a
+      brand-new session over the chat the person was working in. */
+  resumeTo?: db.TaskStatus;
+  /** The Task's attempt count before this run was opened, to put back where an
+      adoption never got as far as running. */
+  prevAttempts?: number;
   /** Set once the run has settled, whether by ending or stopping, so a later
       stop or second end cannot double-count it. */
   ended: boolean;
@@ -76,6 +85,47 @@ export const hasLiveTaskRun = (): boolean =>
 /** Remove a run from the registry without touching its settled status. */
 const forget = (run: TaskRun): void => {
   runs.delete(run.sessionId);
+};
+
+/**
+ * Write one attempt's brief, and say where its agent reads it.
+ *
+ * The brief (task-brief.ts) holds the standing instructions of the attempt — the
+ * task, the project's own Task instructions, and the marker the run has to finish
+ * on — in a file no compaction can rewrite. Project instructions (§14 / Phase 7)
+ * are read straight from the folder for every autonomous run and kept out of
+ * AGENTS.md, so they never leak into ordinary chats. A failure to read them, or to
+ * write the file, must not lose the attempt: the prompt then carries the same words.
+ *
+ * Written before the message goes in, so the session's first load of its prompt
+ * already points at it — which is why a resumed chat gets it from here too, before
+ * the line the person typed reaches pi.
+ */
+const writeRunBrief = (
+  sessionId: string,
+  task: db.TaskRow,
+  attemptNumber: number,
+  executor: string = EXECUTOR_KIND,
+): { briefPath?: string; projectInstructions: string } => {
+  let projectInstructions = "";
+  try {
+    projectInstructions = readTaskInstructions(task.workspace);
+  } catch (e) {
+    console.error(`[portal] task ${task.id}: could not read project instructions:`, e);
+  }
+  const seen = briefSeenBy(sessionId, executor);
+  const written = writeBrief(
+    briefFileOf(sessionId),
+    buildTaskBrief(task, {
+      maxAttempts: DEFAULT_MAX_ATTEMPTS,
+      projectInstructions,
+      attemptNumber,
+      // Where the agent will read it, which is not where the portal wrote it for a
+      // container's pi: that one has the attempt's brief folder mounted beside its workspace.
+      briefPath: seen,
+    }),
+  );
+  return written ? { briefPath: seen, projectInstructions } : { projectInstructions };
 };
 
 /**
@@ -123,39 +173,9 @@ export const startTask = (taskId: string): { task: db.TaskRow; attempt: db.TaskA
   // judges complete-or-failed.
   trackEnd(run);
 
-  // Project-specific Task instructions (§14 / Phase 7): read straight from the folder for
-  // every autonomous run, and put in the brief the attempt works from (task-brief.ts) rather
-  // than only in its prompt, so a compaction cannot take them out of the run. Kept out of
-  // AGENTS.md, so they never leak into ordinary chats. A failure to read them must not stop
-  // the Task.
-  let projectInstructions = "";
-  try {
-    projectInstructions = readTaskInstructions(task.workspace);
-  } catch (e) {
-    console.error(`[portal] task ${taskId}: could not read project instructions:`, e);
-  }
-
-  // The brief: the standing instructions of this attempt, in a file the attempt can read
-  // (task-brief.ts). A compaction summarizes the conversation — the prompt this run opens
-  // with goes into it — and a Task left without the Completion Requirement does not invent
-  // one: it finishes without the marker, the attempt is written failed, and a fresh session
-  // begins the Task from nothing. The file is those same words where no compaction can reach
-  // them, and the run's carry-on line below names it again at the moment a compaction is what
-  // ended the turn. Written before the prompt, so the session's first load of its prompt
-  // already points at it (session-manager.ts says the pointer from then on).
-  const briefPath = writeBrief(
-    briefFileOf(sessionId),
-    buildTaskBrief(task, {
-      maxAttempts: DEFAULT_MAX_ATTEMPTS,
-      projectInstructions,
-      attemptNumber: attempt.attempt_number,
-      // Where the agent will read it, which is not where the portal wrote it for a
-      // container's pi: that one has the attempt's brief folder mounted beside its workspace.
-      briefPath: briefSeenBy(sessionId, EXECUTOR_KIND),
-    }),
-  )
-    ? briefSeenBy(sessionId, EXECUTOR_KIND)
-    : undefined;
+  // The brief, and with it the project's own Task instructions: written before the
+  // prompt, so the session's first load of its prompt already points at them.
+  const { briefPath, projectInstructions } = writeRunBrief(sessionId, task, attempt.attempt_number);
   // Kept on the run as well: a turn a compaction cut short is carried on by a line of
   // ours, and that line has to name the file the model no longer holds.
   run.briefPath = briefPath;
@@ -282,12 +302,19 @@ const carryLine = (briefPath?: string): string =>
  * mistaken for a stop, so the fallback only settles once it has first seen the
  * session persist as running.
  */
-function trackEnd(run: TaskRun): void {
+function trackEnd(run: TaskRun, started = false): void {
   // Confirmed working: the run has been seen transitioning to running, whether
   // by the live event or by the persisted status. Before this, any non-running
   // status (notably the fresh session's starting idle) is ignored. run.ended is
   // deliberately left to finishSettled: see settle().
-  let confirmedRunning = false;
+  //
+  // A run this process did not start — a chat the person resumed after a restart
+  // (see adoptResumedRun) — is taken over with the message already on its way to
+  // pi, so its first running transition can be missed by the listener below and
+  // its last answer can land before the fallback's first look at the room. It is
+  // confirmed working at once, which is what keeps a resumed run that answers
+  // quickly from being left unsettled forever with the queue's gate closed on it.
+  let confirmedRunning = started;
   let settled = false;
   let watchTimer: NodeJS.Timeout | undefined;
 
@@ -533,13 +560,18 @@ const finishSettled = async (run: TaskRun): Promise<void> => {
       tasks.setTaskStatus(run.taskId, "completed");
       return;
     }
-    // No completion marker: the queue loop runs this same Task again while
+    // No completion marker. A run the portal started goes back to pending while
     // attempts under the server-wide default remain — it is the first Task not
-    // finished, so it is the one taken — and otherwise the Task is marked
-    // failed, which the loop stalls on rather than passing. Never left hanging.
+    // finished, so the queue loop runs this same Task again — and otherwise the
+    // Task is marked failed, which the loop stalls on rather than passing. A run
+    // the person resumed by sending a line into its own chat goes back where that
+    // resume found it instead: the queue has no part in a chat the person is
+    // working in, and moving a stopped or failed Task back onto the queue over a
+    // resume that did not finish would have a loop begin it again in a brand-new
+    // session beside the chat it was just in. Never left hanging.
     tasks.setTaskStatus(
       run.taskId,
-      task.attempts < DEFAULT_MAX_ATTEMPTS ? "pending" : "failed",
+      run.resumeTo ?? (task.attempts < DEFAULT_MAX_ATTEMPTS ? "pending" : "failed"),
     );
   } finally {
     // The Task's outcome is written: the run is over, and the queue's gate may
@@ -548,3 +580,126 @@ const finishSettled = async (run: TaskRun): Promise<void> => {
     judging.delete(run.taskId);
   }
 };
+
+/**
+ * Take over a Task's chat that this process did not start — the run resumed from
+ * the last one.
+ *
+ * What notices a Task's run reaching its end lives in the `runs` map above, and
+ * a restart takes that memory with it. The chat does not lose its parent: the
+ * attempt row that points at it (`task_attempts.session_id`, db.ts) is in the
+ * database, so a chat left `interrupted` still says which Task it was made for.
+ * Until now nothing read that back — a person who resumed such a chat by sending
+ * a line into it got the work carried on in the same conversation, and the run
+ * then ended with its answer in the transcript while the Task still read what
+ * recovery had left it: pending, or failed. Nothing closed it, because nothing
+ * was listening for this run at all.
+ *
+ * So a message that starts a run in a chat this process never registered is read
+ * back from the attempt row here and watched like a run it did start: the Task
+ * and a new attempt of it go running on the same conversation, the brief is
+ * written again for that attempt — which is how a resumed chat is told the marker
+ * it has to finish on, the restart having taken the previous attempt's file with
+ * it — and `trackEnd` judges the end exactly as it judges a run started from the
+ * Tasks view. The marker closes the parent Task; anything else settles the
+ * attempt and leaves the Task where the resume found it.
+ *
+ * A chat with no attempt pointing at it is an ordinary chat and is left alone. A
+ * child chat works under its parent's run and is left alone too — its own end is
+ * nobody's Task, and its parent's run is watched on its own session. A Task that
+ * already has a live attempt is not started a second time beside it, and one
+ * already completed has nothing left to close.
+ *
+ * Nothing here is worth losing the person's message over, so a failure to read or
+ * write the Task is said and the chat is left to run unwatched; the next message
+ * into it is adopted again.
+ */
+export const adoptResumedRun = (sessionId: string): TaskRun | undefined => {
+  try {
+    return takeOverResumedRun(sessionId);
+  } catch (e) {
+    console.error(`[portal] could not take over a resumed Task run in chat ${sessionId}:`, e);
+    return undefined;
+  }
+};
+
+const takeOverResumedRun = (sessionId: string): TaskRun | undefined => {
+  const session = db.getSession(sessionId);
+  // A child chat is part of the run that made it, not an attempt of its own.
+  if (!session || session.parent_id) return undefined;
+  // Already watched, whether by the portal's own start or by an earlier resume.
+  if (runs.has(sessionId)) return undefined;
+  const parent = db.taskRunOf(sessionId);
+  if (!parent) return undefined;
+  // Read from the row, not from the service: a Task that is gone is nobody's
+  // parent, and a chat's message must not fail over a lookup of one.
+  const task = db.getTask(parent.taskId);
+  if (!task || task.status === "completed") return undefined;
+  if (liveRunOf(task.id)) return undefined;
+  // A run of this Task that has ended and is being judged: its outcome is on its
+  // way to being written, and a resume taken up in that window would have the two
+  // write over each other — one attempt completed and the Task closed over a chat
+  // that has work going in it. The judgement is short; this message simply starts
+  // no attempt of its own, and the next one is adopted.
+  if (judging.has(task.id)) return undefined;
+
+  const prevAttempts = task.attempts;
+  // Where the Task goes if this run ends without the marker. A Task that read
+  // working with nothing working it is the odd case — a run the portal started
+  // settles itself — and such a Task goes back to pending rather than being left
+  // reading working by the resume that only visited it.
+  const resumeTo = task.status === "running" ? "pending" : task.status;
+  const { attempt } = tasks.startAttempt(task.id, sessionId);
+  const run: TaskRun = {
+    taskId: task.id,
+    attemptId: attempt.id,
+    sessionId,
+    // Read forward from the resume, as every other attempt reads forward from its
+    // own prompt: what the chat said before the restart is the earlier attempt's
+    // answer, and that attempt is already written — recovery judged it at startup
+    // (task-recovery.ts reads the transcript for exactly that).
+    startSeq: db.latestSeq(),
+    ended: false,
+    resumeTo,
+    prevAttempts,
+  };
+  runs.set(sessionId, run);
+  // The brief as this chat's own executor reads it: a container's pi has the
+  // folder mounted beside its workspace and cannot open the portal's path.
+  run.briefPath = writeRunBrief(sessionId, task, attempt.attempt_number, session.executor).briefPath;
+  // The message is already on its way, so the run counts as working from here.
+  trackEnd(run, true);
+  console.log(`[portal] task ${task.id} resumed in chat ${sessionId} as attempt ${attempt.attempt_number}`);
+  return run;
+};
+
+/**
+ * Undo a takeover whose message never reached pi.
+ *
+ * A line a Stop got in front of starts no run, so the attempt opened for it is
+ * taken back out rather than left in the Task's history as a run that never went,
+ * and the Task goes back to the state the resume found it in. The watcher is
+ * already watching; `ended` is what it checks before doing anything, so there is
+ * nothing to unwire.
+ */
+export const abandonResumedRun = (sessionId: string): void => {
+  try {
+    const run = runs.get(sessionId);
+    if (!run || run.resumeTo === undefined) return;
+    run.ended = true;
+    forget(run);
+    db.deleteAttempt(run.attemptId);
+    removeBrief(sessionId);
+    db.updateTaskFields(run.taskId, { status: run.resumeTo, attempts: run.prevAttempts ?? 0 });
+  } catch (e) {
+    console.error(`[portal] could not hand back a resumed Task run in chat ${sessionId}:`, e);
+  }
+};
+
+// The SessionManager hands these to itself: it is the one who knows a message has
+// reached pi, and the Task's own chat is where a person resumes a run this server
+// never started. Wired here rather than imported, so the execution module stays
+// the only place the Task's lifecycle is decided and nothing in the chat path has
+// to know about Tasks.
+setTaskRunBridge({ adopt: adoptResumedRun, release: abandonResumedRun });
+

@@ -1,6 +1,7 @@
 import { getSetting, putSetting, listAllRunningTasks } from "./db.js";
 import * as tasks from "./tasks.js";
 import { removeBrief } from "./task-brief.js";
+import { hasCompletedPromiseInSession } from "./task-completion.js";
 import { activeLoopWorkspaces, clearPersistedLoop, startLoop } from "./task-queue.js";
 
 /**
@@ -43,7 +44,15 @@ export function setTaskLoopResumeEnabled(enabled: boolean): void {
  * — if any is still flagged running, because the crash took the flag with it —
  * is recorded as failed (the run ended abnormally rather than by a user stop),
  * and the Task itself is returned to `pending` so it can be Rerun/Run again.
- * Attempts are kept as history. Returns how many Tasks were reconciled.
+ * Attempts are kept as history.
+ *
+ * One thing the crash cannot take: what the run wrote. A run that printed the
+ * completion marker and died before anyone judged it is a Task that finished,
+ * whatever its status row still says — the transcript is in the database, and
+ * completion detection reads it the same way a settling run does. So the dead
+ * attempt is read for the marker first, and a Task that wrote one is closed here
+ * instead of being sent back onto the queue to be begun again from nothing in a
+ * fresh session. Returns how many Tasks were reconciled.
  */
 export function reconcileInterruptedTasks(): number {
   const running = listAllRunningTasks();
@@ -54,10 +63,17 @@ export function reconcileInterruptedTasks(): number {
     // user stop — so the history does not show a perpetually running attempt.
     const stuck = attempts.find((a) => a.status === "running") ?? attempts.at(-1);
     if (stuck && stuck.status === "running") {
-      tasks.finishAttempt(stuck.id, "failed");
+      const wrote = stuck.session_id ? hasCompletedPromiseInSession(stuck.session_id) : false;
+      tasks.finishAttempt(stuck.id, wrote ? "completed" : "failed");
       // The brief of a run no longer alive. Nothing was left to remove it with: a
-      // crash takes the attempt's own cleanup with it.
+      // crash takes the attempt's own cleanup with it. A chat resumed later gets a
+      // brief of its own written for the attempt that resume is (task-execution.ts).
       if (stuck.session_id) removeBrief(stuck.session_id);
+      if (wrote) {
+        // It said it was done. Closed, not queued again.
+        tasks.setTaskStatus(task.id, "completed");
+        continue;
+      }
     }
     // Back onto the queue, ready to run again. Never leaves the Task running.
     // (Not Rerun: that refuses a still-running Task, which this one is.)

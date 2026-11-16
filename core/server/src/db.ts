@@ -4598,6 +4598,26 @@ export function getAttempt(id: string): TaskAttemptRow | undefined {
 }
 
 /**
+ * The autonomous Task a chat was made for, newest attempt first, from the record
+ * that says so: the attempt row pointing at it.
+ *
+ * This is the durable half of a run's parentage. What watches a Task's run lives
+ * in this process's memory and goes with a restart; the attempt row does not, so
+ * a chat reopened afterwards still knows the Task it belongs to and can be taken
+ * up again by it (task-execution.ts, adoptResumedRun). A chat the person started
+ * has no attempt against it and answers undefined.
+ */
+export function taskRunOf(sessionId: string): { taskId: string; attemptId: string } | undefined {
+  const row = getDb()
+    .prepare(
+      `SELECT task_id, id FROM task_attempts WHERE session_id = ?
+       ORDER BY attempt_number DESC, created_at DESC LIMIT 1`,
+    )
+    .get(sessionId) as { task_id: string; id: string } | undefined;
+  return row ? { taskId: row.task_id, attemptId: row.id } : undefined;
+}
+
+/**
  * Whether a chat is one an autonomous Task ran in: an attempt points at it. Every run of a Task goes through
  * task-execution.ts, which makes the chat and opens the attempt on it — the first, each retry and a Rerun — so the
  * attempt row is the record of what the chat was made for, and a chat the person started has none. Read where a
@@ -4631,6 +4651,16 @@ export function updateAttemptFields(id: string, fields: {
 
 export function deleteAttemptsByTask(taskId: string): void {
   getDb().prepare("DELETE FROM task_attempts WHERE task_id = ?").run(taskId);
+}
+
+/**
+ * Take one attempt row out. Only for an attempt that was opened and never ran —
+ * a chat resumed into a Task whose message then never reached pi. Left in, the
+ * Task's history would say a run went that nothing went, and its attempt count
+ * would carry it.
+ */
+export function deleteAttempt(id: string): void {
+  getDb().prepare("DELETE FROM task_attempts WHERE id = ?").run(id);
 }
 
 /** The highest attempt number so far for a Task, so the next one is sequential. */
